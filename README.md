@@ -94,6 +94,10 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   itself once shown. An open
   SteamVR dashboard keeps the session at VISIBLE (not FOCUSED) and OpenXR then delivers no gaze, so
   `run.sh` runs `vrcmd --hidedashboard` after launch. Log line `eye gaze tracked in N% of frames`.
+- Gaze accuracy check: `run.sh --gaze-cal 1.5` (no detector) shows 9 world-fixed dots 15° apart, 1.5 m away,
+  one at a time with a countdown ring. Per dot it logs the median gaze − target offset (head frame, from the
+  gaze origin) and its spread, then the mean offset and error; raw samples go to `/tmp/gaze_cal.csv`. It starts
+  once gaze has been tracked for 4 s, and at the end shows the dots, where your gaze landed, and a live cursor.
 
 Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below):
 

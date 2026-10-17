@@ -10,6 +10,7 @@
 // thick outlines with a label.
 //
 // Usage: yoloxr [--no-xr] [--dump DIR] [--size 480] [--hfov 100] [--conf 0.35] [--latency-ms 8]
+//        yoloxr --gaze-cal 1.5   (9-dot eye gaze accuracy check, dots 1.5 m away; no detector)
 #define XR_USE_GRAPHICS_API_VULKAN
 #define XR_USE_TIMESPEC
 #include <fcntl.h>
@@ -94,6 +95,7 @@ struct Options {
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
     float focus_margin = 2;      // show a box (and label) only while the gaze hits the box grown by this many label heights
     bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
+    float gaze_cal_m = 0;        // > 0: run the 9-dot gaze calibration with the dots this far away instead
 };
 static Options g_opt;
 
@@ -507,25 +509,51 @@ static LabelLayout layout_label(const XrVector3f* corners, int cls, float score,
     return l;
 }
 
+// One line of text centered on `c`, `height` meters tall, in the plane of unit vectors right/up.
+static LabelLayout layout_text(const char* text, XrVector3f c, XrVector3f right, XrVector3f up, float height) {
+    LabelLayout l;
+    snprintf(l.text, sizeof l.text, "%s", text);
+    l.tw = float(stb_easy_font_width(l.text));
+    l.right = right;
+    l.up = up;
+    l.scale = height / l.th;
+    l.origin = add(c, add(mul(right, -l.tw / 2 * l.scale), mul(up, l.th / 2 * l.scale)));
+    return l;
+}
+
+static void push_label(std::vector<Vertex>& vs, LabelLayout& l, const float rgb[3], float alpha) {
+    static char buf[64 * 1024];
+    int quads = stb_easy_font_print(0, 0, l.text, nullptr, buf, sizeof buf);
+    XrVector3f bg_rect[4];
+    l.rect(bg_rect);
+    float bg[4] = {0, 0, 0, 0.55f * alpha};
+    push_quad(vs, bg_rect[0], bg_rect[1], bg_rect[2], bg_rect[3], bg);
+    float fg[4] = {rgb[0], rgb[1], rgb[2], alpha};
+    const float* q = (const float*)buf;  // 4 verts per quad: x, y, z, color(4 bytes)
+    for (int i = 0; i < quads; i++, q += 16)
+        push_quad(vs, l.at(q[0], q[1]), l.at(q[4], q[5]), l.at(q[8], q[9]), l.at(q[12], q[13]), fg);
+}
+
 static void push_box(std::vector<Vertex>& vs, const XrVector3f* corners, int cls, float score, float alpha, XrVector3f eye) {
     float rgba[4] = {0, 0, 0, alpha};
     color_for(cls, rgba);
     float dist = len(sub(add(corners[0], corners[2]), mul(eye, 2))) / 2;
     float width = 0.004f * dist;  // ~0.23 degrees regardless of distance
     for (int k = 0; k < 4; k++) push_line(vs, corners[k], corners[(k + 1) % 4], eye, width, rgba);
-
     LabelLayout l = layout_label(corners, cls, score, eye);
-    static char buf[64 * 1024];
-    int quads = stb_easy_font_print(0, 0, l.text, nullptr, buf, sizeof buf);
-    auto at = [&](float x, float y) { return l.at(x, y); };
-    XrVector3f bg_rect[4];
-    l.rect(bg_rect);
-    float bg[4] = {0, 0, 0, 0.55f * alpha};
-    push_quad(vs, bg_rect[0], bg_rect[1], bg_rect[2], bg_rect[3], bg);
-    float fg[4] = {rgba[0], rgba[1], rgba[2], alpha};
-    const float* q = (const float*)buf;  // 4 verts per quad: x, y, z, color(4 bytes)
-    for (int i = 0; i < quads; i++, q += 16)
-        push_quad(vs, at(q[0], q[1]), at(q[4], q[5]), at(q[8], q[9]), at(q[12], q[13]), fg);
+    push_label(vs, l, rgba, alpha);
+}
+
+// Ring from radius r0 to r1 around c (r0 = 0: disc) in the plane of unit vectors x/y, covering `frac` of a turn
+// clockwise from 12 o'clock.
+static void push_ring(std::vector<Vertex>& vs, XrVector3f c, XrVector3f x, XrVector3f y, float r0, float r1, float frac,
+                      const float rgba[4]) {
+    int n = int(std::ceil(48 * frac));
+    auto at = [&](int i, float r) {
+        float a = 2 * float(M_PI) * frac * i / n;
+        return add(c, add(mul(x, r * std::sin(a)), mul(y, r * std::cos(a))));
+    };
+    for (int i = 0; i < n; i++) push_quad(vs, at(i, r0), at(i, r1), at(i + 1, r1), at(i + 1, r0), rgba);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -603,6 +631,18 @@ class App {
     uint64_t gaze_frames_ = 0, gaze_tracked_ = 0, gaze_stat_ns_ = 0;
     void init_gaze();
     bool locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir);
+
+    // 9-dot gaze calibration (--gaze-cal)
+    struct CalSample { float t, off[2]; XrVector3f origin; };  // s into the dot, gaze - target (deg), gaze origin in VIEW
+    int cal_step_ = -1;                     // -1: intro, 0..8: showing dot kCalOrder[step], 9: done
+    uint64_t cal_t0_ = 0;                   // start of the current step
+    XrPosef cal_frame_{{0, 0, 0, 1}, {0, 0, 0}};  // dots are world-fixed relative to the head pose when they started
+    std::vector<CalSample> cal_samples_[9];
+    float cal_off_[9][2];                   // per-dot median offset (deg), NAN without data
+    char cal_result_[96] = "";
+    FILE* cal_csv_ = nullptr;
+    void calibrate(XrTime t, bool tracked, XrVector3f gaze_origin, XrVector3f gaze_dir, std::vector<Vertex>& verts);
+    void cal_report();
 };
 
 // A detected object in world (LOCAL) space, smoothed across detector frames.
@@ -642,6 +682,28 @@ static float gaze_rect_score(const XrVector3f* c, XrVector3f origin, XrVector3f 
     return std::max(std::fabs(u) / (w / 2 + margin), std::fabs(v) / (h / 2 + margin));
 }
 
+// Gaze calibration grid: 3x3 dots kCalDeg apart, center first then clockwise from top-left. Each dot shows for
+// kCalDotS; samples between kCalWin0 and kCalWin1 into it (after the saccade, before the next one) count.
+static const float kCalDeg = 15, kCalIntroS = 4, kCalDotS = 2.5f, kCalWin0 = 0.8f, kCalWin1 = 2.3f;
+static const int kCalOrder[9] = {4, 0, 1, 2, 5, 8, 7, 6, 3};
+static void cal_target(int k, float out[2]) { out[0] = (k % 3 - 1) * kCalDeg; out[1] = (1 - k / 3) * kCalDeg; }
+
+// Direction v (app space) as angles in degrees in the head frame: x = atan(right/forward), y = atan(up/forward).
+static void head_angles(XrQuaternionf head, XrVector3f v, float out[2]) {
+    XrQuaternionf inv{-head.x, -head.y, -head.z, head.w};
+    XrVector3f h;
+    XrQuaternionf_RotateVector3f(&h, &inv, &v);
+    out[0] = std::atan2(h.x, -h.z) * 180 / float(M_PI);
+    out[1] = std::atan2(h.y, -h.z) * 180 / float(M_PI);
+}
+
+// Point at head-frame angles (ax, ay) degrees on the plane `dist` ahead of the pose f.
+static XrVector3f cal_point(XrPosef f, float ax, float ay, float dist) {
+    XrVector3f p{std::tan(ax * float(M_PI) / 180) * dist, std::tan(ay * float(M_PI) / 180) * dist, -dist}, r;
+    XrQuaternionf_RotateVector3f(&r, &f.orientation, &p);
+    return add(f.position, r);
+}
+
 static int selftest() {
     // 1 m box, 2 m ahead (TL, TR, BR, BL), viewed from the origin; gaze aimed at points on the box plane.
     const XrVector3f box[4] = {{-0.5f, 0.5f, -2}, {0.5f, 0.5f, -2}, {0.5f, -0.5f, -2}, {-0.5f, -0.5f, -2}};
@@ -666,6 +728,23 @@ static int selftest() {
     XrVector3f at_small = norm({0.3f, 0.1f, -2});
     bool ok = gaze_rect_score(small, o, at_small, 0.1f) < gaze_rect_score(box, o, at_small, 0.1f);
     printf("%s %-32s\n", ok ? "ok  " : "FAIL", "nested small box scores better");
+    fails += !ok;
+    // Gaze calibration: dots placed from a tilted head read back at their grid angles; a gaze 1 deg to the
+    // right of the center dot reads +1 deg x.
+    XrVector3f ax = norm({1, 2, 3});
+    float s = std::sin(0.35f);
+    XrPosef head{{ax.x * s, ax.y * s, ax.z * s, std::cos(0.35f)}, {0.1f, 1.6f, -0.3f}};
+    float worst = 0, a[2], tgt[2];
+    for (int k = 0; k < 9; k++) {
+        cal_target(k, tgt);
+        head_angles(head.orientation, sub(cal_point(head, tgt[0], tgt[1], 1.5f), head.position), a);
+        worst = std::max({worst, std::fabs(a[0] - tgt[0]), std::fabs(a[1] - tgt[1])});
+    }
+    XrVector3f right1{std::sin(float(M_PI) / 180), 0, -std::cos(float(M_PI) / 180)}, g;
+    XrQuaternionf_RotateVector3f(&g, &head.orientation, &right1);
+    head_angles(head.orientation, g, a);
+    ok = worst < 1e-3f && std::fabs(a[0] - 1) < 1e-3f && std::fabs(a[1]) < 1e-3f;
+    printf("%s %-32s worst %.5f, right (%.4f %.4f)\n", ok ? "ok  " : "FAIL", "gaze-cal grid angles", worst, a[0], a[1]);
     fails += !ok;
     return fails ? 1 : 0;
 }
@@ -1169,6 +1248,150 @@ void App::animate_tracks() {
                   tracks_.end());
 }
 
+static const char* kCalCsv = "/tmp/gaze_cal.csv";
+
+// --gaze-cal: show the dots one at a time with a countdown ring, record gaze - target, then show the result.
+// Offsets are measured in the head frame from the gaze origin, against world-fixed dots, so head motion during
+// a dot doesn't count as gaze error (but gaze/head timing mismatches do, as they would for the boxes).
+void App::calibrate(XrTime t, bool tracked, XrVector3f go, XrVector3f gd, std::vector<Vertex>& verts) {
+    const float d = g_opt.gaze_cal_m, deg = d * float(M_PI) / 180;  // ~1 degree in meters at the dots
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION};
+    XR_CHECK(xrLocateSpace(view_space_, app_space_, t, &head));
+    bool head_ok = head.locationFlags & XR_SPACE_LOCATION_ORIENTATION_VALID_BIT;
+    tracked = tracked && head_ok;
+    uint64_t now = now_ns();
+    if (!cal_t0_) cal_t0_ = now;
+    float el = (now - cal_t0_) / 1e9f;
+    if (cal_step_ < 0) {
+        // Head-locked instructions until gaze has been tracked for kCalIntroS straight (headset on, session focused).
+        if (head_ok) cal_frame_ = head.pose;
+        if (!tracked) cal_t0_ = now;
+        else if (el > kCalIntroS) {
+            cal_step_ = 0;
+            cal_t0_ = now;
+            el = 0;
+            if ((cal_csv_ = fopen(kCalCsv, "w")))
+                fprintf(cal_csv_, "dot,t,target_x,target_y,gaze_x,gaze_y,origin_x,origin_y,origin_z\n");
+        }
+    } else if (cal_step_ < 9 && el > kCalDotS) {
+        if (++cal_step_ == 9) cal_report();
+        cal_t0_ = now;
+        el = 0;
+    }
+
+    XrVector3f x, y, ux{1, 0, 0}, uy{0, 1, 0};
+    XrQuaternionf_RotateVector3f(&x, &cal_frame_.orientation, &ux);
+    XrQuaternionf_RotateVector3f(&y, &cal_frame_.orientation, &uy);
+    const float white[4] = {1, 1, 1, 1}, dim[4] = {1, 1, 1, 0.25f}, cyan[4] = {0.3f, 0.9f, 1, 1},
+                orange[4] = {1, 0.6f, 0.1f, 1}, green[4] = {0.3f, 1, 0.3f, 0.8f};
+    if (cal_step_ < 0) {
+        LabelLayout a = layout_text("Gaze check: look at each dot until its ring runs out", cal_point(cal_frame_, 0, 2, d),
+                                    x, y, 1.3f * deg);
+        LabelLayout b = layout_text(tracked ? "Keep your head still" : "Waiting for eye tracking...",
+                                    cal_point(cal_frame_, 0, -2, d), x, y, 1.3f * deg);
+        push_label(verts, a, white, 1);
+        push_label(verts, b, white, 1);
+        return;
+    }
+    if (cal_step_ < 9) {
+        int k = kCalOrder[cal_step_];
+        float tgt[2], g[2], a[2];
+        cal_target(k, tgt);
+        XrVector3f p = cal_point(cal_frame_, tgt[0], tgt[1], d);
+        push_ring(verts, p, x, y, 0, 0.3f * deg, 1, white);
+        push_ring(verts, p, x, y, 1.1f * deg, 1.4f * deg, 1, dim);
+        push_ring(verts, p, x, y, 1.1f * deg, 1.4f * deg, 1 - el / kCalDotS, cyan);
+        if (!tracked) return;
+        head_angles(head.pose.orientation, gd, g);
+        head_angles(head.pose.orientation, sub(p, go), a);
+        XrQuaternionf inv{-head.pose.orientation.x, -head.pose.orientation.y, -head.pose.orientation.z, head.pose.orientation.w};
+        XrVector3f rel = sub(go, head.pose.position), o;
+        XrQuaternionf_RotateVector3f(&o, &inv, &rel);
+        cal_samples_[k].push_back({el, {g[0] - a[0], g[1] - a[1]}, o});
+        if (cal_csv_)
+            fprintf(cal_csv_, "%d,%.4f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.4f\n", k, el, a[0], a[1], g[0], g[1], o.x, o.y, o.z);
+        return;
+    }
+    // Done: each dot with a line to where the gaze actually landed, the summary, and a live gaze cursor.
+    for (int k = 0; k < 9; k++) {
+        float tgt[2];
+        cal_target(k, tgt);
+        XrVector3f p = cal_point(cal_frame_, tgt[0], tgt[1], d);
+        push_ring(verts, p, x, y, 0, 0.3f * deg, 1, white);
+        if (std::isnan(cal_off_[k][0])) continue;
+        XrVector3f q = cal_point(cal_frame_, tgt[0] + cal_off_[k][0], tgt[1] + cal_off_[k][1], d);
+        push_line(verts, p, q, head.pose.position, 0.1f * deg, orange);
+        push_ring(verts, q, x, y, 0, 0.25f * deg, 1, orange);
+    }
+    LabelLayout r = layout_text(cal_result_, cal_point(cal_frame_, 0, -kCalDeg - 4, d), x, y, 1.3f * deg);
+    push_label(verts, r, white, 1);
+    XrVector3f n = cross(x, y), c = cal_point(cal_frame_, 0, 0, d);  // n faces the viewer
+    float den = dot(gd, n);
+    if (tracked && den < -1e-3f) push_ring(verts, add(go, mul(gd, dot(sub(c, go), n) / den)), x, y, 0, 0.2f * deg, 1, green);
+}
+
+static float median(std::vector<float> v) {
+    std::nth_element(v.begin(), v.begin() + v.size() / 2, v.end());
+    return v[v.size() / 2];
+}
+
+// Per dot: median offset over the sample window (robust to blinks and stray saccades) and spread = median
+// distance of the samples from it. Then the mean offset over all dots (a constant bias a fixed correction
+// would remove) and the mean error with and without it.
+void App::cal_report() {
+    if (cal_csv_) fclose(cal_csv_);
+    cal_csv_ = nullptr;
+    printf("gaze-cal: dots %.2f m away; offset = gaze - target in degrees, +x right, +y up\n", g_opt.gaze_cal_m);
+    printf("gaze-cal: dot  target      offset          |off|  spread     n\n");
+    std::vector<float> ox, oy, oz;
+    float bias[2] = {}, err = 0, resid = 0;
+    int nv = 0;
+    for (int k = 0; k < 9; k++) {
+        float tgt[2];
+        cal_target(k, tgt);
+        std::vector<float> x, y, dist;
+        for (const CalSample& s : cal_samples_[k])
+            if (s.t >= kCalWin0 && s.t <= kCalWin1) {
+                x.push_back(s.off[0]);
+                y.push_back(s.off[1]);
+                ox.push_back(s.origin.x);
+                oy.push_back(s.origin.y);
+                oz.push_back(s.origin.z);
+            }
+        cal_off_[k][0] = cal_off_[k][1] = NAN;
+        if (x.size() < 10) {
+            printf("gaze-cal: %3d  (%+3.0f %+3.0f)  no gaze (%zu samples)\n", k, tgt[0], tgt[1], x.size());
+            continue;
+        }
+        float mx = median(x), my = median(y);
+        for (size_t i = 0; i < x.size(); i++) dist.push_back(std::hypot(x[i] - mx, y[i] - my));
+        cal_off_[k][0] = mx;
+        cal_off_[k][1] = my;
+        printf("gaze-cal: %3d  (%+3.0f %+3.0f)  (%+5.2f %+5.2f)  %5.2f  %5.2f  %5zu\n", k, tgt[0], tgt[1], mx, my,
+               std::hypot(mx, my), median(dist), x.size());
+        bias[0] += mx;
+        bias[1] += my;
+        err += std::hypot(mx, my);
+        nv++;
+    }
+    if (!nv) {
+        snprintf(cal_result_, sizeof cal_result_, "No gaze data");
+        printf("gaze-cal: no gaze data\n");
+        return;
+    }
+    bias[0] /= nv;
+    bias[1] /= nv;
+    err /= nv;
+    for (int k = 0; k < 9; k++)
+        if (!std::isnan(cal_off_[k][0])) resid += std::hypot(cal_off_[k][0] - bias[0], cal_off_[k][1] - bias[1]) / nv;
+    printf("gaze-cal: mean offset (%+.2f %+.2f) deg, mean error %.2f deg, %.2f deg after removing the mean offset\n",
+           bias[0], bias[1], err, resid);
+    printf("gaze-cal: gaze origin in VIEW (%.1f %.1f %.1f) mm; samples in %s\n", median(ox) * 1000, median(oy) * 1000,
+           median(oz) * 1000, kCalCsv);
+    snprintf(cal_result_, sizeof cal_result_, "Mean offset %.1f %s %.1f %s, error %.1f deg (%.1f without the offset)",
+             std::fabs(bias[0]), bias[0] >= 0 ? "right" : "left", std::fabs(bias[1]), bias[1] >= 0 ? "up" : "down", err, resid);
+}
+
 void App::render_eye(Eye& e, const XrView& view, uint32_t nverts) {
     uint32_t idx;
     XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
@@ -1251,8 +1474,8 @@ void App::render_frame() {
         // Only show the object you're looking at (eye gaze if tracked, else head forward).
         // Per-track easing keeps saccades from blinking boxes.
         XrVector3f gaze_origin = eye, gaze_dir, minus_z{0, 0, -1};
-        if (!locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir))
-            XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
+        bool gaze_tracked = locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir);
+        if (!gaze_tracked) XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
         float k_gaze = 1 - std::exp(-std::min(frame_dt_, 0.1f) / 0.15f);
         std::vector<Vertex> verts;
         // Pick the one confirmed track the gaze hits best. Hit target: the box grown on every side by
@@ -1279,6 +1502,7 @@ void App::render_frame() {
             float a = tr.alpha * tr.focus_alpha;
             if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
         }
+        if (g_opt.gaze_cal_m > 0) calibrate(fs.predictedDisplayTime, gaze_tracked, gaze_origin, gaze_dir, verts);
         uint32_t nverts = uint32_t(std::min(verts.size(), vcap_));
         memcpy(vmap_, verts.data(), nverts * sizeof(Vertex));
 
@@ -1372,6 +1596,7 @@ int main(int argc, char** argv) {
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
         else if (a == "--focus-margin") g_opt.focus_margin = float(atof(next()));
         else if (a == "--no-eye-gaze") g_opt.eye_gaze = false;
+        else if (a == "--gaze-cal") g_opt.gaze_cal_m = float(atof(next()));
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
@@ -1380,14 +1605,16 @@ int main(int argc, char** argv) {
     signal(SIGINT, [](int) { g_quit = true; });
     signal(SIGTERM, [](int) { g_quit = true; });
 
-    std::thread det([] {
-        try {
-            detect_loop();
-        } catch (const std::exception& e) {
-            fprintf(stderr, "detector: %s\n", e.what());
-            g_quit = true;
-        }
-    });
+    std::thread det;  // the calibration needs no detector (no tracks -> no boxes)
+    if (g_opt.gaze_cal_m <= 0)
+        det = std::thread([] {
+            try {
+                detect_loop();
+            } catch (const std::exception& e) {
+                fprintf(stderr, "detector: %s\n", e.what());
+                g_quit = true;
+            }
+        });
     int rc = 0;
     try {
         if (g_opt.xr) App().run();
@@ -1397,7 +1624,7 @@ int main(int argc, char** argv) {
         rc = 1;
     }
     g_quit = true;
-    det.join();
+    if (det.joinable()) det.join();
     ncnn::destroy_gpu_instance();
     return rc;
 }
