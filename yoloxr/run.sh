@@ -3,6 +3,7 @@
 # Extra args go to yoloxr, e.g. ./run.sh --no-xr --dump /tmp/dump
 cd "$(dirname "$0")"
 [ -f calib.txt ] || python3 calib.py calib.txt
+sudo -n pkill -x camserver  # left behind if the last run was SIGKILLed (e.g. by Steam)
 sudo -n build/camserver > /tmp/camserver.log 2>&1 &
 build/yoloxr "$@" &
 app=$!

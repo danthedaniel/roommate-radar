@@ -38,7 +38,8 @@ https://gitlab.steamos.cloud/devkit/steamos-devkit
 
 Other endpoints: `GET /login-name` → `steamos`, `GET /properties.json`.
 
-Fallback: Developer settings → **Set User Password**, then `ssh-copy-id steamos@frame.local`.
+SSH password auth is off (`/etc/ssh/sshd_config.d/10-no-password.conf`: `PasswordAuthentication no`), so
+pairing is the only way to add a key. Developer settings → **Set User Password** still works for local/sudo use.
 
 Root: `steamos` has passwordless sudo via `/etc/sudoers.d/zz-steamos-nopasswd`.
 
@@ -109,6 +110,18 @@ ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake -S . -B build -G Ninja 
 ssh steamos@frame.local '~/steamframe/yoloxr/run.sh --no-xr --dump /tmp/d'   # detector only, debug PGMs
 # in the headset, detached (stop: systemctl --user stop yoloxr; logs: journalctl --user -u yoloxr -f)
 ssh steamos@frame.local 'systemd-run --user --unit=yoloxr --collect --working-directory=$HOME/steamframe/yoloxr $HOME/steamframe/yoloxr/run.sh'
+```
+
+Launching from the headset: yoloxr is registered as a Steam devkit title (library entry "yoloxr"), the same way
+Valve's devkit client registers uploads, with no Steam restart. `~/devkit-game/yoloxr` symlinks to `~/steamframe/yoloxr`,
+so redeploys need no re-registration. Steam stdout goes to `~/.local/share/Steam/logs/steam_output.log`. To redo it,
+copy `client/devkit-utils` from the steamos-devkit repo to `~/devkit-utils` on the Frame, then:
+
+```sh
+ln -sfn ~/steamframe/yoloxr ~/devkit-game/yoloxr
+python3 ~/devkit-utils/steam-client-create-shortcut --parms "{\"gameid\": \"yoloxr\", \"directory\": \"$HOME/devkit-game/yoloxr\",
+  \"argv\": [\"./run.sh\"], \"env\": {}, \"settings\": {\"compat_tool\": \"\"}, \"force_appid\": \"\", \"lepton_args\": \"\"}"
+python3 ~/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr   # launch it from ssh the same way
 ```
 
 ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into `~/steamframe/third_party/ncnn`, then
