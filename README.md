@@ -101,7 +101,8 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   gaze origin) and its spread, then the mean offset and error; raw samples go to `/tmp/gaze_cal.csv`. It starts
   once gaze has been tracked for 4 s, and at the end shows the dots, where your gaze landed, and a live cursor.
 
-Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below):
+Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). The `Makefile` wraps the common ones:
+`make deploy | build | reload | launch | stop | logs | view | mirror | cams | ssh`.
 
 ```sh
 # from the Mac
