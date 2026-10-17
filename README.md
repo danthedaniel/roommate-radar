@@ -102,7 +102,7 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   once gaze has been tracked for 4 s, and at the end shows the dots, where your gaze landed, and a live cursor.
 
 Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). The `Makefile` wraps the common ones:
-`make deploy | build | reload | launch | stop | logs | view | mirror | cams | ssh`.
+`make deploy | build | reload | launch | stop | logs | stream | mirror | cams | ssh`.
 
 ```sh
 # from the Mac

@@ -1,7 +1,7 @@
 # Run from the Mac. See README for what each piece does.
 FRAME ?= steamos@frame.local
 
-.PHONY: deploy build reload launch stop logs view mirror cams ssh
+.PHONY: deploy build reload launch stop logs stream mirror cams ssh
 
 # Copy yoloxr/ to ~/steamframe on the Frame
 deploy:
@@ -26,7 +26,7 @@ logs:
 	ssh $(FRAME) 'tail -f ~/.local/share/Steam/logs/steam_output.log'
 
 # Headset view over UDP (yoloxr must be running)
-view:
+stream:
 	./udpmirror.py
 
 # Headset view over ssh (no yoloxr needed)
