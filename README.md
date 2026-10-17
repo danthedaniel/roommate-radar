@@ -107,6 +107,8 @@ Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below):
 # from the Mac
 COPYFILE_DISABLE=1 tar cf - --no-xattrs --exclude build yoloxr | ssh steamos@frame.local 'cd ~/steamframe && tar xf -'
 ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake -S . -B build -G Ninja && cmake --build build'
+# headset view while yoloxr runs: run.sh starts mirrorserver.py (UDP 5600, H.264 MPEG-TS, encodes only while watched)
+./udpmirror.py                                # ffplay; ./udpmirror.py > out.ts saves it
 # hot reload: rebuild, then restart yoloxr inside a running run.sh (Steam or systemd-run); camserver keeps running
 ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake --build build && pkill -USR1 -x run.sh'
 ssh steamos@frame.local '~/steamframe/yoloxr/run.sh --no-xr --dump /tmp/d'   # detector only, debug PGMs

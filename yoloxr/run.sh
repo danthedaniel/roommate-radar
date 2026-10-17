@@ -6,7 +6,10 @@ cd "$(dirname "$0")"
 [ -f calib.txt ] || python3 calib.py calib.txt
 sudo -n pkill -x camserver  # left behind if the last run was SIGKILLed (e.g. by Steam)
 sudo -n build/camserver > /tmp/camserver.log 2>&1 &
-trap 'kill -INT $app 2>/dev/null; wait $app; sudo -n pkill -x camserver' EXIT INT TERM
+pkill -f yoloxr/mirrorserver.py  # same
+python3 "$PWD/mirrorserver.py" > /tmp/mirrorserver.log 2>&1 &
+mirror=$!
+trap 'kill -INT $app 2>/dev/null; wait $app; kill $mirror; sudo -n pkill -x camserver' EXIT INT TERM
 trap 'reload=1; kill -INT $app' USR1
 while :; do
     reload=
