@@ -93,6 +93,7 @@ struct Options {
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
     float center_deg = 25;       // only show boxes within this angle of the gaze; fade out over the next 10°
+    bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
 };
 static Options g_opt;
 
@@ -566,8 +567,18 @@ class App {
     uint64_t seen_det_id_ = 0;
     std::vector<Track> tracks_;
     uint64_t last_anim_ns_ = 0;
+    float frame_dt_ = 0;  // seconds since the previous render frame
     void animate_tracks();
     void suppress_overlapping_tracks(XrVector3f eye, XrQuaternionf orientation);
+
+    // Eye gaze (XR_EXT_eye_gaze_interaction)
+    bool gaze_supported_ = false;
+    XrActionSet gaze_set_ = XR_NULL_HANDLE;
+    XrAction gaze_action_ = XR_NULL_HANDLE;
+    XrSpace gaze_space_ = XR_NULL_HANDLE;
+    uint64_t gaze_frames_ = 0, gaze_tracked_ = 0, gaze_stat_ns_ = 0;
+    void init_gaze();
+    bool locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir);
 };
 
 // A detected object in world (LOCAL) space, smoothed across detector frames.
@@ -580,6 +591,7 @@ struct Track {
     uint64_t last_seen_ns;
     float alpha = 0;
     float votes[80] = {};  // decaying per-class confidence; cls = argmax, so the label doesn't flip-flop
+    float gaze_alpha = 0;  // eases toward "near the gaze" so saccades don't make boxes blink
 };
 
 static XrVector3f center(const XrVector3f* c) { return mul(add(add(c[0], c[1]), add(c[2], c[3])), 0.25f); }
@@ -589,19 +601,36 @@ static float angle(XrVector3f a, XrVector3f b) {
 }
 
 void App::init_xr() {
-    const char* exts[] = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+    std::vector<const char*> exts = {XR_KHR_VULKAN_ENABLE2_EXTENSION_NAME, XR_KHR_CONVERT_TIMESPEC_TIME_EXTENSION_NAME};
+    uint32_t n = 0;
+    XR_CHECK(xrEnumerateInstanceExtensionProperties(nullptr, 0, &n, nullptr));
+    std::vector<XrExtensionProperties> avail(n, {XR_TYPE_EXTENSION_PROPERTIES});
+    XR_CHECK(xrEnumerateInstanceExtensionProperties(nullptr, n, &n, avail.data()));
+    bool has_gaze_ext = std::any_of(avail.begin(), avail.end(), [](const XrExtensionProperties& e) {
+        return !strcmp(e.extensionName, XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+    });
+    if (g_opt.eye_gaze && has_gaze_ext) exts.push_back(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME);
+
     XrInstanceCreateInfo ci{XR_TYPE_INSTANCE_CREATE_INFO};
     strcpy(ci.applicationInfo.applicationName, "yoloxr");
     ci.applicationInfo.apiVersion = XR_MAKE_VERSION(1, 0, 0);
-    ci.enabledExtensionCount = 2;
-    ci.enabledExtensionNames = exts;
+    ci.enabledExtensionCount = uint32_t(exts.size());
+    ci.enabledExtensionNames = exts.data();
     XR_CHECK(xrCreateInstance(&ci, &instance_));
 
     XrSystemGetInfo si{XR_TYPE_SYSTEM_GET_INFO};
     si.formFactor = XR_FORM_FACTOR_HEAD_MOUNTED_DISPLAY;
     XR_CHECK(xrGetSystem(instance_, &si, &system_));
 
-    uint32_t n = 0;
+    if (exts.back() == std::string(XR_EXT_EYE_GAZE_INTERACTION_EXTENSION_NAME)) {
+        XrSystemEyeGazeInteractionPropertiesEXT gp{XR_TYPE_SYSTEM_EYE_GAZE_INTERACTION_PROPERTIES_EXT};
+        XrSystemProperties sp{XR_TYPE_SYSTEM_PROPERTIES};
+        sp.next = &gp;
+        XR_CHECK(xrGetSystemProperties(instance_, system_, &sp));
+        gaze_supported_ = gp.supportsEyeGazeInteraction;
+    }
+    printf("xr: eye gaze %s\n", gaze_supported_ ? "supported" : g_opt.eye_gaze ? "unavailable, using head forward" : "disabled");
+
     XrEnvironmentBlendMode modes[8];
     XR_CHECK(xrEnumerateEnvironmentBlendModes(instance_, system_, XR_VIEW_CONFIGURATION_TYPE_PRIMARY_STEREO, 8, &n, modes));
     if (std::find(modes, modes + n, XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND) == modes + n)
@@ -725,6 +754,67 @@ void App::init_session() {
         }
     }
     printf("xr: swapchain %dx%d format %d\n", eyes_[0].w, eyes_[0].h, format_);
+    if (gaze_supported_) init_gaze();
+}
+
+void App::init_gaze() {
+    XrActionSetCreateInfo asi{XR_TYPE_ACTION_SET_CREATE_INFO};
+    strcpy(asi.actionSetName, "gaze");
+    strcpy(asi.localizedActionSetName, "Gaze");
+    XR_CHECK(xrCreateActionSet(instance_, &asi, &gaze_set_));
+    XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
+    strcpy(ai.actionName, "gaze_pose");
+    strcpy(ai.localizedActionName, "Gaze pose");
+    ai.actionType = XR_ACTION_TYPE_POSE_INPUT;
+    XR_CHECK(xrCreateAction(gaze_set_, &ai, &gaze_action_));
+
+    XrPath profile, pose_path;
+    XR_CHECK(xrStringToPath(instance_, "/interaction_profiles/ext/eye_gaze_interaction", &profile));
+    XR_CHECK(xrStringToPath(instance_, "/user/eyes_ext/input/gaze_ext/pose", &pose_path));
+    XrActionSuggestedBinding binding{gaze_action_, pose_path};
+    XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+    sb.interactionProfile = profile;
+    sb.countSuggestedBindings = 1;
+    sb.suggestedBindings = &binding;
+    XR_CHECK(xrSuggestInteractionProfileBindings(instance_, &sb));
+
+    XrSessionActionSetsAttachInfo at{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
+    at.countActionSets = 1;
+    at.actionSets = &gaze_set_;
+    XR_CHECK(xrAttachSessionActionSets(session_, &at));
+
+    XrActionSpaceCreateInfo sci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+    sci.action = gaze_action_;
+    sci.poseInActionSpace.orientation.w = 1;
+    XR_CHECK(xrCreateActionSpace(session_, &sci, &gaze_space_));
+}
+
+// Gaze ray in app space at time t. False when eye tracking isn't available or not currently tracked.
+bool App::locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir) {
+    if (!gaze_space_) return false;
+    XrActiveActionSet active{gaze_set_, XR_NULL_PATH};
+    XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+    sync.countActiveActionSets = 1;
+    sync.activeActionSets = &active;
+    if (XR_FAILED(xrSyncActions(session_, &sync))) return false;
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(gaze_space_, app_space_, t, &loc))) return false;
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
+    bool ok = (loc.locationFlags & need) == need;
+
+    gaze_frames_++;
+    gaze_tracked_ += ok;
+    uint64_t now = now_ns();
+    if (now - gaze_stat_ns_ > 5000000000ull) {
+        if (gaze_stat_ns_) printf("xr: eye gaze tracked in %.0f%% of frames\n", 100.0 * gaze_tracked_ / gaze_frames_);
+        gaze_frames_ = gaze_tracked_ = 0;
+        gaze_stat_ns_ = now;
+    }
+    if (!ok) return false;
+    XrVector3f minus_z{0, 0, -1};
+    XrQuaternionf_RotateVector3f(&dir, &loc.pose.orientation, &minus_z);
+    origin = loc.pose.position;
+    return true;
 }
 
 void App::init_pipeline() {
@@ -992,6 +1082,7 @@ void App::animate_tracks() {
     uint64_t now = now_ns();
     float dt = last_anim_ns_ ? std::min((now - last_anim_ns_) / 1e9f, 0.1f) : 0;
     last_anim_ns_ = now;
+    frame_dt_ = dt;
     float k_pos = 1 - std::exp(-dt / (g_opt.smooth_ms / 1000));
     float k_alpha = 1 - std::exp(-dt / 0.1f);
     for (Track& tr : tracks_) {
@@ -1085,13 +1176,18 @@ void App::render_frame() {
         animate_tracks();
         XrVector3f eye = mul(add(views[0].pose.position, views[1].pose.position), 0.5f);
         suppress_overlapping_tracks(eye, views[0].pose.orientation);
-        // Detections near the edge of the view come and go; only show what's near the gaze direction.
-        XrVector3f fwd, minus_z{0, 0, -1};
-        XrQuaternionf_RotateVector3f(&fwd, &views[0].pose.orientation, &minus_z);
+        // Detections near the edge of the view come and go; only show what's near where you're looking
+        // (eye gaze if tracked, else head forward). Per-track easing keeps saccades from blinking boxes.
+        XrVector3f gaze_origin = eye, gaze_dir, minus_z{0, 0, -1};
+        if (!locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir))
+            XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
+        float k_gaze = 1 - std::exp(-std::min(frame_dt_, 0.1f) / 0.15f);
         std::vector<Vertex> verts;
-        for (const Track& tr : tracks_) {
-            float off = angle(fwd, norm(sub(center(tr.shown), eye))) * 180 / float(M_PI);
-            float a = tr.alpha * std::clamp((g_opt.center_deg + 10 - off) / 10, 0.0f, 1.0f);
+        for (Track& tr : tracks_) {
+            float off = angle(gaze_dir, norm(sub(center(tr.shown), gaze_origin))) * 180 / float(M_PI);
+            float near_gaze = std::clamp((g_opt.center_deg + 10 - off) / 10, 0.0f, 1.0f);
+            tr.gaze_alpha += (near_gaze - tr.gaze_alpha) * k_gaze;
+            float a = tr.alpha * tr.gaze_alpha;
             if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
         }
         uint32_t nverts = uint32_t(std::min(verts.size(), vcap_));
@@ -1185,6 +1281,7 @@ int main(int argc, char** argv) {
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
         else if (a == "--center-deg") g_opt.center_deg = float(atof(next()));
+        else if (a == "--no-eye-gaze") g_opt.eye_gaze = false;
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
