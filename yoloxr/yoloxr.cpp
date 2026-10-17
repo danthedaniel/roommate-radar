@@ -623,13 +623,15 @@ class App {
     void animate_tracks();
     void suppress_overlapping_tracks(XrVector3f eye, XrQuaternionf orientation);
 
-    // Eye gaze (XR_EXT_eye_gaze_interaction)
+    // Pointers: controller aim rays, else eye gaze (XR_EXT_eye_gaze_interaction), else head forward
     bool gaze_supported_ = false;
-    XrActionSet gaze_set_ = XR_NULL_HANDLE;
-    XrAction gaze_action_ = XR_NULL_HANDLE;
-    XrSpace gaze_space_ = XR_NULL_HANDLE;
+    XrActionSet input_set_ = XR_NULL_HANDLE;
+    XrAction gaze_action_ = XR_NULL_HANDLE, aim_action_ = XR_NULL_HANDLE;
+    XrSpace gaze_space_ = XR_NULL_HANDLE, aim_space_[2] = {};
     uint64_t gaze_frames_ = 0, gaze_tracked_ = 0, gaze_stat_ns_ = 0;
-    void init_gaze();
+    int pointer_hands_ = -1;  // controllers tracked last frame (logged on change)
+    void init_input();
+    bool locate_ray(XrSpace space, XrTime t, XrVector3f& origin, XrVector3f& dir);
     bool locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir);
 
     // 9-dot gaze calibration (--gaze-cal)
@@ -903,53 +905,82 @@ void App::init_session() {
         }
     }
     printf("xr: swapchain %dx%d format %d\n", eyes_[0].w, eyes_[0].h, format_);
-    if (gaze_supported_) init_gaze();
+    init_input();
 }
 
-void App::init_gaze() {
+void App::init_input() {
     XrActionSetCreateInfo asi{XR_TYPE_ACTION_SET_CREATE_INFO};
-    strcpy(asi.actionSetName, "gaze");
-    strcpy(asi.localizedActionSetName, "Gaze");
-    XR_CHECK(xrCreateActionSet(instance_, &asi, &gaze_set_));
+    strcpy(asi.actionSetName, "input");
+    strcpy(asi.localizedActionSetName, "Input");
+    XR_CHECK(xrCreateActionSet(instance_, &asi, &input_set_));
+    auto path = [&](const char* s) {
+        XrPath p;
+        XR_CHECK(xrStringToPath(instance_, s, &p));
+        return p;
+    };
+    auto suggest = [&](const char* profile, std::vector<XrActionSuggestedBinding> b) {
+        XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        sb.interactionProfile = path(profile);
+        sb.countSuggestedBindings = uint32_t(b.size());
+        sb.suggestedBindings = b.data();
+        return xrSuggestInteractionProfileBindings(instance_, &sb);
+    };
     XrActionCreateInfo ai{XR_TYPE_ACTION_CREATE_INFO};
-    strcpy(ai.actionName, "gaze_pose");
-    strcpy(ai.localizedActionName, "Gaze pose");
     ai.actionType = XR_ACTION_TYPE_POSE_INPUT;
-    XR_CHECK(xrCreateAction(gaze_set_, &ai, &gaze_action_));
-
-    XrPath profile, pose_path;
-    XR_CHECK(xrStringToPath(instance_, "/interaction_profiles/ext/eye_gaze_interaction", &profile));
-    XR_CHECK(xrStringToPath(instance_, "/user/eyes_ext/input/gaze_ext/pose", &pose_path));
-    XrActionSuggestedBinding binding{gaze_action_, pose_path};
-    XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    sb.interactionProfile = profile;
-    sb.countSuggestedBindings = 1;
-    sb.suggestedBindings = &binding;
-    XR_CHECK(xrSuggestInteractionProfileBindings(instance_, &sb));
+    if (gaze_supported_) {
+        strcpy(ai.actionName, "gaze_pose");
+        strcpy(ai.localizedActionName, "Gaze pose");
+        XR_CHECK(xrCreateAction(input_set_, &ai, &gaze_action_));
+        XR_CHECK(suggest("/interaction_profiles/ext/eye_gaze_interaction",
+                         {{gaze_action_, path("/user/eyes_ext/input/gaze_ext/pose")}}));
+    }
+    XrPath hands[2] = {path("/user/hand/left"), path("/user/hand/right")};
+    strcpy(ai.actionName, "aim_pose");
+    strcpy(ai.localizedActionName, "Pointer");
+    ai.countSubactionPaths = 2;
+    ai.subactionPaths = hands;
+    XR_CHECK(xrCreateAction(input_set_, &ai, &aim_action_));
+    std::vector<XrActionSuggestedBinding> aim = {{aim_action_, path("/user/hand/left/input/aim/pose")},
+                                                 {aim_action_, path("/user/hand/right/input/aim/pose")}};
+    XR_CHECK(suggest("/interaction_profiles/khr/simple_controller", aim));
+    XR_CHECK(suggest("/interaction_profiles/valve/index_controller", aim));  // SteamVR remaps Frame controllers
 
     XrSessionActionSetsAttachInfo at{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     at.countActionSets = 1;
-    at.actionSets = &gaze_set_;
+    at.actionSets = &input_set_;
     XR_CHECK(xrAttachSessionActionSets(session_, &at));
 
     XrActionSpaceCreateInfo sci{XR_TYPE_ACTION_SPACE_CREATE_INFO};
-    sci.action = gaze_action_;
     sci.poseInActionSpace.orientation.w = 1;
-    XR_CHECK(xrCreateActionSpace(session_, &sci, &gaze_space_));
+    if (gaze_action_) {
+        sci.action = gaze_action_;
+        XR_CHECK(xrCreateActionSpace(session_, &sci, &gaze_space_));
+    }
+    sci.action = aim_action_;
+    for (int h = 0; h < 2; h++) {
+        sci.subactionPath = hands[h];
+        XR_CHECK(xrCreateActionSpace(session_, &sci, &aim_space_[h]));
+    }
 }
 
-// Gaze ray in app space at time t. False when eye tracking isn't available or not currently tracked.
+// Pose's -Z ray in app space at time t. False if the space isn't currently tracked.
+bool App::locate_ray(XrSpace space, XrTime t, XrVector3f& origin, XrVector3f& dir) {
+    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(space, app_space_, t, &loc))) return false;
+    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT |
+                                      XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    if ((loc.locationFlags & need) != need) return false;
+    XrVector3f minus_z{0, 0, -1};
+    XrQuaternionf_RotateVector3f(&dir, &loc.pose.orientation, &minus_z);
+    origin = loc.pose.position;
+    return true;
+}
+
+// Eye gaze ray in app space at time t. False when eye tracking isn't available or not currently tracked.
 bool App::locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir) {
     if (!gaze_space_) return false;
-    XrActiveActionSet active{gaze_set_, XR_NULL_PATH};
-    XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
-    sync.countActiveActionSets = 1;
-    sync.activeActionSets = &active;
-    if (XR_FAILED(xrSyncActions(session_, &sync))) return false;
-    XrSpaceLocation loc{XR_TYPE_SPACE_LOCATION};
-    if (XR_FAILED(xrLocateSpace(gaze_space_, app_space_, t, &loc))) return false;
-    const XrSpaceLocationFlags need = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_ORIENTATION_TRACKED_BIT;
-    bool ok = (loc.locationFlags & need) == need;
+    XrVector3f o;
+    bool ok = locate_ray(gaze_space_, t, o, dir);
 
     gaze_frames_++;
     gaze_tracked_ += ok;
@@ -961,11 +992,8 @@ bool App::locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir) {
         gaze_frames_ = gaze_tracked_ = 0;
         gaze_stat_ns_ = now;
     }
-    if (!ok) return false;
-    XrVector3f minus_z{0, 0, -1};
-    XrQuaternionf_RotateVector3f(&dir, &loc.pose.orientation, &minus_z);
-    origin = loc.pose.position;
-    return true;
+    if (ok) origin = o;
+    return ok;
 }
 
 void App::init_pipeline() {
@@ -1471,32 +1499,60 @@ void App::render_frame() {
         animate_tracks();
         XrVector3f eye = mul(add(views[0].pose.position, views[1].pose.position), 0.5f);
         suppress_overlapping_tracks(eye, views[0].pose.orientation);
-        // Only show the object you're looking at (eye gaze if tracked, else head forward).
-        // Per-track easing keeps saccades from blinking boxes.
+        // Only show the object you're pointing at: controller aim rays if any controller is tracked, else eye
+        // gaze if tracked, else head forward. Per-track easing keeps saccades from blinking boxes.
+        XrActiveActionSet active{input_set_, XR_NULL_PATH};
+        XrActionsSyncInfo sync{XR_TYPE_ACTIONS_SYNC_INFO};
+        sync.countActiveActionSets = 1;
+        sync.activeActionSets = &active;
+        bool synced = XR_SUCCEEDED(xrSyncActions(session_, &sync));
         XrVector3f gaze_origin = eye, gaze_dir, minus_z{0, 0, -1};
-        bool gaze_tracked = locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir);
+        bool gaze_tracked = synced && locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir);
         if (!gaze_tracked) XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
+        XrVector3f ray_o[2], ray_d[2];
+        int nrays = 0;
+        for (XrSpace sp : aim_space_)
+            if (synced && locate_ray(sp, fs.predictedDisplayTime, ray_o[nrays], ray_d[nrays])) nrays++;
+        int nlasers = nrays;
+        if (nrays != pointer_hands_) printf("xr: pointing with %d controller(s)%s\n", nrays, nrays ? "" : ", using gaze");
+        pointer_hands_ = nrays;
+        if (!nrays) {
+            ray_o[0] = gaze_origin;
+            ray_d[0] = gaze_dir;
+            nrays = 1;
+        }
         float k_gaze = 1 - std::exp(-std::min(frame_dt_, 0.1f) / 0.15f);
         std::vector<Vertex> verts;
-        // Pick the one confirmed track the gaze hits best. Hit target: the box grown on every side by
+        // Pick the one confirmed track a ray hits best. Hit target: the box grown on every side by
         // --focus-margin label heights (scales with distance like the label), scored 0 at the center to 1 at
-        // the grown edge, so a small object inside a big one wins when you look at it. The current pick
+        // the grown edge, so a small object inside a big one wins when you point at it. The current pick
         // gets a bonus (hysteresis) and its label counts as a center hit, so reading it keeps it up.
         uint64_t best_id = 0;
         float best = 1;
+        int best_ray = 0;
         for (const Track& tr : tracks_) {
             if (tr.alpha < 0.01f) continue;
             LabelLayout label = layout_label(tr.shown, tr.cls, tr.score, eye);
-            float s = gaze_rect_score(tr.shown, gaze_origin, gaze_dir, g_opt.focus_margin * label.height());
-            if (tr.id == selected_id_) {
-                XrVector3f rect[4];
-                label.rect(rect);
-                if (gaze_rect_score(rect, gaze_origin, gaze_dir, 0) <= 1) s = 0;
-                s *= 0.8f;
+            for (int r = 0; r < nrays; r++) {
+                float s = gaze_rect_score(tr.shown, ray_o[r], ray_d[r], g_opt.focus_margin * label.height());
+                if (tr.id == selected_id_) {
+                    XrVector3f rect[4];
+                    label.rect(rect);
+                    if (gaze_rect_score(rect, ray_o[r], ray_d[r], 0) <= 1) s = 0;
+                    s *= 0.8f;
+                }
+                if (s <= best) { best = s; best_id = tr.id; best_ray = r; }
             }
-            if (s <= best) { best = s; best_id = tr.id; }
         }
         selected_id_ = best_id;
+        // Lasers: end at the picked box's depth along the ray, else 3 m out.
+        for (int r = 0; r < nlasers; r++) {
+            float d = 3;
+            for (const Track& tr : tracks_)
+                if (r == best_ray && tr.id == selected_id_) d = std::max(0.1f, dot(sub(center(tr.shown), ray_o[r]), ray_d[r]));
+            const float rgba[4] = {1, 1, 1, 0.6f};
+            push_line(verts, ray_o[r], add(ray_o[r], mul(ray_d[r], d)), eye, 0.002f, rgba);
+        }
         for (Track& tr : tracks_) {
             tr.focus_alpha += ((tr.id == selected_id_ ? 1.0f : 0.0f) - tr.focus_alpha) * k_gaze;
             float a = tr.alpha * tr.focus_alpha;

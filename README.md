@@ -89,7 +89,8 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `--latency-ms` tunes the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
   105.6 mm horizontal baseline.
-- A box and its label are shown only while the eye gaze (`XR_EXT_eye_gaze_interaction`) hits the
+- A box and its label are shown only while a controller's aim ray (drawn as a laser; either hand) or,
+  with no controller tracked, the eye gaze (`XR_EXT_eye_gaze_interaction`) hits the
   box grown by a rectangular margin of `--focus-margin` label heights (default 2), or the label
   itself once shown. An open
   SteamVR dashboard keeps the session at VISIBLE (not FOCUSED) and OpenXR then delivers no gaze, so
@@ -124,6 +125,8 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
 
 ### Dead ends (so we don't retry them)
 
+- OpenXR `/interaction_profiles/valve/frame_controller`: SteamVR rejects suggested bindings for it; yoloxr suggests
+  `valve/index_controller` + `khr/simple_controller` aim poses and SteamVR remaps the Frame controllers.
 - `IVRTrackedCamera` (OpenVR): HMD reports a camera but `Prop_CameraFrameLayout=0`, `GetCameraFrameSize` fails.
 - Reading `/dev/videoN` directly: EBUSY while SteamVR runs. With SteamVR stopped it streams,
   but exposure is ~0 (V4L2 exposes only `analogue_gain`; std OV exposure regs aren't what XRService uses).
