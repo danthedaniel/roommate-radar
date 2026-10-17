@@ -806,7 +806,9 @@ bool App::locate_gaze(XrTime t, XrVector3f& origin, XrVector3f& dir) {
     gaze_tracked_ += ok;
     uint64_t now = now_ns();
     if (now - gaze_stat_ns_ > 5000000000ull) {
-        if (gaze_stat_ns_) printf("xr: eye gaze tracked in %.0f%% of frames\n", 100.0 * gaze_tracked_ / gaze_frames_);
+        if (gaze_stat_ns_)
+            printf("xr: eye gaze tracked in %.0f%% of frames%s\n", 100.0 * gaze_tracked_ / gaze_frames_,
+                   state_ == XR_SESSION_STATE_FOCUSED ? "" : " (session not focused: SteamVR dashboard open?)");
         gaze_frames_ = gaze_tracked_ = 0;
         gaze_stat_ns_ = now;
     }
