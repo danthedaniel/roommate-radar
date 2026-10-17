@@ -87,6 +87,7 @@ struct Options {
     float hfov_deg = 100;        // virtual camera field of view
     float conf = 0.25f;
     float iou = 0.5f;            // overlapping detections/tracks above this IoU keep only the most confident
+    float contain = 0.8f;        // ...same if this fraction of the smaller box lies inside the larger one
     float latency_ms = 8;        // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
@@ -200,14 +201,23 @@ static float iou(const Det& a, const Det& b) {
     return inter / ((a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter + 1e-6f);
 }
 
+// Duplicate if they overlap a lot (IoU) or one is mostly inside the other (intersection over the
+// smaller area): a half-size box nested in a bigger one is only ~25% IoU but clearly the same object.
+static bool duplicate(const Det& a, const Det& b) {
+    float ix = std::max(0.f, std::min(a.x1, b.x1) - std::max(a.x0, b.x0));
+    float iy = std::max(0.f, std::min(a.y1, b.y1) - std::max(a.y0, b.y0));
+    float smaller = std::min((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
+    return iou(a, b) > g_opt.iou || ix * iy > g_opt.contain * smaller;
+}
+
 // Class-agnostic: overlapping boxes of different classes (laptop/tv/keyboard on one object) keep only the best.
-static void nms(std::vector<Det>& d, float thr) {
+static void nms(std::vector<Det>& d) {
     std::sort(d.begin(), d.end(), [](const Det& a, const Det& b) { return a.score > b.score; });
     std::vector<Det> keep;
     for (const Det& x : d) {
         bool ok = true;
         for (const Det& k : keep)
-            if (iou(k, x) > thr) { ok = false; break; }
+            if (duplicate(k, x)) { ok = false; break; }
         if (ok) keep.push_back(x);
     }
     d.swap(keep);
@@ -337,8 +347,8 @@ static void detect_loop() {
             Det d{cx - w / 2, std::max(cy - h / 2, oy) - oy, cx + w / 2, std::min(cy + h / 2, oy + S) - oy, bs, best};
             if (d.y1 - d.y0 > 4) views[v].push_back(d);
         }
-        nms(views[0], g_opt.iou);
-        nms(views[1], g_opt.iou);
+        nms(views[0]);
+        nms(views[1]);
 
         // Stereo match: same class, same rows, similar size, positive disparity.
         std::vector<Obj> objs;
@@ -968,7 +978,7 @@ void App::suppress_overlapping_tracks(XrVector3f eye, XrQuaternionf orientation)
     for (size_t i = 0; i < tracks_.size(); i++)
         for (size_t j = i + 1; j < tracks_.size(); j++) {
             if (drop[i] || drop[j] || boxes[i].score < 0 || boxes[j].score < 0) continue;
-            if (iou(boxes[i], boxes[j]) > g_opt.iou) drop[tracks_[i].score < tracks_[j].score ? i : j] = true;
+            if (duplicate(boxes[i], boxes[j])) drop[tracks_[i].score < tracks_[j].score ? i : j] = true;
         }
     size_t k = 0;
     for (size_t i = 0; i < tracks_.size(); i++)
@@ -1162,6 +1172,7 @@ int main(int argc, char** argv) {
         else if (a == "--hfov") g_opt.hfov_deg = float(atof(next()));
         else if (a == "--conf") g_opt.conf = float(atof(next()));
         else if (a == "--iou") g_opt.iou = float(atof(next()));
+        else if (a == "--contain") g_opt.contain = float(atof(next()));
         else if (a == "--latency-ms") g_opt.latency_ms = float(atof(next()));
         else if (a == "--smooth-ms") g_opt.smooth_ms = std::max(1.0f, float(atof(next())));
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
