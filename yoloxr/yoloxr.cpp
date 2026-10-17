@@ -354,7 +354,8 @@ static void detect_loop() {
         nms(views[0]);
         nms(views[1]);
 
-        // Stereo match: same class, same rows, similar size, positive disparity.
+        // Stereo match: same rows, similar size, positive disparity. Class-agnostic like nms() (the views
+        // can disagree on laptop/tv for one object), with a mild preference for the same class.
         std::vector<Obj> objs;
         std::vector<bool> used(views[1].size());
         const uint8_t* L = input.data();
@@ -375,13 +376,13 @@ static void detect_loop() {
             float lh = l.y1 - l.y0, lw = l.x1 - l.x0;
             for (size_t j = 0; j < views[1].size(); j++) {
                 const Det& r = views[1][j];
-                if (used[j] || r.cls != l.cls) continue;
+                if (used[j]) continue;
                 float rh = r.y1 - r.y0, rw = r.x1 - r.x0;
                 float dy = std::fabs((l.y0 + l.y1) - (r.y0 + r.y1)) / 2 / lh;
                 float dsize = std::fabs(lh - rh) / std::max(lh, rh) + std::fabs(lw - rw) / std::max(lw, rw);
                 float disp = ((l.x0 + l.x1) - (r.x0 + r.x1)) / 2;
                 if (dy > 0.15f || dsize > 0.5f || disp < 0.3f || disp > f * baseline / 0.2f) continue;
-                float cost = dy + dsize;
+                float cost = dy + dsize + (r.cls != l.cls) * 0.2f;
                 if (cost < bc) { bc = cost; bi = int(j); }
             }
             if (bi < 0) {
@@ -397,7 +398,8 @@ static void detect_loop() {
             // Average the two views' boxes (right box shifted by the disparity) in the left view.
             float bx0 = (l.x0 + r.x0 + d) / 2, bx1 = (l.x1 + r.x1 + d) / 2;
             float by0 = (l.y0 + r.y0) / 2, by1 = (l.y1 + r.y1) / 2;
-            objs.push_back(make_obj(l.cls, std::max(l.score, r.score), Z, bx0, by0, bx1, by1, true));
+            const Det& top = l.score >= r.score ? l : r;
+            objs.push_back(make_obj(top.cls, top.score, Z, bx0, by0, bx1, by1, true));
         }
         uint64_t e = now_ns();
 
