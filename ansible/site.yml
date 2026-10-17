@@ -1,0 +1,148 @@
+# Configure the Frame: cd ansible && ansible-playbook site.yml [--tags mirror|yoloxr] (or make deploy)
+# From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
+- hosts: localhost
+  gather_facts: false
+  vars:
+    frame: "{{ hostvars.frame.ansible_user }}@{{ hostvars.frame.ansible_host }}"
+    models: "{{ playbook_dir }}/../models"
+  tasks:
+    - name: Check the ssh key works
+      command: ssh -o BatchMode=yes -o ConnectTimeout=5 {{ frame }} true
+      register: ssh
+      changed_when: false
+      failed_when: false
+      tags: always
+
+    # Devkit host pairing (see README); approve on the headset if it asks.
+    - name: Pair ~/.ssh/id_rsa.pub
+      uri:
+        url: http://{{ hostvars.frame.ansible_host }}:32000/register
+        method: POST
+        headers: {Content-Type: text/plain}
+        body: "{{ (lookup('file', '~/.ssh/id_rsa.pub').split())[:2] | join(' ') }} devkit-client:{{ lookup('env', 'USER') }}@{{ lookup('pipe', 'hostname -s') }} 900b919520e4cf601998a71eec318fec\n"
+      when: ssh.rc != 0
+      tags: always
+
+    # Exported on the Mac (ultralytics + torch don't run on the Frame), copied over below.
+    - name: Download YOLO11n grayscale weights
+      get_url:
+        url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt
+        dest: "{{ models }}/"
+      tags: yoloxr
+
+    - name: Export models (S x 2S input) and adapt them with prep_model.py
+      shell: |
+        uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz={{ 2 * item }},{{ item }}
+        mv yolo11n-grayscale_ncnn_model/model.ncnn.param yolo11n-grayscale_{{ item }}.ncnn.param
+        mv yolo11n-grayscale_ncnn_model/model.ncnn.bin yolo11n-grayscale_{{ item }}.ncnn.bin
+        rm -r yolo11n-grayscale_ncnn_model
+        python3 ../yoloxr/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
+      args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
+      loop: [480, 576, 640]
+      tags: yoloxr
+
+- hosts: frame
+  vars:
+    root: "{{ playbook_dir }}/.."
+    ncnn: ~/steamframe/third_party/ncnn
+    devkit_utils: ~/steamos-devkit/client/devkit-utils
+  tasks:
+    - name: Ship mirrorserver.py
+      copy: {src: "{{ root }}/mirrorserver.py", dest: ~/steamframe/}
+      tags: mirror
+      notify: restart mirrorserver
+
+    - name: Install mirrorserver user service
+      copy: {src: mirrorserver.service, dest: ~/.config/systemd/user/}
+      tags: mirror
+      notify: restart mirrorserver
+
+    - name: Enable mirrorserver
+      systemd_service: {name: mirrorserver, scope: user, enabled: true, state: started, daemon_reload: true}
+      tags: mirror
+
+    # Pinned to the commit yoloxr was tuned on. After changing it, delete ~/steamframe/third_party/ncnn-install to rebuild.
+    - name: Fetch ncnn
+      git: {repo: https://github.com/Tencent/ncnn.git, dest: "{{ ncnn }}", version: "{{ ncnn_commit }}",
+            refspec: "{{ ncnn_commit }}", depth: 1, recursive: false}  # refspec: shallow clones of a SHA need it
+      vars: {ncnn_commit: c15904bb8918187ec100f1ebe708942af83b84be}
+      tags: yoloxr
+
+    # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h
+    - name: Build ncnn
+      shell: >
+        cmake -S . -B build -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
+        -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
+        -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install
+        && cmake --build build && cmake --install build
+      args: {chdir: "{{ ncnn }}", creates: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
+      tags: yoloxr
+
+    - name: Ship models
+      copy: {src: "{{ item }}", dest: ~/steamframe/models/}
+      loop: "{{ query('fileglob', root + '/models/yolo11n-grayscale_*_gray.ncnn.*') }}"
+      tags: yoloxr
+
+    - name: Ship yoloxr source
+      synchronize:
+        src: "{{ root }}/yoloxr/"
+        dest: ~/steamframe/yoloxr/
+        delete: true  # excluded paths are kept
+        rsync_opts: [--exclude=/build, --exclude=/calib.txt]
+      tags: yoloxr
+
+    - name: Build yoloxr
+      shell: cmake -S . -B build -G Ninja >/dev/null && cmake --build build
+      args: {chdir: ~/steamframe/yoloxr}
+      register: build
+      changed_when: "'no work to do' not in build.stdout"
+      tags: yoloxr
+
+    - name: Fetch Valve's devkit-utils (Steam shortcut tools)
+      git: {repo: https://gitlab.steamos.cloud/devkit/steamos-devkit.git, dest: ~/steamos-devkit, depth: 1}
+      tags: yoloxr
+
+    - name: Link yoloxr as a devkit title
+      file: {src: ~/steamframe/yoloxr, dest: ~/devkit-game/yoloxr, state: link}
+      tags: yoloxr
+
+    - name: List registered devkit titles
+      command: python3 {{ devkit_utils }}/steamos-list-games
+      register: games
+      changed_when: false
+      tags: yoloxr
+
+    # Steam's create-shortcut, as Valve's devkit client does: library entry "yoloxr", no Steam restart.
+    - name: Add yoloxr to the Steam library
+      command:
+        argv:
+          - python3
+          - "{{ devkit_utils }}/steam-client-create-shortcut"
+          - --parms
+          - '{"gameid": "yoloxr", "directory": "{{ ansible_facts.env.HOME }}/devkit-game/yoloxr", "argv": ["./run.sh"], "env": {},
+              "settings": {"compat_tool": ""}, "force_appid": "", "lepton_args": ""}'
+      when: "'yoloxr' not in games.stdout | from_json | map(attribute='gameid')"
+      register: shortcut
+      failed_when: "'error' in shortcut.stdout | from_json"
+      tags: yoloxr
+
+    # KDE (desktop mode) launcher: runs it through Steam like the library entry. Executable so Plasma trusts it.
+    - name: Add yoloxr to the KDE menu and desktop
+      copy:
+        dest: "{{ item }}"
+        mode: "0755"
+        content: |
+          [Desktop Entry]
+          Name=yoloxr
+          Comment=YOLO boxes over passthrough
+          Exec=python3 {{ ansible_facts.env.HOME }}/steamos-devkit/client/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr
+          Icon=camera-video
+          Terminal=false
+          Type=Application
+          Categories=Game;
+      loop: [~/.local/share/applications/yoloxr.desktop, ~/Desktop/yoloxr.desktop]
+      tags: yoloxr
+
+  handlers:
+    - name: restart mirrorserver
+      systemd_service: {name: mirrorserver, scope: user, state: restarted, daemon_reload: true}

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Watch the headset view streamed by yoloxr/mirrorserver.py (runs with yoloxr) over UDP.
+"""Watch the headset view streamed by mirrorserver.py (a user service on the Frame, see ansible/) over UDP.
 Usage: ./udpmirror.py [host] [port]             -> plays in ffplay
        ./udpmirror.py [host] [port] > out.ts    -> saves the H.264 MPEG-TS stream
 """
@@ -27,7 +27,7 @@ def keepalive():
 threading.Thread(target=keepalive, daemon=True).start()
 if sys.stdout.isatty():
     # Relay to ffplay over localhost UDP, not a pipe: ffplay blocks in a pipe read() uninterruptibly whenever the
-    # stream stalls (yoloxr not running, headset idle), so closing its window would hang until Ctrl+C.
+    # stream stalls (headset idle), so closing its window would hang until Ctrl+C.
     local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     local.bind(("127.0.0.1", 0))
     lport = local.getsockname()[1]

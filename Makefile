@@ -3,12 +3,13 @@ FRAME ?= steamos@frame.local
 
 .PHONY: deploy build reload launch stop logs stream mirror cams ssh
 
-# Copy yoloxr/ to ~/steamframe on the Frame
+# Everything: mirrorserver service, yoloxr (ship, build, Steam library entry). See ansible/site.yml
 deploy:
-	COPYFILE_DISABLE=1 tar cf - --no-xattrs --exclude build yoloxr | ssh $(FRAME) 'cd ~/steamframe && tar xf -'
+	cd ansible && ansible-playbook site.yml
 
-build: deploy
-	ssh $(FRAME) 'cd ~/steamframe/yoloxr && cmake -S . -B build -G Ninja >/dev/null && cmake --build build'
+# Ship and build yoloxr only
+build:
+	cd ansible && ansible-playbook site.yml --tags yoloxr
 
 # Rebuild and restart yoloxr inside the running run.sh
 reload: build
@@ -16,7 +17,7 @@ reload: build
 
 # Start yoloxr the way the Steam library entry does
 launch:
-	ssh $(FRAME) 'python3 ~/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr'
+	ssh $(FRAME) 'python3 ~/steamos-devkit/client/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr'
 
 stop:
 	ssh $(FRAME) 'pkill -TERM -x run.sh'
@@ -25,7 +26,7 @@ stop:
 logs:
 	ssh $(FRAME) 'tail -f ~/.local/share/Steam/logs/steam_output.log'
 
-# Headset view over UDP (yoloxr must be running)
+# Headset view over UDP (mirrorserver service, always on)
 stream:
 	./udpmirror.py
 

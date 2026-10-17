@@ -1,0 +1,1 @@
+frame ansible_host=frame.local ansible_user=steamos

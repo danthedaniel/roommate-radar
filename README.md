@@ -67,8 +67,27 @@ read-only), and mmaps that dmabuf. Buffers are NV12 with Y stride 1152 (SLAM) / 
 ./stream.sh --exposure controller              # the LED-tracking exposure instead
 ssh steamos@frame.local 'sudo python3 - --frames 1' < rawcam.py \
   | ffmpeg -f rawvideo -pix_fmt gray -s 2112x1504 -i - snap.png   # one raw snapshot
-./mirror.sh                                    # headset view (/dev/video99); black/~1 fps when not worn
+./udpmirror.py                                 # headset view (/dev/video99) from the mirrorserver service; black/~1 fps when not worn
+./udpmirror.py > out.ts                        # same, saved
+./mirror.sh                                    # same over ssh, no service needed
 ```
+
+`mirrorserver.py` runs on the Frame as a systemd user service (`mirrorserver`, UDP 5600, H.264 MPEG-TS, libx264
+only while a client sends keepalives), independent of yoloxr. Logs: `journalctl --user -u mirrorserver -f`.
+
+## Ansible
+
+`ansible/site.yml` sets up a fresh Frame and redeploys an existing one (`make deploy`, or
+`cd ansible && ansible-playbook site.yml [--tags mirror|yoloxr]`). Only Developer Mode has to be switched on by hand.
+Every first-time step is skipped once its output exists.
+
+- Always: pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
+- `mirror`: ships `mirrorserver.py` and enables the `mirrorserver` user service.
+- `yoloxr`: on the Mac, downloads `yolo11n-grayscale.pt` and exports + preps the 480/576/640 models into `models/`
+  (`uvx`, needs uv); on the Frame, clones ncnn (pinned commit) and builds it, ships the models, rsyncs `yoloxr/` to
+  `~/steamframe/yoloxr` (keeps the Frame's `build/` and `calib.txt`) and builds it, clones Valve's steamos-devkit to
+  `~/steamos-devkit`, adds yoloxr to the Steam library if it isn't there yet, and adds a "yoloxr" launcher to the
+  KDE (desktop mode) menu and desktop that starts it through Steam.
 
 ## yoloxr: YOLO boxes over passthrough
 
@@ -105,11 +124,8 @@ Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). 
 `make deploy | build | reload | launch | stop | logs | stream | mirror | cams | ssh`.
 
 ```sh
-# from the Mac
-COPYFILE_DISABLE=1 tar cf - --no-xattrs --exclude build yoloxr | ssh steamos@frame.local 'cd ~/steamframe && tar xf -'
-ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake -S . -B build -G Ninja && cmake --build build'
-# headset view while yoloxr runs: run.sh starts mirrorserver.py (UDP 5600, H.264 MPEG-TS, encodes only while watched)
-./udpmirror.py                                # ffplay; ./udpmirror.py > out.ts saves it
+# from the Mac: ship + build (ansible, see above)
+make build
 # hot reload: rebuild, then restart yoloxr inside a running run.sh (Steam or systemd-run); camserver keeps running
 ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake --build build && pkill -USR1 -x run.sh'
 ssh steamos@frame.local '~/steamframe/yoloxr/run.sh --no-xr --dump /tmp/d'   # detector only, debug PGMs
@@ -117,20 +133,15 @@ ssh steamos@frame.local '~/steamframe/yoloxr/run.sh --no-xr --dump /tmp/d'   # d
 ssh steamos@frame.local 'systemd-run --user --unit=yoloxr --collect --working-directory=$HOME/steamframe/yoloxr $HOME/steamframe/yoloxr/run.sh'
 ```
 
-Launching from the headset: yoloxr is registered as a Steam devkit title (library entry "yoloxr"), the same way
-Valve's devkit client registers uploads, with no Steam restart. `~/devkit-game/yoloxr` symlinks to `~/steamframe/yoloxr`,
-so redeploys need no re-registration. Steam stdout goes to `~/.local/share/Steam/logs/steam_output.log`. To redo it,
-copy `client/devkit-utils` from the steamos-devkit repo to `~/devkit-utils` on the Frame, then:
+Launching from the headset: yoloxr is registered as a Steam devkit title (library entry "yoloxr", a non-Steam
+shortcut), the same way Valve's devkit client registers uploads, with no Steam restart. The ansible `yoloxr` tag does
+this: `~/devkit-game/yoloxr` symlinks to `~/steamframe/yoloxr` (so redeploys need no re-registration), then
+`~/steamos-devkit/client/devkit-utils/steam-client-create-shortcut` registers it (Steam must be running).
+Steam stdout goes to `~/.local/share/Steam/logs/steam_output.log`. Launch it from ssh the same way: `make launch`
+(`steam-devkit-rpc run-game gameid=yoloxr`).
 
-```sh
-ln -sfn ~/steamframe/yoloxr ~/devkit-game/yoloxr
-python3 ~/devkit-utils/steam-client-create-shortcut --parms "{\"gameid\": \"yoloxr\", \"directory\": \"$HOME/devkit-game/yoloxr\",
-  \"argv\": [\"./run.sh\"], \"env\": {}, \"settings\": {\"compat_tool\": \"\"}, \"force_appid\": \"\", \"lepton_args\": \"\"}"
-python3 ~/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr   # launch it from ssh the same way
-```
-
-ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into `~/steamframe/third_party/ncnn`, then
-`cmake -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
+What ansible does for ncnn and the models, by hand. ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into
+`~/steamframe/third_party/ncnn`, then `cmake -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
 -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
 -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install`.
 (`SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.)

@@ -1,0 +1,10 @@
+[Unit]
+Description=Headset view (/dev/video99) as H.264 MPEG-TS over UDP 5600, see udpmirror.py
+
+[Service]
+ExecStart=/usr/bin/python3 %h/steamframe/mirrorserver.py
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
