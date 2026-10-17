@@ -92,7 +92,7 @@ struct Options {
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
-    float center_deg = 25;       // only show boxes within this angle of the gaze; fade out over the next 10°
+    float center_deg = 10;       // only show boxes within this angle of the gaze; fade out over the next 5°
     bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
 };
 static Options g_opt;
@@ -1186,8 +1186,13 @@ void App::render_frame() {
         float k_gaze = 1 - std::exp(-std::min(frame_dt_, 0.1f) / 0.15f);
         std::vector<Vertex> verts;
         for (Track& tr : tracks_) {
-            float off = angle(gaze_dir, norm(sub(center(tr.shown), gaze_origin))) * 180 / float(M_PI);
-            float near_gaze = std::clamp((g_opt.center_deg + 10 - off) / 10, 0.0f, 1.0f);
+            // Angle from the gaze to the box rather than its center: looking anywhere on a big object counts.
+            // ponytail: box approximated as a disc of 0.8 x its half-diagonal; exact ray-rectangle distance
+            // only matters for long thin boxes
+            XrVector3f to_center = norm(sub(center(tr.shown), gaze_origin));
+            float radius = 0.8f * angle(to_center, norm(sub(tr.shown[0], gaze_origin)));
+            float off = std::max(0.0f, angle(gaze_dir, to_center) - radius) * 180 / float(M_PI);
+            float near_gaze = std::clamp((g_opt.center_deg + 5 - off) / 5, 0.0f, 1.0f);
             tr.gaze_alpha += (near_gaze - tr.gaze_alpha) * k_gaze;
             float a = tr.alpha * tr.gaze_alpha;
             if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
