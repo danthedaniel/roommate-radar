@@ -93,6 +93,7 @@ struct Options {
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
     float center_deg = 10;       // only show boxes within this angle of the gaze; fade out over the next 5°
+    float label_deg = 2;         // only show a box's label while the gaze is on it or within this margin
     bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
 };
 static Options g_opt;
@@ -479,12 +480,15 @@ static void push_line(std::vector<Vertex>& vs, XrVector3f a, XrVector3f b, XrVec
     push_quad(vs, sub(a, side), add(a, side), add(b, side), sub(b, side), rgba);
 }
 
-static void push_box(std::vector<Vertex>& vs, const XrVector3f* corners, int cls, float score, float alpha, XrVector3f eye) {
+static void push_box(std::vector<Vertex>& vs, const XrVector3f* corners, int cls, float score, float alpha,
+                     float label_alpha, XrVector3f eye) {
     float rgba[4] = {0, 0, 0, alpha};
     color_for(cls, rgba);
     float dist = len(sub(add(corners[0], corners[2]), mul(eye, 2))) / 2;
     float width = 0.004f * dist;  // ~0.23 degrees regardless of distance
     for (int k = 0; k < 4; k++) push_line(vs, corners[k], corners[(k + 1) % 4], eye, width, rgba);
+    alpha *= label_alpha;
+    if (alpha < 0.01f) return;
 
     // Label above the top-left corner, in the box's plane.
     Obj o{cls, score, dist, {corners[0], corners[1], corners[2], corners[3]}, true, {}};
@@ -592,12 +596,51 @@ struct Track {
     float alpha = 0;
     float votes[80] = {};  // decaying per-class confidence; cls = argmax, so the label doesn't flip-flop
     float gaze_alpha = 0;  // eases toward "near the gaze" so saccades don't make boxes blink
+    float label_alpha = 0; // eases toward "gaze on the box"
 };
 
 static XrVector3f center(const XrVector3f* c) { return mul(add(add(c[0], c[1]), add(c[2], c[3])), 0.25f); }
 static XrVector3f lerp(XrVector3f a, XrVector3f b, float t) { return add(a, mul(sub(b, a), t)); }
-static float angle(XrVector3f a, XrVector3f b) {
-    return std::acos(std::clamp(a.x * b.x + a.y * b.y + a.z * b.z, -1.0f, 1.0f));
+static float dot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+static float angle(XrVector3f a, XrVector3f b) { return std::acos(std::clamp(dot(a, b), -1.0f, 1.0f)); }
+
+// Angle (degrees) from the gaze ray to the box rectangle: 0 while the gaze passes through the box, otherwise
+// the angle subtended by the in-plane distance from the hit point to the nearest edge.
+static float gaze_offset_deg(const XrVector3f* c, XrVector3f origin, XrVector3f dir) {
+    XrVector3f ex = sub(c[1], c[0]), ey = sub(c[3], c[0]);
+    float w = len(ex), h = len(ey);
+    ex = mul(ex, 1 / std::max(w, 1e-6f));
+    ey = mul(ey, 1 / std::max(h, 1e-6f));
+    XrVector3f n = cross(ex, ey);
+    float denom = dot(dir, n);
+    if (std::fabs(denom) < 1e-3f) return angle(dir, norm(sub(center(c), origin))) * 180 / float(M_PI);  // edge-on
+    float t = dot(sub(c[0], origin), n) / denom;
+    if (t <= 0) return 180;  // box plane is behind the gaze
+    XrVector3f p = add(origin, mul(dir, t)), rel = sub(p, c[0]);
+    float u = dot(rel, ex), v = dot(rel, ey);
+    float dx = std::max({0.0f, -u, u - w}), dy = std::max({0.0f, -v, v - h});
+    return std::atan2(std::sqrt(dx * dx + dy * dy), t) * 180 / float(M_PI);
+}
+
+static int selftest() {
+    // 1 m box, 2 m ahead (TL, TR, BR, BL), viewed from the origin.
+    const XrVector3f box[4] = {{-0.5f, 0.5f, -2}, {0.5f, 0.5f, -2}, {0.5f, -0.5f, -2}, {-0.5f, -0.5f, -2}};
+    const XrVector3f o{0, 0, 0};
+    auto near = [](float a, float b) { return std::fabs(a - b) < 0.05f; };
+    struct { XrVector3f dir; float want; const char* what; } cases[] = {
+        {{0, 0, -1}, 0, "through the center"},
+        {norm({0.4f, -0.4f, -2}), 0, "inside, near a corner"},
+        {norm({1.5f, 0, -2}), float(std::atan2(1.0, 2.5) * 180 / M_PI), "1 m right of the right edge"},
+        {norm({0, 1.0f, -2}), float(std::atan2(0.5, std::sqrt(5.0)) * 180 / M_PI), "0.5 m above the top"},
+        {{0, 0, 1}, 180, "looking away"},
+    };
+    int fails = 0;
+    for (auto& c : cases) {
+        float got = gaze_offset_deg(box, o, c.dir);
+        printf("%s %-28s got %6.2f want %6.2f\n", near(got, c.want) ? "ok  " : "FAIL", c.what, got, c.want);
+        fails += !near(got, c.want);
+    }
+    return fails ? 1 : 0;
 }
 
 void App::init_xr() {
@@ -1187,15 +1230,13 @@ void App::render_frame() {
         std::vector<Vertex> verts;
         for (Track& tr : tracks_) {
             // Angle from the gaze to the box rather than its center: looking anywhere on a big object counts.
-            // ponytail: box approximated as a disc of 0.8 x its half-diagonal; exact ray-rectangle distance
-            // only matters for long thin boxes
-            XrVector3f to_center = norm(sub(center(tr.shown), gaze_origin));
-            float radius = 0.8f * angle(to_center, norm(sub(tr.shown[0], gaze_origin)));
-            float off = std::max(0.0f, angle(gaze_dir, to_center) - radius) * 180 / float(M_PI);
+            float off = gaze_offset_deg(tr.shown, gaze_origin, gaze_dir);
             float near_gaze = std::clamp((g_opt.center_deg + 5 - off) / 5, 0.0f, 1.0f);
+            float on_box = std::clamp(g_opt.label_deg + 1 - off, 0.0f, 1.0f);  // label: gaze on the box (+margin)
             tr.gaze_alpha += (near_gaze - tr.gaze_alpha) * k_gaze;
+            tr.label_alpha += (on_box - tr.label_alpha) * k_gaze;
             float a = tr.alpha * tr.gaze_alpha;
-            if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
+            if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, tr.label_alpha, eye);
         }
         uint32_t nverts = uint32_t(std::min(verts.size(), vcap_));
         memcpy(vmap_, verts.data(), nverts * sizeof(Vertex));
@@ -1274,7 +1315,8 @@ int main(int argc, char** argv) {
             if (i + 1 >= argc) throw std::runtime_error("missing value for " + a);
             return argv[++i];
         };
-        if (a == "--no-xr") g_opt.xr = false;
+        if (a == "--selftest") return selftest();
+        else if (a == "--no-xr") g_opt.xr = false;
         else if (a == "--dump") g_opt.dump = next();
         else if (a == "--model") g_opt.model = next();
         else if (a == "--calib") g_opt.calib = next();
@@ -1289,6 +1331,7 @@ int main(int argc, char** argv) {
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
         else if (a == "--center-deg") g_opt.center_deg = float(atof(next()));
         else if (a == "--no-eye-gaze") g_opt.eye_gaze = false;
+        else if (a == "--label-deg") g_opt.label_deg = float(atof(next()));
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
