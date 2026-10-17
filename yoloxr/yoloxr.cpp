@@ -92,6 +92,7 @@ struct Options {
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
+    float center_deg = 25;       // only show boxes within this angle of the gaze; fade out over the next 10°
 };
 static Options g_opt;
 
@@ -1084,9 +1085,15 @@ void App::render_frame() {
         animate_tracks();
         XrVector3f eye = mul(add(views[0].pose.position, views[1].pose.position), 0.5f);
         suppress_overlapping_tracks(eye, views[0].pose.orientation);
+        // Detections near the edge of the view come and go; only show what's near the gaze direction.
+        XrVector3f fwd, minus_z{0, 0, -1};
+        XrQuaternionf_RotateVector3f(&fwd, &views[0].pose.orientation, &minus_z);
         std::vector<Vertex> verts;
-        for (const Track& tr : tracks_)
-            if (tr.alpha > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, tr.alpha, eye);
+        for (const Track& tr : tracks_) {
+            float off = angle(fwd, norm(sub(center(tr.shown), eye))) * 180 / float(M_PI);
+            float a = tr.alpha * std::clamp((g_opt.center_deg + 10 - off) / 10, 0.0f, 1.0f);
+            if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
+        }
         uint32_t nverts = uint32_t(std::min(verts.size(), vcap_));
         memcpy(vmap_, verts.data(), nverts * sizeof(Vertex));
 
@@ -1177,6 +1184,7 @@ int main(int argc, char** argv) {
         else if (a == "--smooth-ms") g_opt.smooth_ms = std::max(1.0f, float(atof(next())));
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
+        else if (a == "--center-deg") g_opt.center_deg = float(atof(next()));
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
