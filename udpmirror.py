@@ -26,18 +26,28 @@ def keepalive():
 
 threading.Thread(target=keepalive, daemon=True).start()
 if sys.stdout.isatty():
+    # Relay to ffplay over localhost UDP, not a pipe: ffplay blocks in a pipe read() uninterruptibly whenever the
+    # stream stalls (yoloxr not running, headset idle), so closing its window would hang until Ctrl+C.
+    local = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    local.bind(("127.0.0.1", 0))
+    lport = local.getsockname()[1]
+    local.close()
     player = subprocess.Popen(["ffplay", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-                               "-framedrop", "-f", "mpegts", "-window_title", "Steam Frame", "-"], stdin=subprocess.PIPE,
-                              bufsize=0)
-    out = player.stdin
+                               "-framedrop", "-f", "mpegts", "-window_title", "Steam Frame",
+                               f"udp://127.0.0.1:{lport}?fifo_size=100000&overrun_nonfatal=1"])
+    write = lambda data: sock.sendto(data, ("127.0.0.1", lport))
 else:
     player, out = None, open(1, "wb", buffering=0)
+    write = out.write
 sock.settimeout(1)  # so closing ffplay ends this even when nothing arrives
 try:
     while player is None or player.poll() is None:
         try:
-            out.write(sock.recv(65536))
-        except TimeoutError:
+            write(sock.recv(65536))
+        except (TimeoutError, ConnectionRefusedError):  # refused: ffplay not listening yet, or just quit
             pass
 except (BrokenPipeError, KeyboardInterrupt):
     pass
+finally:
+    if player:
+        player.terminate()
