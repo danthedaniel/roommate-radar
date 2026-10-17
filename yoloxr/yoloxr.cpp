@@ -86,6 +86,7 @@ struct Options {
     int size = 480;              // per-view rectified size (YOLO input is size x 2*size)
     float hfov_deg = 100;        // virtual camera field of view
     float conf = 0.25f;
+    float iou = 0.5f;            // overlapping detections/tracks above this IoU keep only the most confident
     float latency_ms = 8;        // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
@@ -199,13 +200,14 @@ static float iou(const Det& a, const Det& b) {
     return inter / ((a.x1 - a.x0) * (a.y1 - a.y0) + (b.x1 - b.x0) * (b.y1 - b.y0) - inter + 1e-6f);
 }
 
+// Class-agnostic: overlapping boxes of different classes (laptop/tv/keyboard on one object) keep only the best.
 static void nms(std::vector<Det>& d, float thr) {
     std::sort(d.begin(), d.end(), [](const Det& a, const Det& b) { return a.score > b.score; });
     std::vector<Det> keep;
     for (const Det& x : d) {
         bool ok = true;
         for (const Det& k : keep)
-            if (k.cls == x.cls && iou(k, x) > thr) { ok = false; break; }
+            if (iou(k, x) > thr) { ok = false; break; }
         if (ok) keep.push_back(x);
     }
     d.swap(keep);
@@ -335,8 +337,8 @@ static void detect_loop() {
             Det d{cx - w / 2, std::max(cy - h / 2, oy) - oy, cx + w / 2, std::min(cy + h / 2, oy + S) - oy, bs, best};
             if (d.y1 - d.y0 > 4) views[v].push_back(d);
         }
-        nms(views[0], 0.45f);
-        nms(views[1], 0.45f);
+        nms(views[0], g_opt.iou);
+        nms(views[1], g_opt.iou);
 
         // Stereo match: same class, same rows, similar size, positive disparity.
         std::vector<Obj> objs;
@@ -554,6 +556,7 @@ class App {
     std::vector<Track> tracks_;
     uint64_t last_anim_ns_ = 0;
     void animate_tracks();
+    void suppress_overlapping_tracks(XrVector3f eye, XrQuaternionf orientation);
 };
 
 // A detected object in world (LOCAL) space, smoothed across detector frames.
@@ -565,6 +568,7 @@ struct Track {
     int hits = 1;
     uint64_t last_seen_ns;
     float alpha = 0;
+    float votes[80] = {};  // decaying per-class confidence; cls = argmax, so the label doesn't flip-flop
 };
 
 static XrVector3f center(const XrVector3f* c) { return mul(add(add(c[0], c[1]), add(c[2], c[3])), 0.25f); }
@@ -901,8 +905,9 @@ void App::update_world_boxes() {
         float best_cost = 0.7f;  // gate: centers within 0.7 box half-diagonals
         for (size_t i = 0; i < tracks_.size(); i++) {
             const Track& tr = tracks_[i];
-            if (updated[i] || tr.cls != m.o.cls) continue;
-            float cost = angle(m.dir, norm(sub(center(tr.target), m.origin))) / m.radius;
+            if (updated[i]) continue;
+            // Class-agnostic (YOLO relabels the same object between frames), mild preference for same class.
+            float cost = angle(m.dir, norm(sub(center(tr.target), m.origin))) / m.radius + (tr.cls != m.o.cls) * 0.2f;
             if (m.o.stereo) {  // reject wildly different depths
                 float dm = len(sub(center(m.o.corners), m.origin)), dt = len(sub(center(tr.target), m.origin));
                 if (std::fabs(std::log(dm / std::max(dt, 1e-3f))) > 0.5f) continue;
@@ -921,6 +926,7 @@ void App::update_world_boxes() {
         }
         if (best < 0) {
             Track tr{m.o.cls, m.o.score, {}, {}, 1, now, 0};
+            tr.votes[m.o.cls] = m.o.score;
             std::copy(meas, meas + 4, tr.target);
             std::copy(meas, meas + 4, tr.shown);
             tracks_.push_back(tr);
@@ -933,9 +939,41 @@ void App::update_world_boxes() {
         // with per-axis noise would track motion better if objects move fast
         for (int k = 0; k < 4; k++) tr.target[k] = lerp(tr.target[k], meas[k], 0.5f);
         tr.score = 0.7f * tr.score + 0.3f * m.o.score;
+        for (float& v : tr.votes) v *= 0.9f;
+        tr.votes[m.o.cls] += m.o.score;
+        tr.cls = int(std::max_element(tr.votes, tr.votes + 80) - tr.votes);
         tr.hits++;
         tr.last_seen_ns = now;
     }
+}
+
+// Tracks that overlap as seen from the current eye (IoU of their projected boxes) keep only the most
+// confident one. Catches duplicates the detector-side NMS can't: tracks spawned in different frames.
+void App::suppress_overlapping_tracks(XrVector3f eye, XrQuaternionf orientation) {
+    XrQuaternionf inv{-orientation.x, -orientation.y, -orientation.z, orientation.w};
+    std::vector<Det> boxes;  // projected on the z = -1 plane of the eye frame
+    for (const Track& tr : tracks_) {
+        Det b{1e9f, 1e9f, -1e9f, -1e9f, tr.score, 0};
+        for (const XrVector3f& c : tr.shown) {
+            XrVector3f rel = sub(c, eye), p;
+            XrQuaternionf_RotateVector3f(&p, &inv, &rel);
+            if (p.z > -0.05f) { b.score = -1; break; }  // behind / at the eye: don't compare
+            float x = p.x / -p.z, y = p.y / -p.z;
+            b.x0 = std::min(b.x0, x); b.x1 = std::max(b.x1, x);
+            b.y0 = std::min(b.y0, y); b.y1 = std::max(b.y1, y);
+        }
+        boxes.push_back(b);
+    }
+    std::vector<bool> drop(tracks_.size());
+    for (size_t i = 0; i < tracks_.size(); i++)
+        for (size_t j = i + 1; j < tracks_.size(); j++) {
+            if (drop[i] || drop[j] || boxes[i].score < 0 || boxes[j].score < 0) continue;
+            if (iou(boxes[i], boxes[j]) > g_opt.iou) drop[tracks_[i].score < tracks_[j].score ? i : j] = true;
+        }
+    size_t k = 0;
+    for (size_t i = 0; i < tracks_.size(); i++)
+        if (!drop[i]) tracks_[k++] = tracks_[i];
+    tracks_.resize(k);
 }
 
 // Per render frame: glide shown boxes toward their targets, fade in confirmed tracks, fade out stale ones.
@@ -1035,6 +1073,7 @@ void App::render_frame() {
         update_world_boxes();
         animate_tracks();
         XrVector3f eye = mul(add(views[0].pose.position, views[1].pose.position), 0.5f);
+        suppress_overlapping_tracks(eye, views[0].pose.orientation);
         std::vector<Vertex> verts;
         for (const Track& tr : tracks_)
             if (tr.alpha > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, tr.alpha, eye);
@@ -1122,6 +1161,7 @@ int main(int argc, char** argv) {
         else if (a == "--size") g_opt.size = atoi(next());
         else if (a == "--hfov") g_opt.hfov_deg = float(atof(next()));
         else if (a == "--conf") g_opt.conf = float(atof(next()));
+        else if (a == "--iou") g_opt.iou = float(atof(next()));
         else if (a == "--latency-ms") g_opt.latency_ms = float(atof(next()));
         else if (a == "--smooth-ms") g_opt.smooth_ms = std::max(1.0f, float(atof(next())));
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
