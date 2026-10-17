@@ -92,7 +92,7 @@ struct Options {
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
-    float focus_deg = 2;         // show a box (and label) only while the gaze is on it or within this margin
+    float focus_margin = 2;      // show a box (and label) only while the gaze hits the box grown by this many label heights
     bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
 };
 static Options g_opt;
@@ -488,6 +488,7 @@ struct LabelLayout {
     void rect(XrVector3f out[4]) const {  // background, TL TR BR BL
         out[0] = at(-2, -2); out[1] = at(tw + 2, -2); out[2] = at(tw + 2, th + 1); out[3] = at(-2, th + 1);
     }
+    float height() const { return (th + 3) * scale; }  // background height in meters
 };
 
 static LabelLayout layout_label(const XrVector3f* corners, int cls, float score, XrVector3f eye) {
@@ -582,6 +583,8 @@ class App {
     const size_t vcap_ = 200000;
 
     uint64_t seen_det_id_ = 0;
+    uint64_t next_track_id_ = 1;
+    uint64_t selected_id_ = 0;  // the one track being shown (0 = none)
     std::vector<Track> tracks_;
     uint64_t last_anim_ns_ = 0;
     float frame_dt_ = 0;  // seconds since the previous render frame
@@ -600,6 +603,7 @@ class App {
 
 // A detected object in world (LOCAL) space, smoothed across detector frames.
 struct Track {
+    uint64_t id;
     int cls;
     float score;
     XrVector3f target[4];  // smoothed measurement
@@ -616,42 +620,49 @@ static XrVector3f lerp(XrVector3f a, XrVector3f b, float t) { return add(a, mul(
 static float dot(XrVector3f a, XrVector3f b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
 static float angle(XrVector3f a, XrVector3f b) { return std::acos(std::clamp(dot(a, b), -1.0f, 1.0f)); }
 
-// Angle (degrees) from the gaze ray to the box rectangle: 0 while the gaze passes through the box, otherwise
-// the angle subtended by the in-plane distance from the hit point to the nearest edge.
-static float gaze_offset_deg(const XrVector3f* c, XrVector3f origin, XrVector3f dir) {
+// Where the gaze ray hits the rectangle (TL, TR, BR, BL) grown by `margin` meters on every side, as the
+// larger of the two axis offsets from the center relative to the grown half-size: 0 at the center, 1 on the
+// grown edge, > 1 outside (infinity if the ray misses the plane). Rectangular margin: corners are square.
+static float gaze_rect_score(const XrVector3f* c, XrVector3f origin, XrVector3f dir, float margin) {
     XrVector3f ex = sub(c[1], c[0]), ey = sub(c[3], c[0]);
     float w = len(ex), h = len(ey);
     ex = mul(ex, 1 / std::max(w, 1e-6f));
     ey = mul(ey, 1 / std::max(h, 1e-6f));
     XrVector3f n = cross(ex, ey);
     float denom = dot(dir, n);
-    if (std::fabs(denom) < 1e-3f) return angle(dir, norm(sub(center(c), origin))) * 180 / float(M_PI);  // edge-on
+    if (std::fabs(denom) < 1e-3f) return INFINITY;  // edge-on
     float t = dot(sub(c[0], origin), n) / denom;
-    if (t <= 0) return 180;  // box plane is behind the gaze
-    XrVector3f p = add(origin, mul(dir, t)), rel = sub(p, c[0]);
-    float u = dot(rel, ex), v = dot(rel, ey);
-    float dx = std::max({0.0f, -u, u - w}), dy = std::max({0.0f, -v, v - h});
-    return std::atan2(std::sqrt(dx * dx + dy * dy), t) * 180 / float(M_PI);
+    if (t <= 0) return INFINITY;  // rectangle is behind the gaze
+    XrVector3f rel = sub(add(origin, mul(dir, t)), c[0]);
+    float u = dot(rel, ex) - w / 2, v = dot(rel, ey) - h / 2;
+    return std::max(std::fabs(u) / (w / 2 + margin), std::fabs(v) / (h / 2 + margin));
 }
 
 static int selftest() {
-    // 1 m box, 2 m ahead (TL, TR, BR, BL), viewed from the origin.
+    // 1 m box, 2 m ahead (TL, TR, BR, BL), viewed from the origin; gaze aimed at points on the box plane.
     const XrVector3f box[4] = {{-0.5f, 0.5f, -2}, {0.5f, 0.5f, -2}, {0.5f, -0.5f, -2}, {-0.5f, -0.5f, -2}};
     const XrVector3f o{0, 0, 0};
-    auto near = [](float a, float b) { return std::fabs(a - b) < 0.05f; };
-    struct { XrVector3f dir; float want; const char* what; } cases[] = {
-        {{0, 0, -1}, 0, "through the center"},
-        {norm({0.4f, -0.4f, -2}), 0, "inside, near a corner"},
-        {norm({1.5f, 0, -2}), float(std::atan2(1.0, 2.5) * 180 / M_PI), "1 m right of the right edge"},
-        {norm({0, 1.0f, -2}), float(std::atan2(0.5, std::sqrt(5.0)) * 180 / M_PI), "0.5 m above the top"},
-        {{0, 0, 1}, 180, "looking away"},
+    struct { XrVector3f dir; float margin; bool want; const char* what; } cases[] = {
+        {{0, 0, -1}, 0, true, "through the center"},
+        {norm({0.45f, -0.45f, -2}), 0, true, "inside, near a corner"},
+        {norm({0.9f, 0, -2}), 0.3f, false, "0.4 m right, margin 0.3"},
+        {norm({0.9f, 0, -2}), 0.5f, true, "0.4 m right, margin 0.5"},
+        {norm({0.9f, 0.9f, -2}), 0.5f, true, "0.4 m off both edges (corner)"},  // rounded margin would miss
+        {norm({0, -1.1f, -2}), 0.5f, false, "0.6 m below, margin 0.5"},
+        {{0, 0, 1}, 10, false, "looking away"},
     };
     int fails = 0;
     for (auto& c : cases) {
-        float got = gaze_offset_deg(box, o, c.dir);
-        printf("%s %-28s got %6.2f want %6.2f\n", near(got, c.want) ? "ok  " : "FAIL", c.what, got, c.want);
-        fails += !near(got, c.want);
+        bool got = gaze_rect_score(box, o, c.dir, c.margin) <= 1;
+        printf("%s %-32s got %d want %d\n", got == c.want ? "ok  " : "FAIL", c.what, got, c.want);
+        fails += got != c.want;
     }
+    // Best hit: a small box inside a big one wins when you look at the small one.
+    const XrVector3f small[4] = {{0.2f, 0.2f, -2}, {0.4f, 0.2f, -2}, {0.4f, 0, -2}, {0.2f, 0, -2}};
+    XrVector3f at_small = norm({0.3f, 0.1f, -2});
+    bool ok = gaze_rect_score(small, o, at_small, 0.1f) < gaze_rect_score(box, o, at_small, 0.1f);
+    printf("%s %-32s\n", ok ? "ok  " : "FAIL", "nested small box scores better");
+    fails += !ok;
     return fails ? 1 : 0;
 }
 
@@ -1083,7 +1094,7 @@ void App::update_world_boxes() {
             for (int k = 0; k < 4; k++) meas[k] = add(m.origin, mul(sub(m.o.corners[k], m.origin), s));
         }
         if (best < 0) {
-            Track tr{m.o.cls, m.o.score, {}, {}, 1, now, 0};
+            Track tr{next_track_id_++, m.o.cls, m.o.score, {}, {}, 1, now, 0};
             tr.votes[m.o.cls] = m.o.score;
             std::copy(meas, meas + 4, tr.target);
             std::copy(meas, meas + 4, tr.shown);
@@ -1240,17 +1251,27 @@ void App::render_frame() {
             XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
         float k_gaze = 1 - std::exp(-std::min(frame_dt_, 0.1f) / 0.15f);
         std::vector<Vertex> verts;
-        for (Track& tr : tracks_) {
-            // Angle from the gaze to the box rather than its center: looking anywhere on a big object counts.
-            float off = gaze_offset_deg(tr.shown, gaze_origin, gaze_dir);
-            // While shown, the label counts as part of the target, so reading it doesn't hide it.
-            if (tr.focus_alpha > 0.01f) {
+        // Pick the one confirmed track the gaze hits best. Hit target: the box grown on every side by
+        // --focus-margin label heights (scales with distance like the label), scored 0 at the center to 1 at
+        // the grown edge, so a small object inside a big one wins when you look at it. The current pick
+        // gets a bonus (hysteresis) and its label counts as a center hit, so reading it keeps it up.
+        uint64_t best_id = 0;
+        float best = 1;
+        for (const Track& tr : tracks_) {
+            if (tr.alpha < 0.01f) continue;
+            LabelLayout label = layout_label(tr.shown, tr.cls, tr.score, eye);
+            float s = gaze_rect_score(tr.shown, gaze_origin, gaze_dir, g_opt.focus_margin * label.height());
+            if (tr.id == selected_id_) {
                 XrVector3f rect[4];
-                layout_label(tr.shown, tr.cls, tr.score, eye).rect(rect);
-                off = std::min(off, gaze_offset_deg(rect, gaze_origin, gaze_dir));
+                label.rect(rect);
+                if (gaze_rect_score(rect, gaze_origin, gaze_dir, 0) <= 1) s = 0;
+                s *= 0.8f;
             }
-            float focused = std::clamp(g_opt.focus_deg + 1 - off, 0.0f, 1.0f);  // 1° fade past the margin
-            tr.focus_alpha += (focused - tr.focus_alpha) * k_gaze;
+            if (s <= best) { best = s; best_id = tr.id; }
+        }
+        selected_id_ = best_id;
+        for (Track& tr : tracks_) {
+            tr.focus_alpha += ((tr.id == selected_id_ ? 1.0f : 0.0f) - tr.focus_alpha) * k_gaze;
             float a = tr.alpha * tr.focus_alpha;
             if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
         }
@@ -1345,7 +1366,7 @@ int main(int argc, char** argv) {
         else if (a == "--smooth-ms") g_opt.smooth_ms = std::max(1.0f, float(atof(next())));
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
-        else if (a == "--focus-deg") g_opt.focus_deg = float(atof(next()));
+        else if (a == "--focus-margin") g_opt.focus_margin = float(atof(next()));
         else if (a == "--no-eye-gaze") g_opt.eye_gaze = false;
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
