@@ -111,9 +111,12 @@ ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into `~/steamframe/t
 -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
 -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install`.
 (`SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.)
-Models: `yolo export model=yolo11n.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → `~/steamframe/models/yolo11n_<S>.ncnn.{param,bin}`.
+Models: `yolo export model=yolo11n.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → `~/steamframe/models/yolo11n_<S>.ncnn.{param,bin}`,
+then `python3 yoloxr/prep_model.py models/yolo11n_<S>.ncnn` → `yolo11n_<S>_gray.ncnn.*`, which yoloxr loads (attention
+MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only; 1-channel input folded into the first conv).
 The export bakes in the input size, so each `--size S` needs its own (default S=576; 480 and 640 also exported).
-YOLO11n on the Adreno 750 for the stacked S x 2S input (benchncnn, app running): 21.6 ms @480, 28.8 ms @576, 35.0 ms @640.
+YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running: 23 ms @480, 31.4 ms @576, 38.5 ms @640
+(37 ms @576 before prep_model.py and the conv options).
 
 ### Dead ends (so we don't retry them)
 
@@ -124,6 +127,10 @@ YOLO11n on the Adreno 750 for the stacked S x 2S input (benchncnn, app running):
   `XRService --snapshotCamerasAndExit` works if SteamVR is masked first (`systemctl --user mask --runtime`).
 - `/proc/<pid>/mem` can't read dmabuf mappings (EIO) — hence `pidfd_getfd`.
 - Hardware H.264 encoder (`v4l2h264enc`, `h264_v4l2m2m`) fails here; scripts use libx264.
+- YOLO attention as per-head ncnn `Gemm` (both inputs dynamic): ~21 ms per 64×648×648 product on Turnip. SDPA is ~5 ms.
+- ncnn Vulkan options: fp16 arithmetic, winograd, shader local memory, subgroup ops all best at their defaults.
+  No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 (`ncnn2table`/`ncnn2int8`, all layers still on the GPU):
+  50 ms @576 vs 32 ms fp16; every int8 conv is ~1.7x slower (no cooperative matrix on Turnip).
 
 ## Finding it if the IP changes
 

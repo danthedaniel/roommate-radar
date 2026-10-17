@@ -81,7 +81,7 @@ static uint64_t now_ns() {
 struct Options {
     bool xr = true;
     std::string dump;            // directory for debug PGMs (empty = off)
-    std::string model;           // default ../models/yolo11n_<size>.ncnn (exported at exactly size x 2*size)
+    std::string model;           // default ../models/yolo11n_<size>_gray.ncnn (exported at exactly size x 2*size, then prep_model.py)
     std::string calib = "calib.txt";
     int size = 576;              // per-view rectified size (YOLO input is size x 2*size)
     float hfov_deg = 100;        // virtual camera field of view
@@ -274,8 +274,11 @@ static void detect_loop() {
     ncnn::Net net;
     net.opt.use_vulkan_compute = ncnn::get_gpu_count() > 0;
     net.opt.num_threads = 2;
+    // ~1 ms faster on the Adreno 750 (Turnip) at every size; ncnn's other Vulkan defaults measured best.
+    net.opt.use_sgemm_convolution = false;
+    net.opt.use_winograd63_convolution = false;
     if (net.load_param((g_opt.model + ".param").c_str()) || net.load_model((g_opt.model + ".bin").c_str()))
-        throw std::runtime_error("failed to load model " + g_opt.model);
+        throw std::runtime_error("failed to load model " + g_opt.model + " (see prep_model.py)");
     printf("detector: ncnn %s\n", net.opt.use_vulkan_compute ? "Vulkan GPU" : "CPU");
 
     int shm_fd = -1;
@@ -320,9 +323,8 @@ static void detect_loop() {
         for (uint8_t& p : input) p = lut[p];
         uint64_t b = now_ns();
 
-        ncnn::Mat in = ncnn::Mat::from_pixels(input.data(), ncnn::Mat::PIXEL_GRAY2RGB, S, 2 * S);
-        const float norm[3] = {1 / 255.f, 1 / 255.f, 1 / 255.f};
-        in.substract_mean_normalize(nullptr, norm);
+        // prep_model.py folded GRAY2RGB and the 1/255 scale into the first conv.
+        ncnn::Mat in = ncnn::Mat::from_pixels(input.data(), ncnn::Mat::PIXEL_GRAY, S, 2 * S);
         ncnn::Extractor ex = net.create_extractor();
         ex.input("in0", in);
         ncnn::Mat out;
@@ -1371,7 +1373,7 @@ int main(int argc, char** argv) {
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
-    if (g_opt.model.empty()) g_opt.model = "../models/yolo11n_" + std::to_string(g_opt.size) + ".ncnn";
+    if (g_opt.model.empty()) g_opt.model = "../models/yolo11n_" + std::to_string(g_opt.size) + "_gray.ncnn";
     setvbuf(stdout, nullptr, _IOLBF, 0);
     signal(SIGINT, [](int) { g_quit = true; });
     signal(SIGTERM, [](int) { g_quit = true; });
