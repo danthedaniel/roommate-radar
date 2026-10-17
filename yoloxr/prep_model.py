@@ -4,6 +4,7 @@ Writes <prefix>_gray.ncnn.{param,bin}:
 - The C2PSA attention's MatMul/Softmax/MatMul becomes one SDPA layer. ncnn has no Vulkan MatMul, so it ran on the
   CPU with GPU<->CPU round trips in the middle of the net.
 - GRAY2RGB and the 1/255 scale are folded into the first conv: the input is the 1-channel 0..255 image.
+  (Just the scale for yolo11n-grayscale, which already takes 1 channel.)
 """
 import struct
 import sys
@@ -27,17 +28,18 @@ lines[i:i + 3] = [
 nl, nb = map(int, lines[1].split())
 lines[1] = f"{nl + 1} {nb + 1}"
 
-# The first conv's weights come first in the .bin: a 4-byte zero tag, then fp32 [out][3][kh][kw].
+# The first conv's weights come first in the .bin: a 4-byte zero tag, then fp32 [out][cin][kh][kw].
 i = next(n for n, l in enumerate(lines) if l.startswith("Convolution"))
 kv = dict(t.split("=") for t in lines[i].split()[6:])
 co, kk = int(kv["0"]), int(kv["1"]) * int(kv.get("11", kv["1"]))
-assert int(kv["6"]) == co * 3 * kk, "first conv doesn't take 3 channels (already converted?)"
+cin = int(kv["6"]) // (co * kk)
+assert cin in (1, 3), f"first conv takes {cin} channels"
 lines[i] = lines[i].replace(f"6={kv['6']}", f"6={co * kk}")
 b = open(src + ".bin", "rb").read()
 assert b[:4] == bytes(4), "weights aren't fp32"
-w = struct.unpack_from(f"<{co * 3 * kk}f", b, 4)
-folded = [sum(w[(o * 3 + c) * kk + j] for c in range(3)) / 255 for o in range(co) for j in range(kk)]
+w = struct.unpack_from(f"<{co * cin * kk}f", b, 4)
+folded = [sum(w[(o * cin + c) * kk + j] for c in range(cin)) / 255 for o in range(co) for j in range(kk)]
 
 open(dst + ".param", "w").write("\n".join(lines) + "\n")
-open(dst + ".bin", "wb").write(b[:4] + struct.pack(f"<{co * kk}f", *folded) + b[4 + co * 3 * kk * 4:])
+open(dst + ".bin", "wb").write(b[:4] + struct.pack(f"<{co * kk}f", *folded) + b[4 + co * cin * kk * 4:])
 print("wrote", dst)

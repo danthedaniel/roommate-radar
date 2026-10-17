@@ -116,10 +116,16 @@ ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into `~/steamframe/t
 -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
 -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install`.
 (`SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.)
-Models: `yolo export model=yolo11n.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → `~/steamframe/models/yolo11n_<S>.ncnn.{param,bin}`,
-then `python3 yoloxr/prep_model.py models/yolo11n_<S>.ncnn` → `yolo11n_<S>_gray.ncnn.*`, which yoloxr loads (attention
-MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only; 1-channel input folded into the first conv).
+Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 1-channel input;
+https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt).
+`yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
+to `~/steamframe/models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 yoloxr/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
+→ `yolo11n-grayscale_<S>_gray.ncnn.*`, which yoloxr loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
+1/255 folded into the first conv). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too); `--model` picks one.
 The export bakes in the input size, so each `--size S` needs its own (default S=576; 480 and 640 also exported).
+Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
+Vulkan on the Frame, pycocotools: mAP50-95 **35.8 vs 32.3** (mAP50 49.3 vs 45.4, AP small/medium/large 15.4/40.6/56.6 vs
+13.6/37.9/53.0); speed identical (~26 ms median each, yoloxr stopped).
 YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running: 23 ms @480, 31.4 ms @576, 38.5 ms @640
 (37 ms @576 before prep_model.py and the conv options).
 
