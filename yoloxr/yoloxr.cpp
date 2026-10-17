@@ -81,9 +81,9 @@ static uint64_t now_ns() {
 struct Options {
     bool xr = true;
     std::string dump;            // directory for debug PGMs (empty = off)
-    std::string model = "models/yolo11n.ncnn";
+    std::string model;           // default ../models/yolo11n_<size>.ncnn (exported at exactly size x 2*size)
     std::string calib = "calib.txt";
-    int size = 480;              // per-view rectified size (YOLO input is size x 2*size)
+    int size = 576;              // per-view rectified size (YOLO input is size x 2*size)
     float hfov_deg = 100;        // virtual camera field of view
     float conf = 0.25f;
     float iou = 0.5f;            // overlapping detections/tracks above this IoU keep only the most confident
@@ -1292,6 +1292,7 @@ int main(int argc, char** argv) {
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }
+    if (g_opt.model.empty()) g_opt.model = "../models/yolo11n_" + std::to_string(g_opt.size) + ".ncnn";
     setvbuf(stdout, nullptr, _IOLBF, 0);
     signal(SIGINT, [](int) { g_quit = true; });
     signal(SIGTERM, [](int) { g_quit = true; });

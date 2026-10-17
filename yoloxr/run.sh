@@ -4,7 +4,7 @@
 cd "$(dirname "$0")"
 [ -f calib.txt ] || python3 calib.py calib.txt
 sudo -n build/camserver > /tmp/camserver.log 2>&1 &
-build/yoloxr --model ../models/yolo11n.ncnn "$@" &
+build/yoloxr "$@" &
 app=$!
 trap 'kill -INT $app 2>/dev/null; wait $app; sudo -n pkill -x camserver' EXIT INT TERM
 # An open SteamVR dashboard keeps input focus, and without focus OpenXR delivers no eye gaze.

@@ -109,8 +109,9 @@ ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into `~/steamframe/t
 -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
 -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install`.
 (`SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.)
-Model: `yolo export model=yolo11n.pt format=ncnn` (ultralytics) → `~/steamframe/models/yolo11n.ncnn.{param,bin}`.
-YOLO11n on the Adreno 750 (benchncnn): 26 ms @640, 18 ms @480, 17 ms @320; CPU 42 ms @640.
+Models: `yolo export model=yolo11n.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → `~/steamframe/models/yolo11n_<S>.ncnn.{param,bin}`.
+The export bakes in the input size, so each `--size S` needs its own (default S=576; 480 and 640 also exported).
+YOLO11n on the Adreno 750 for the stacked S x 2S input (benchncnn, app running): 21.6 ms @480, 28.8 ms @576, 35.0 ms @640.
 
 ### Dead ends (so we don't retry them)
 
