@@ -92,8 +92,7 @@ struct Options {
     float smooth_ms = 80;        // displayed boxes glide toward the latest measurement with this time constant
     int confirm_hits = 3;        // detections needed before a track is shown (debounce)
     float hold_ms = 400;         // keep showing a track this long after its last detection, then fade out
-    float center_deg = 10;       // only show boxes within this angle of the gaze; fade out over the next 5°
-    float label_deg = 2;         // only show a box's label while the gaze is on it or within this margin
+    float focus_deg = 2;         // show a box (and label) only while the gaze is on it or within this margin
     bool eye_gaze = true;        // use eye tracking for the gaze direction (falls back to head forward)
 };
 static Options g_opt;
@@ -480,30 +479,44 @@ static void push_line(std::vector<Vertex>& vs, XrVector3f a, XrVector3f b, XrVec
     push_quad(vs, sub(a, side), add(a, side), add(b, side), sub(b, side), rgba);
 }
 
-static void push_box(std::vector<Vertex>& vs, const XrVector3f* corners, int cls, float score, float alpha,
-                     float label_alpha, XrVector3f eye) {
+// Label above the top-left corner, in the box's plane, in text units (y down) mapped to world by at().
+struct LabelLayout {
+    char text[96];
+    float tw, th = 9, scale;
+    XrVector3f origin, right, up;
+    XrVector3f at(float x, float y) const { return add(origin, add(mul(right, x * scale), mul(up, -y * scale))); }
+    void rect(XrVector3f out[4]) const {  // background, TL TR BR BL
+        out[0] = at(-2, -2); out[1] = at(tw + 2, -2); out[2] = at(tw + 2, th + 1); out[3] = at(-2, th + 1);
+    }
+};
+
+static LabelLayout layout_label(const XrVector3f* corners, int cls, float score, XrVector3f eye) {
+    LabelLayout l;
+    float dist = len(sub(add(corners[0], corners[2]), mul(eye, 2))) / 2;
+    snprintf(l.text, sizeof l.text, "%s %d%% %.1fm", kCoco[cls], int(score * 100), dist);
+    l.tw = float(stb_easy_font_width(l.text));
+    l.right = norm(sub(corners[1], corners[0]));
+    l.up = norm(sub(corners[0], corners[3]));
+    l.scale = 0.022f * dist / l.th;  // text ~1.3 degrees tall
+    l.origin = add(corners[0], mul(l.up, (l.th + 3) * l.scale));
+    return l;
+}
+
+static void push_box(std::vector<Vertex>& vs, const XrVector3f* corners, int cls, float score, float alpha, XrVector3f eye) {
     float rgba[4] = {0, 0, 0, alpha};
     color_for(cls, rgba);
     float dist = len(sub(add(corners[0], corners[2]), mul(eye, 2))) / 2;
     float width = 0.004f * dist;  // ~0.23 degrees regardless of distance
     for (int k = 0; k < 4; k++) push_line(vs, corners[k], corners[(k + 1) % 4], eye, width, rgba);
-    alpha *= label_alpha;
-    if (alpha < 0.01f) return;
 
-    // Label above the top-left corner, in the box's plane.
-    Obj o{cls, score, dist, {corners[0], corners[1], corners[2], corners[3]}, true, {}};
-    char text[96];
-    snprintf(text, sizeof text, "%s %d%% %.1fm", kCoco[o.cls], int(o.score * 100), o.dist);
+    LabelLayout l = layout_label(corners, cls, score, eye);
     static char buf[64 * 1024];
-    int quads = stb_easy_font_print(0, 0, text, nullptr, buf, sizeof buf);
-    float tw = float(stb_easy_font_width(text)), th = 9;
-    XrVector3f right = norm(sub(o.corners[1], o.corners[0]));
-    XrVector3f up = norm(sub(o.corners[0], o.corners[3]));
-    float scale = 0.022f * dist / th;  // text ~1.3 degrees tall
-    XrVector3f origin = add(o.corners[0], mul(up, (th + 3) * scale));
-    auto at = [&](float x, float y) { return add(origin, add(mul(right, x * scale), mul(up, -y * scale))); };
+    int quads = stb_easy_font_print(0, 0, l.text, nullptr, buf, sizeof buf);
+    auto at = [&](float x, float y) { return l.at(x, y); };
+    XrVector3f bg_rect[4];
+    l.rect(bg_rect);
     float bg[4] = {0, 0, 0, 0.55f * alpha};
-    push_quad(vs, at(-2, -2), at(tw + 2, -2), at(tw + 2, th + 1), at(-2, th + 1), bg);
+    push_quad(vs, bg_rect[0], bg_rect[1], bg_rect[2], bg_rect[3], bg);
     float fg[4] = {rgba[0], rgba[1], rgba[2], alpha};
     const float* q = (const float*)buf;  // 4 verts per quad: x, y, z, color(4 bytes)
     for (int i = 0; i < quads; i++, q += 16)
@@ -595,8 +608,7 @@ struct Track {
     uint64_t last_seen_ns;
     float alpha = 0;
     float votes[80] = {};  // decaying per-class confidence; cls = argmax, so the label doesn't flip-flop
-    float gaze_alpha = 0;  // eases toward "near the gaze" so saccades don't make boxes blink
-    float label_alpha = 0; // eases toward "gaze on the box"
+    float focus_alpha = 0; // eases toward "gaze on the box"; saccades don't make it blink
 };
 
 static XrVector3f center(const XrVector3f* c) { return mul(add(add(c[0], c[1]), add(c[2], c[3])), 0.25f); }
@@ -1221,8 +1233,8 @@ void App::render_frame() {
         animate_tracks();
         XrVector3f eye = mul(add(views[0].pose.position, views[1].pose.position), 0.5f);
         suppress_overlapping_tracks(eye, views[0].pose.orientation);
-        // Detections near the edge of the view come and go; only show what's near where you're looking
-        // (eye gaze if tracked, else head forward). Per-track easing keeps saccades from blinking boxes.
+        // Only show the object you're looking at (eye gaze if tracked, else head forward).
+        // Per-track easing keeps saccades from blinking boxes.
         XrVector3f gaze_origin = eye, gaze_dir, minus_z{0, 0, -1};
         if (!locate_gaze(fs.predictedDisplayTime, gaze_origin, gaze_dir))
             XrQuaternionf_RotateVector3f(&gaze_dir, &views[0].pose.orientation, &minus_z);
@@ -1231,12 +1243,16 @@ void App::render_frame() {
         for (Track& tr : tracks_) {
             // Angle from the gaze to the box rather than its center: looking anywhere on a big object counts.
             float off = gaze_offset_deg(tr.shown, gaze_origin, gaze_dir);
-            float near_gaze = std::clamp((g_opt.center_deg + 5 - off) / 5, 0.0f, 1.0f);
-            float on_box = std::clamp(g_opt.label_deg + 1 - off, 0.0f, 1.0f);  // label: gaze on the box (+margin)
-            tr.gaze_alpha += (near_gaze - tr.gaze_alpha) * k_gaze;
-            tr.label_alpha += (on_box - tr.label_alpha) * k_gaze;
-            float a = tr.alpha * tr.gaze_alpha;
-            if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, tr.label_alpha, eye);
+            // While shown, the label counts as part of the target, so reading it doesn't hide it.
+            if (tr.focus_alpha > 0.01f) {
+                XrVector3f rect[4];
+                layout_label(tr.shown, tr.cls, tr.score, eye).rect(rect);
+                off = std::min(off, gaze_offset_deg(rect, gaze_origin, gaze_dir));
+            }
+            float focused = std::clamp(g_opt.focus_deg + 1 - off, 0.0f, 1.0f);  // 1° fade past the margin
+            tr.focus_alpha += (focused - tr.focus_alpha) * k_gaze;
+            float a = tr.alpha * tr.focus_alpha;
+            if (a > 0.01f) push_box(verts, tr.shown, tr.cls, tr.score, a, eye);
         }
         uint32_t nverts = uint32_t(std::min(verts.size(), vcap_));
         memcpy(vmap_, verts.data(), nverts * sizeof(Vertex));
@@ -1329,9 +1345,8 @@ int main(int argc, char** argv) {
         else if (a == "--smooth-ms") g_opt.smooth_ms = std::max(1.0f, float(atof(next())));
         else if (a == "--confirm-hits") g_opt.confirm_hits = atoi(next());
         else if (a == "--hold-ms") g_opt.hold_ms = float(atof(next()));
-        else if (a == "--center-deg") g_opt.center_deg = float(atof(next()));
+        else if (a == "--focus-deg") g_opt.focus_deg = float(atof(next()));
         else if (a == "--no-eye-gaze") g_opt.eye_gaze = false;
-        else if (a == "--label-deg") g_opt.label_deg = float(atof(next()));
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
     }
     if (g_opt.size % 32) { fprintf(stderr, "--size must be a multiple of 32\n"); return 2; }

@@ -89,7 +89,8 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `--latency-ms` tunes the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
   105.6 mm horizontal baseline.
-- Boxes are shown within `--center-deg` of the eye gaze (`XR_EXT_eye_gaze_interaction`). An open
+- A box and its label are shown only while the eye gaze (`XR_EXT_eye_gaze_interaction`) is on the
+  box or its label, within `--focus-deg` (default 2). An open
   SteamVR dashboard keeps the session at VISIBLE (not FOCUSED) and OpenXR then delivers no gaze, so
   `run.sh` runs `vrcmd --hidedashboard` after launch. Log line `eye gaze tracked in N% of frames`.
 
