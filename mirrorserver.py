@@ -13,6 +13,7 @@ import time
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 5600
 TIMEOUT = 3  # s without a keepalive before a client is dropped
+STALL = 5  # s without output before ffmpeg is restarted: it hangs, not exits, when v4l2cam stops (~1 fps when idle)
 PKT = 7 * 188  # 7 TS packets per datagram, the usual MPEG-TS-over-UDP size
 # libx264: the hardware encoder (v4l2h264enc / h264_v4l2m2m) fails on this input
 FFMPEG = ["ffmpeg", "-hide_banner", "-loglevel", "error", "-f", "v4l2", "-i", "/dev/video99", "-pix_fmt", "yuv420p",
@@ -27,6 +28,7 @@ sel = selectors.DefaultSelector()
 sel.register(sock, selectors.EVENT_READ)
 clients = {}  # addr -> last keepalive
 enc, buf = None, b""
+enc_out = retry_at = 0  # last ffmpeg output; earliest next ffmpeg start
 print(f"mirrorserver: udp {PORT}", flush=True)
 
 try:
@@ -39,11 +41,10 @@ try:
                 clients[addr] = time.monotonic()
             else:
                 data = os.read(enc.stdout.fileno(), 1 << 16)
-                if not data:  # ffmpeg died; restarted below while clients remain
-                    sel.unregister(enc.stdout)
-                    enc.wait()
-                    enc = None
+                if not data:  # ffmpeg died; cleaned up and restarted below
+                    enc_out = 0
                     continue
+                enc_out = time.monotonic()
                 buf += data
                 n = len(buf) // PKT * PKT
                 for i in range(0, n, PKT):
@@ -57,14 +58,17 @@ try:
         for addr in [a for a, t in clients.items() if now - t > TIMEOUT]:
             print(f"mirrorserver: - {addr[0]}:{addr[1]}", flush=True)
             del clients[addr]
-        if clients and not enc:
-            enc, buf = subprocess.Popen(FFMPEG, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL), b""
-            sel.register(enc.stdout, selectors.EVENT_READ)
-        elif not clients and enc:
+        if enc and (not clients or now - enc_out > STALL):
             sel.unregister(enc.stdout)
             enc.kill()  # not terminate: ffmpeg's SIGTERM exit blocks writing to the pipe we no longer read
             enc.wait()
             enc = None
+        if clients and not enc and now >= retry_at:
+            # Feeds /dev/video99. Only game mode starts it, and not at boot before SteamVR is up. No-op if running.
+            subprocess.run(["systemctl", "--user", "start", "--no-block", "steamvr-v4l2cam"])
+            enc, buf = subprocess.Popen(FFMPEG, stdout=subprocess.PIPE, stdin=subprocess.DEVNULL), b""
+            enc_out, retry_at = now, now + 2  # ffmpeg exits at once while /dev/video99 has no producer
+            sel.register(enc.stdout, selectors.EVENT_READ)
 finally:
     if enc:
         enc.kill()
