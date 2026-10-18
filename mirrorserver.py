@@ -62,7 +62,7 @@ try:
             sel.register(enc.stdout, selectors.EVENT_READ)
         elif not clients and enc:
             sel.unregister(enc.stdout)
-            enc.terminate()
+            enc.kill()  # not terminate: ffmpeg's SIGTERM exit blocks writing to the pipe we no longer read
             enc.wait()
             enc = None
 finally:

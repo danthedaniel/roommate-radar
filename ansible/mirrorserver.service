@@ -1,5 +1,7 @@
 [Unit]
 Description=Headset view (/dev/video99) as H.264 MPEG-TS over UDP 5600, see udpmirror.py
+# Feeds /dev/video99. Only game mode's gamescope-session.target starts it, so desktop mode has no headset view without this.
+Wants=steamvr-v4l2cam.service
 
 [Service]
 ExecStart=/usr/bin/python3 %h/steamframe/mirrorserver.py

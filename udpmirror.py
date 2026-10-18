@@ -12,15 +12,17 @@ import time
 
 host = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("FRAME_HOST", "frame.local")
 port = int(sys.argv[2]) if len(sys.argv) > 2 else 5600
-addr = (socket.gethostbyname(host), port)
-
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)  # an 8 Mbit/s keyframe arrives as one burst
 
 
 def keepalive():
+    # Re-resolve every time and never die: a Wi-Fi blip, sleep/wake or a new DHCP address must not stop the stream.
     while True:
-        sock.sendto(b"hi", addr)
+        try:
+            sock.sendto(b"hi", (socket.gethostbyname(host), port))
+        except OSError:
+            pass
         time.sleep(1)
 
 
@@ -33,7 +35,8 @@ if sys.stdout.isatty():
     lport = local.getsockname()[1]
     local.close()
     player = subprocess.Popen(["ffplay", "-loglevel", "error", "-fflags", "nobuffer", "-flags", "low_delay",
-                               "-framedrop", "-f", "mpegts", "-window_title", "Steam Frame",
+                               "-framedrop", "-probesize", "32", "-analyzeduration", "0",  # first frame in ~1 s, not ~6 s
+                               "-f", "mpegts", "-window_title", "Steam Frame",
                                f"udp://127.0.0.1:{lport}?fifo_size=100000&overrun_nonfatal=1"])
     write = lambda data: sock.sendto(data, ("127.0.0.1", lport))
 else:
@@ -44,9 +47,11 @@ try:
     while player is None or player.poll() is None:
         try:
             write(sock.recv(65536))
-        except (TimeoutError, ConnectionRefusedError):  # refused: ffplay not listening yet, or just quit
+        except BrokenPipeError:  # stdout reader went away
+            break
+        except OSError:  # timeout; refused (ffplay not listening yet, server restarting); network down
             pass
-except (BrokenPipeError, KeyboardInterrupt):
+except KeyboardInterrupt:
     pass
 finally:
     if player:
