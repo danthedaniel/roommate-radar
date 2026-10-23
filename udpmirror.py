@@ -2,7 +2,9 @@
 """Watch the headset view streamed by mirrorserver.py (a user service on the Frame, see ansible/) over UDP.
 Usage: ./udpmirror.py [host] [port]             -> plays in ffplay
        ./udpmirror.py [host] [port] > out.ts    -> saves the H.264 MPEG-TS stream
+       ./udpmirror.py --record out.mp4          -> plays and also saves the stream (no re-encode) to an MP4
 """
+import argparse
 import os
 import socket
 import subprocess
@@ -10,8 +12,12 @@ import sys
 import threading
 import time
 
-host = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("FRAME_HOST", "frame.local")
-port = int(sys.argv[2]) if len(sys.argv) > 2 else 5600
+ap = argparse.ArgumentParser()
+ap.add_argument("host", nargs="?", default=os.environ.get("FRAME_HOST", "frame.local"))
+ap.add_argument("port", nargs="?", type=int, default=5600)
+ap.add_argument("--record", metavar="MP4", help="also copy the H.264 stream into this MP4 file")
+args = ap.parse_args()
+host, port = args.host, args.port
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)  # an 8 Mbit/s keyframe arrives as one burst
 
@@ -42,6 +48,16 @@ if sys.stdout.isatty():
 else:
     player, out = None, open(1, "wb", buffering=0)
     write = out.write
+recorder = None
+if args.record:
+    # Fragmented MP4 stays playable if this is killed before ffmpeg can finish the file.
+    recorder = subprocess.Popen(["ffmpeg", "-loglevel", "error", "-y", "-f", "mpegts", "-i", "pipe:0", "-c", "copy",
+                                 "-movflags", "+frag_keyframe+empty_moov", args.record], stdin=subprocess.PIPE)
+    play = write
+
+    def write(data):
+        recorder.stdin.write(data)
+        play(data)
 sock.settimeout(1)  # so closing ffplay ends this even when nothing arrives
 try:
     while player is None or player.poll() is None:
@@ -56,3 +72,6 @@ except KeyboardInterrupt:
 finally:
     if player:
         player.terminate()
+    if recorder:
+        recorder.stdin.close()
+        recorder.wait()

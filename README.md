@@ -69,6 +69,7 @@ ssh steamos@frame.local 'sudo python3 - --frames 1' < rawcam.py \
   | ffmpeg -f rawvideo -pix_fmt gray -s 2112x1504 -i - snap.png   # one raw snapshot
 ./udpmirror.py                                 # headset view (/dev/video99) from the mirrorserver service; black/~1 fps when not worn
 ./udpmirror.py > out.ts                        # same, saved
+./udpmirror.py --record out.mp4                # watch and save to MP4 (stream copied, not re-encoded)
 ./mirror.sh                                    # same over ssh, no service needed
 ```
 
