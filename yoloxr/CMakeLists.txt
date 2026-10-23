@@ -32,6 +32,6 @@ find_library(OPENVR_API NAMES libopenvr_api.so PATHS $ENV{HOME}/.local/share/Ste
 add_executable(guardian guardian.cpp)
 target_include_directories(guardian PRIVATE /opt/steamvr/tools/hellovr_vulkan_linux/src/openvr/headers)
 find_package(Freetype REQUIRED)
-target_link_libraries(guardian PRIVATE ncnn ${OPENVR_API} Freetype::Freetype pthread)
+target_link_libraries(guardian PRIVATE ncnn ${OPENVR_API} Freetype::Freetype Vulkan::Vulkan pthread)
 get_filename_component(OPENVR_DIR ${OPENVR_API} DIRECTORY)
 set_target_properties(guardian PROPERTIES BUILD_RPATH ${OPENVR_DIR})
