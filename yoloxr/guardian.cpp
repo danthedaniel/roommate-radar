@@ -361,6 +361,8 @@ static void log_frame_stats() {
 }
 
 static int register_app() {
+    // VR_Init would start SteamVR outside its systemd service, which then can't come up until that one is killed.
+    if (system("pgrep -x vrserver > /dev/null")) { fprintf(stderr, "SteamVR isn't running\n"); return 1; }
     vr::EVRInitError err;
     vr::VR_Init(&err, vr::VRApplication_Utility);
     if (err) { fprintf(stderr, "VR_Init: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(err)); return 1; }
@@ -554,6 +556,7 @@ int main(int argc, char** argv) {
         float k = 1 - std::exp(-(now - last_frame_ns) / 1e9f / std::max(g_smooth_s, 1e-3f));
         last_frame_ns = now;
         std::unordered_map<uint64_t, std::array<float, 5>> still_shown;
+        std::string where;  // for the log: each shown box relative to the head
         int n = 0;
         for (const track::Track& t : tracker.tracks) {
             // Confirmed and matched recently (the tracker drops stale tracks only when the next detections come).
@@ -565,6 +568,14 @@ int main(int argc, char** argv) {
             for (int i = 0; i < 5; i++) p[i] += (est[i] - p[i]) * k;
             still_shown[t.id] = p;
             float w = p[3], ht = p[4];
+            {
+                // Bearing from the head's horizontal forward (-z), + = right; height relative to the eyes.
+                float vx = p[0] - h.x, vz = p[2] - h.z, fx = -head.m[0][2], fz = -head.m[2][2];
+                char b[96];
+                snprintf(b, sizeof b, " | %s %.0f%% %.1fm %+.0fdeg %+.1fm", kCoco[t.cls], t.score * 100, std::hypot(vx, vz),
+                         std::atan2(fx * vz - fz * vx, fx * vx + fz * vz) * 180 / float(M_PI), p[1] - h.y);
+                where += b;
+            }
             // 256 texels across; height in steps of 8 so the texture is only redrawn when the aspect really changes
             int pw = 256, ph = std::clamp(int(std::lround(pw * ht / w / 8)) * 8, 32, 1024);
             if (ph != tex_h[n] || t.cls != tex_cls[n]) {
@@ -591,7 +602,11 @@ int main(int argc, char** argv) {
             n++;
         }
         for (int i = n; i < shown_before; i++) vr::VROverlay()->HideOverlay(overlays[i]), vr::VROverlay()->HideOverlay(labels[i]);
-        if (n != shown_before) printf("guardian: showing %d\n", n);
+        static uint64_t last_where_ns = 0;
+        if (n != shown_before || (n && now - last_where_ns > 2000000000ull)) {
+            printf("guardian: showing %d%s\n", n, where.c_str());
+            last_where_ns = now;
+        }
         shown_before = n;
         shown.swap(still_shown);
 
