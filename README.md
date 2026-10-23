@@ -84,9 +84,10 @@ Every first-time step is skipped once its output exists.
 
 - Always: pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
 - `mirror`: ships `mirrorserver.py` and enables the `mirrorserver` user service.
-- `yoloxr`: on the Mac, downloads `yolo11n-grayscale.pt` and exports + preps the 480/576/640 models into `models/`
-  (`uvx`, needs uv); on the Frame, clones ncnn (pinned commit) and builds it, ships the models, rsyncs `yoloxr/` to
-  `~/steamframe/yoloxr` (keeps the Frame's `build/` and `calib.txt`) and builds it, clones Valve's steamos-devkit to
+- `yoloxr`: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
+  320/480/576/640 models into `models/` (`uvx`, needs uv); on the Frame, rsyncs ncnn and builds it, ships the models,
+  rsyncs `yoloxr/` to `~/steamframe/yoloxr` (keeps the Frame's `build/` and `calib.txt`) and builds it (yoloxr,
+  camserver, guardian), clones Valve's steamos-devkit to
   `~/steamos-devkit`, adds yoloxr to the Steam library if it isn't there yet, and adds a "yoloxr" launcher to the
   KDE (desktop mode) menu and desktop that starts it through Steam.
 
@@ -141,7 +142,9 @@ this: `~/devkit-game/yoloxr` symlinks to `~/steamframe/yoloxr` (so redeploys nee
 Steam stdout goes to `~/.local/share/Steam/logs/steam_output.log`. Launch it from ssh the same way: `make launch`
 (`steam-devkit-rpc run-game gameid=yoloxr`).
 
-What ansible does for ncnn and the models, by hand. ncnn: `git clone --depth 1 https://github.com/Tencent/ncnn` into
+What ansible does for ncnn and the models, by hand. ncnn is the submodule `third_party/ncnn`: branch `ncnn` of this repo,
+a history-less snapshot of upstream c15904b plus our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see guardian). Its URL is `./`,
+so check it out with `git -c protocol.file.allow=always submodule update --init`. Copy it to
 `~/steamframe/third_party/ncnn`, then `cmake -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
 -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
 -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install`.
@@ -178,6 +181,26 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks
   to. Qualcomm's `cdsp.mbn` (has the unsigned-PD shell built in) sits unused in `/lib/firmware/qcom/sm8650`.
+
+## guardian: people, cats and dogs over any VR app
+
+OpenVR overlay app (`yoloxr/guardian.cpp`, same detector as yoloxr via `detector.h`) for playing without
+passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
+running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
+Detections go through a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman filter, Hungarian
+matching on 3D distance, low-confidence detections only extend tracks), and boxes are drawn at the track's prediction
+for now, so they don't trail the detector's few hundred ms of latency. Boxes with a controller inside them (same
+depth) are your hands and are ignored.
+
+- Starts with SteamVR: `build/guardian --register` (in `~/steamframe/yoloxr`) adds `guardian.vrmanifest` with
+  auto-launch and starts it. `guardian.sh` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
+- "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, range, status. Saved in
+  `~/.config/guardian.conf`.
+- GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
+  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's presented/dropped/reprojected frames and GPU time;
+  `--no-detector` gives the baseline.
+- yoloxr's `run.sh` restarts camserver when it starts and kills it when it exits, which leaves guardian without frames
+  until guardian restarts.
 
 ## Finding it if the IP changes
 

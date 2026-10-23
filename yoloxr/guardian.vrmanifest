@@ -1,0 +1,18 @@
+{
+	"source": "user",
+	"applications": [
+		{
+			"app_key": "steamframe.guardian",
+			"launch_type": "binary",
+			"binary_path_linux_arm": "guardian.sh",
+			"arguments": "",
+			"is_dashboard_overlay": true,
+			"strings": {
+				"en_us": {
+					"name": "guardian",
+					"description": "Outlines people, cats and dogs over any VR app"
+				}
+			}
+		}
+	]
+}

@@ -26,3 +26,12 @@ get_filename_component(OPENXR_DIR ${OPENXR_LOADER} DIRECTORY)
 set_target_properties(yoloxr PROPERTIES BUILD_RPATH ${OPENXR_DIR})
 
 add_executable(camserver camserver.cpp)
+
+# OpenVR overlay over any VR app; Steam's arm64 libopenvr_api, the headers SteamVR ships with hellovr
+find_library(OPENVR_API NAMES libopenvr_api.so PATHS $ENV{HOME}/.local/share/Steam/steamrtarm64 NO_DEFAULT_PATH REQUIRED)
+add_executable(guardian guardian.cpp)
+target_include_directories(guardian PRIVATE /opt/steamvr/tools/hellovr_vulkan_linux/src/openvr/headers)
+find_package(Freetype REQUIRED)
+target_link_libraries(guardian PRIVATE ncnn ${OPENVR_API} Freetype::Freetype pthread)
+get_filename_component(OPENVR_DIR ${OPENVR_API} DIRECTORY)
+set_target_properties(guardian PROPERTIES BUILD_RPATH ${OPENVR_DIR})

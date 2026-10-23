@@ -23,6 +23,13 @@
       when: ssh.rc != 0
       tags: always
 
+    # ncnn is a submodule: branch "ncnn" of this repo (upstream snapshot + our patches). Its URL is ./ (this repo),
+    # which needs file transport allowed for submodules.
+    - name: Check out the ncnn submodule
+      command: git -c protocol.file.allow=always submodule update --init third_party/ncnn
+      args: {chdir: "{{ playbook_dir }}/..", creates: "{{ playbook_dir }}/../third_party/ncnn/CMakeLists.txt"}
+      tags: yoloxr
+
     # Exported on the Mac (ultralytics + torch don't run on the Frame), copied over below.
     - name: Download YOLO11n grayscale weights
       get_url:
@@ -38,7 +45,7 @@
         rm -r yolo11n-grayscale_ncnn_model
         python3 ../yoloxr/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
       args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
-      loop: [480, 576, 640]
+      loop: [320, 480, 576, 640]
       tags: yoloxr
 
 - hosts: frame
@@ -61,11 +68,19 @@
       systemd_service: {name: mirrorserver, scope: user, enabled: true, state: started, daemon_reload: true}
       tags: mirror
 
-    # Pinned to the commit yoloxr was tuned on. After changing it, delete ~/steamframe/third_party/ncnn-install to rebuild.
-    - name: Fetch ncnn
-      git: {repo: https://github.com/Tencent/ncnn.git, dest: "{{ ncnn }}", version: "{{ ncnn_commit }}",
-            refspec: "{{ ncnn_commit }}", depth: 1, recursive: false}  # refspec: shallow clones of a SHA need it
-      vars: {ncnn_commit: c15904bb8918187ec100f1ebe708942af83b84be}
+    # The submodule's working tree (see the localhost play); the Frame keeps its build/ so rebuilds are incremental.
+    - name: Ship ncnn source
+      synchronize:
+        src: "{{ root }}/third_party/ncnn/"
+        dest: "{{ ncnn }}/"
+        delete: true  # excluded paths are kept
+        rsync_opts: [--exclude=/build, --exclude=.git]
+      register: ncnn_src
+      tags: yoloxr
+
+    - name: Check for a built ncnn
+      stat: {path: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
+      register: ncnn_built
       tags: yoloxr
 
     # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h
@@ -75,7 +90,8 @@
         -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
         -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install
         && cmake --build build && cmake --install build
-      args: {chdir: "{{ ncnn }}", creates: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
+      args: {chdir: "{{ ncnn }}"}
+      when: ncnn_src is changed or not ncnn_built.stat.exists
       tags: yoloxr
 
     - name: Ship models
