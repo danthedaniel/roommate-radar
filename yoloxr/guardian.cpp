@@ -2,13 +2,14 @@
 // without passthrough. Same detector as yoloxr (detector.h), at a low size and rate to leave the GPU to the game.
 //
 // Each confirmed track is a box overlay (rounded outline) plus a label overlay (class, confidence): upright sprites
-// turned to face you every compositor frame, in the standing universe. Detections feed a ByteTrack-style tracker
-// (tracker.h: Kalman filter per track), and each box is drawn where its track predicts the person is now, not where
-// the cameras saw them a few hundred ms ago.
+// turned to face you every compositor frame, in the standing universe. Detections are matched into tracks by a
+// ByteTrack-style tracker (tracker.h); each box's center and size follow a cubic spline (time-based Catmull-Rom)
+// through its track's last detections, played back one detection period behind the newest one so there is always
+// a segment to be in.
 //
 // A "Guardian" tab in the SteamVR dashboard toggles it and what it shows; settings persist in ~/.config/guardian.conf.
 //
-// Usage: guardian [--max-dist 3] [--size 320] [--max-hz 4] [--smooth-ms 80] [detector options, detector.h]
+// Usage: guardian [--max-dist 3] [--size 320] [--max-hz 4] [detector options, detector.h]
 //        guardian --no-detector   (only log the VR app's frame stats, as a baseline)
 //        guardian --register   (add guardian.vrmanifest to SteamVR, auto-launch with SteamVR, start it now)
 //        guardian --selftest
@@ -20,7 +21,6 @@
 #include <vulkan/vulkan.h>
 #include <openvr.h>
 
-#include <array>
 #include <thread>
 #include <unordered_map>
 
@@ -29,7 +29,6 @@
 
 static const char* kAppKey = "steamframe.guardian";
 static const int kMaxOverlays = 8;
-static float g_smooth_s = 0.08f;      // drawn boxes glide to the track estimate with this time constant
 static bool g_detector = true;        // --no-detector: just log frame stats (baseline for the detector's cost)
 static const float kLabelH = 0.07f;   // label height (m), just above the box
 static const char* kFont = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
@@ -199,6 +198,7 @@ namespace panel {
 
 const int W = 1000, H = 680, kPad = 48, kTop = 190, kRowH = 92;
 enum Ctl { kEnabled, kPeople, kPets, kHands, kRangeMinus, kRangePlus };
+const int kToggles = kRangeMinus, kRangeRow = kToggles;  // one row per switch, then the range row
 const char* kRows[] = {"Enabled", "People", "Cats and dogs", "Ignore my hands", "Range"};
 const int kToggleW = 104, kToggleH = 56, kBtnR = 28;
 
@@ -209,10 +209,10 @@ static float plus_cx() { return W - kPad - kBtnR; }
 // Which control (texture pixel, y down) is under the pointer: the whole row for toggles, the buttons for range.
 static int hit(float x, float y) {
     int row = int(std::floor((y - kTop) / kRowH));
-    if (x < kPad || x > W - kPad || row < 0 || row > 4) return -1;
-    if (row < 4) return row;
-    if (std::hypot(x - minus_cx(), y - row_cy(4)) < kBtnR + 12) return kRangeMinus;
-    if (std::hypot(x - plus_cx(), y - row_cy(4)) < kBtnR + 12) return kRangePlus;
+    if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow) return -1;
+    if (row < kToggles) return row;
+    if (std::hypot(x - minus_cx(), y - row_cy(kRangeRow)) < kBtnR + 12) return kRangeMinus;
+    if (std::hypot(x - plus_cx(), y - row_cy(kRangeRow)) < kBtnR + 12) return kRangePlus;
     return -1;
 }
 
@@ -248,14 +248,14 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
     fill_rrect(px, 0, 0, W, H, 32, bg, 0.94f);
     draw_text(&px, W, H, kPad, 100, "Guardian", white, 56);
     draw_text(&px, W, H, kPad, 150, status.c_str(), grey, 30);
-    bool on[4] = {g_set.enabled, g_set.people, g_set.pets, g_set.hands};
-    for (int row = 0; row < 5; row++) {
+    bool on[kToggles] = {g_set.enabled, g_set.people, g_set.pets, g_set.hands};
+    for (int row = 0; row <= kRangeRow; row++) {
         float cy = row_cy(row);
         if (hover == row) fill_rrect(px, kPad - 20, cy - kRowH / 2.f + 4, W - 2 * kPad + 40, kRowH - 8, 18, white, 0.05f);
         if (row) fill_rrect(px, kPad, cy - kRowH / 2.f, W - 2 * kPad, 1.5f, 0, white, 0.08f);
         bool dim = row > 0 && !g_set.enabled;  // the other settings don't matter while it's off
         draw_text(&px, W, H, kPad, int(cy + 13), kRows[row], dim ? grey : white, 36);
-        if (row < 4) {  // switch: accent track with the knob right when on
+        if (row < kToggles) {  // switch: accent track with the knob right when on
             float x0 = W - kPad - kToggleW, y0 = cy - kToggleH / 2.f;
             fill_rrect(px, x0, y0, kToggleW, kToggleH, kToggleH / 2.f, on[row] ? accent : off, dim ? 0.5f : 1);
             fill_circle(px, on[row] ? x0 + kToggleW - kToggleH / 2.f : x0 + kToggleH / 2.f, cy, kToggleH / 2.f - 5, white, dim ? 0.6f : 1);
@@ -291,6 +291,28 @@ static std::vector<uint8_t> icon(int& size) {
 }
 
 }  // namespace panel
+
+// Cubic Hermite through the samples with Catmull-Rom tangents scaled by the real sample spacing (one-sided at the
+// ends), so uneven detector timing doesn't kink the path. Clamps to the first/last sample outside their span.
+static track::Sample spline_at(const std::deque<track::Sample>& s, double t) {
+    if (t <= s.front().t) return s.front();
+    if (t >= s.back().t) return s.back();
+    size_t i = 0;
+    while (s[i + 1].t <= t) i++;
+    auto tangent = [&](size_t k, int c) {  // per second
+        size_t a = k ? k - 1 : k, b = std::min(k + 1, s.size() - 1);
+        return (s[b].v[c] - s[a].v[c]) / float(s[b].t - s[a].t);
+    };
+    float dt = float(s[i + 1].t - s[i].t), u = float(t - s[i].t) / dt, u2 = u * u, u3 = u2 * u;
+    track::Sample r{t, {}};
+    for (int c = 0; c < 5; c++)
+        r.v[c] = (2 * u3 - 3 * u2 + 1) * s[i].v[c] + (u3 - 2 * u2 + u) * dt * tangent(i, c) +
+                 (-2 * u3 + 3 * u2) * s[i + 1].v[c] + (u3 - u2) * dt * tangent(i + 1, c);
+    return r;
+}
+
+// Seconds from `then` to `now` (CLOCK_MONOTONIC ns), signed: negating an unsigned difference wraps around.
+static float seconds(uint64_t now, uint64_t then) { return float(int64_t(now - then)) / 1e9f; }
 
 static vr::HmdMatrix34_t head_pose(float seconds_from_now, bool& ok) {
     vr::TrackedDevicePose_t p;
@@ -579,7 +601,18 @@ static int selftest() {
     m = facing({2, 1, 0}, {0, 1.6f, 0});  // box to the right: +z points to -x
     check(std::fabs(m.m[0][2] + 1) < 1e-5f && std::fabs(m.m[1][1] - 1) < 1e-5f, "quad to the right faces the head");
 
+    // Spline: passes through the samples, exact for steady motion even with uneven spacing, clamps at the ends.
+    std::deque<track::Sample> s;
+    for (double t : {0.0, 0.25, 0.45, 0.75}) s.push_back({t, {float(t), 1, -2, 0.5f, 1.7f}});  // 1 m/s along x
+    check(std::fabs(spline_at(s, 0.45).v[0] - 0.45f) < 1e-5f, "spline passes through a sample");
+    float worst = 0;
+    for (int ms = 0; ms <= 750; ms += 10) worst = std::max(worst, std::fabs(spline_at(s, ms / 1000.0).v[0] - ms / 1000.f));
+    check(worst < 1e-4f, "spline is exact for steady motion");
+    check(spline_at(s, 0.9).v[0] == 0.75f && spline_at(s, 0.9).v[4] == 1.7f, "spline clamps after the end");
+
     fails += track::selftest([](bool ok, const char* what) { printf("%s %s\n", ok ? "ok  " : "FAIL", what); });
+
+    check(-seconds(3000000000ull, 2950000000ull) == -0.05f && seconds(1, 2) < 0, "signed seconds between timestamps");
 
     // Label: pill sized to the text (transparent outside its rounded ends), white text, colored dot.
     int lw, lh;
@@ -598,7 +631,8 @@ static int selftest() {
 
     // Dashboard: rows and buttons hit-test to their controls, pressing them changes the settings.
     check(panel::hit(500, panel::row_cy(panel::kPeople)) == panel::kPeople &&
-              panel::hit(panel::plus_cx(), panel::row_cy(4)) == panel::kRangePlus && panel::hit(500, 50) == -1,
+              panel::hit(panel::plus_cx(), panel::row_cy(panel::kRangeRow)) == panel::kRangePlus &&
+              panel::hit(500, panel::row_cy(panel::kHands)) == panel::kHands && panel::hit(500, 50) == -1,
           "dashboard hit test");
     panel::press(panel::kPeople);
     for (int i = 0; i < 20; i++) panel::press(panel::kRangePlus);
@@ -652,7 +686,6 @@ int main(int argc, char** argv) {
         else if (a == "--track-thresh") tracker.prm.high = float(atof(next()));
         else if (a == "--gate") tracker.prm.gate = float(atof(next()));
         else if (a == "--accel") tracker.prm.accel = float(atof(next()));
-        else if (a == "--smooth-ms") g_smooth_s = float(atof(next())) / 1000;
         else if (a == "--no-detector") g_detector = false;
         else if (parse_detector_option(a, next)) continue;
         else { fprintf(stderr, "unknown option %s\n", a.c_str()); return 2; }
@@ -707,8 +740,10 @@ int main(int argc, char** argv) {
         }
     });
 
-    std::unordered_map<uint64_t, std::array<float, 5>> shown;  // per track id: what's drawn (smoothed estimate)
-    uint64_t seen_det_id = 0, last_det_ns = 0, last_frame_ns = now_ns();
+    uint64_t seen_det_id = 0, last_det_ns = 0;
+    // Playback runs this far behind now: detection age (capture -> here) plus one detection period, smoothed.
+    const float period_s = g_det.max_hz > 0 ? 1 / g_det.max_hz : 0.1f;
+    float lag_s = period_s + 0.1f;
     int shown_before = 0;
     while (!g_quit) {
         // Once per compositor frame; sleep instead if there's no frame to sync to.
@@ -737,28 +772,23 @@ int main(int argc, char** argv) {
             seen_det_id = d.id;
             last_det_ns = now;
             // Negative prediction = head pose in the past, at capture time.
-            float ago = -(now - d.t_capture_ns) / 1e9f;
+            float ago = -seconds(now, d.t_capture_ns);
+            lag_s += (-ago + period_s - lag_s) * 0.1f;
             vr::HmdMatrix34_t head = head_pose(ago, ok);
             if (ok) tracker.update(measurements(d.objs, head, controllers(ago)), d.t_capture_ns / 1e9);
         }
 
         vr::HmdMatrix34_t head = head_pose(0, ok);
         XrVector3f h{head.m[0][3], head.m[1][3], head.m[2][3]};
-        float k = 1 - std::exp(-(now - last_frame_ns) / 1e9f / std::max(g_smooth_s, 1e-3f));
-        last_frame_ns = now;
-        std::unordered_map<uint64_t, std::array<float, 5>> still_shown;
+        double t_play = now / 1e9 - lag_s;
         std::string where;  // for the log: each shown box relative to the head
         int n = 0;
         for (const track::Track& t : tracker.tracks) {
             // Confirmed and matched recently (the tracker drops stale tracks only when the next detections come).
             if (!t.confirmed || now / 1e9 - t.last_seen > tracker.prm.max_age || n == kMaxOverlays) continue;
-            std::array<float, 5> est;
-            tracker.estimate(t, now / 1e9, est.data());
-            auto it = shown.find(t.id);
-            std::array<float, 5> p = it == shown.end() ? est : it->second;
-            for (int i = 0; i < 5; i++) p[i] += (est[i] - p[i]) * k;
-            still_shown[t.id] = p;
-            float w = p[3], ht = p[4];
+            track::Sample sp = spline_at(t.history, t_play);
+            const float* p = sp.v;
+            float w = std::max(p[3], 0.05f), ht = std::max(p[4], 0.05f);
             {
                 // Bearing from the head's horizontal forward (-z), + = right; height relative to the eyes.
                 float vx = p[0] - h.x, vz = p[2] - h.z, fx = -head.m[0][2], fz = -head.m[2][2];
@@ -799,7 +829,7 @@ int main(int argc, char** argv) {
             last_where_ns = now;
         }
         shown_before = n;
-        shown.swap(still_shown);
+
 
         if (vr::VROverlay()->IsOverlayVisible(dash)) {
             char st[128];

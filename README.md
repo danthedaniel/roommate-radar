@@ -187,18 +187,19 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
 OpenVR overlay app (`yoloxr/guardian.cpp`, same detector as yoloxr via `detector.h`) for playing without
 passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
-Detections go through a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman filter, Hungarian
-matching on 3D distance, low-confidence detections only extend tracks), and boxes are drawn at the track's prediction
-for now, so they don't trail the detector's few hundred ms of latency. Boxes with a controller inside them (same
-depth) are your hands and are ignored.
+Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
+filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
+and sizes follow a Catmull-Rom spline through each track's last 4 detections, played back one detection period
+behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller
+inside them (same depth) are your hands and are ignored.
 
 - Starts with SteamVR: `build/guardian --register` (in `~/steamframe/yoloxr`) adds `guardian.vrmanifest` with
   auto-launch and starts it. `guardian.sh` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
 - "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, range, status. Saved in
   `~/.config/guardian.conf`.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
-  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's presented/dropped/reprojected frames and GPU time;
-  `--no-detector` gives the baseline.
+  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
+  presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
 - yoloxr's `run.sh` restarts camserver when it starts and kills it when it exits, which leaves guardian without frames
   until guardian restarts.
 

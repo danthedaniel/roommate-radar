@@ -6,12 +6,13 @@
 //   3. match the tracks left over to low-confidence detections (keeps a track through a weak frame),
 //   4. unmatched confident detections start tentative tracks; tentative tracks that miss are dropped, confirmed
 //      ones after max_age without a match.
-// Between frames, estimate() extrapolates a track to any time, so boxes are drawn where people are now, not where
-// they were when the cameras captured them.
+// Each track also keeps its last few matched detections (history) for drawing; the filter's predictions are only
+// used for matching.
 #pragma once
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <vector>
 
@@ -32,7 +33,7 @@ struct Params {
     float accel = 2.0f;      // process noise: std dev of a person's acceleration (m/s^2)
     float size_rate = 0.3f;  // process noise for box size (m/s^2 equivalent)
     float size_sigma = 0.1f; // box size measurement std dev (m)
-    float horizon = 0.5f;    // estimate() extrapolates at most this far (s) past the last update
+    size_t history = 4;      // matched detections kept per track
 };
 
 // One axis: position p, velocity v, covariance P.
@@ -58,6 +59,12 @@ struct Axis {
     }
 };
 
+// One matched detection: capture time (s) and x, y, z, w, h.
+struct Sample {
+    double t;
+    float v[5];
+};
+
 struct Track {
     uint64_t id;
     Axis axis[5];
@@ -66,6 +73,7 @@ struct Track {
     int hits = 1, cls;
     float score;
     bool confirmed = false;  // reached min_hits; stays set while the track lives
+    std::deque<Sample> history;  // last prm.history matched detections, oldest first
 };
 
 // Minimum-cost assignment of rows to columns (Hungarian, O(n^2 m)); match[row] = column or -1. Pairs costing more
@@ -137,9 +145,9 @@ class Tracker {
         match(dets, low, matched, t);
         for (int i : unused_high) {
             const Meas& d = dets[i];
-            Track tr{next_id_++, {}, t, t, 1, d.cls, d.score};
+            Track tr{next_id_++, {}, t, t, 1, d.cls, d.score, prm.min_hits <= 1, {}};
             for (int k = 0; k < 5; k++) tr.axis[k].init(d.v[k], k < 3 ? d.sigma : prm.size_sigma, k < 3 ? 1.0f : 0.1f);
-            tr.confirmed = prm.min_hits <= 1;
+            remember(tr, d, t);
             tracks.push_back(tr);
             matched.push_back(true);
         }
@@ -152,15 +160,15 @@ class Tracker {
         tracks.resize(n);
     }
 
-    // Where the track is at time t: position extrapolated with its velocity (up to `horizon` past its state).
-    void estimate(const Track& tr, double t, float out[5]) const {
-        float dt = float(std::clamp(t - tr.t, 0.0, double(prm.horizon)));
-        for (int k = 0; k < 5; k++) out[k] = tr.axis[k].p + tr.axis[k].v * dt;
-        out[3] = std::max(out[3], 0.05f), out[4] = std::max(out[4], 0.05f);
-    }
-
   private:
     uint64_t next_id_ = 1;
+
+    void remember(Track& tr, const Meas& d, double t) {
+        Sample s{t, {}};
+        std::copy(d.v, d.v + 5, s.v);
+        if (tr.history.empty() || t > tr.history.back().t) tr.history.push_back(s);
+        while (tr.history.size() > prm.history) tr.history.pop_front();
+    }
 
     // Matches still-unmatched tracks to dets[which]; updates the matched tracks. Returns the unmatched detections.
     std::vector<int> match(const std::vector<Meas>& dets, const std::vector<int>& which, std::vector<bool>& matched, double t) {
@@ -183,6 +191,7 @@ class Tracker {
             const Meas& d = dets[which[m[r]]];
             for (int k = 0; k < 5; k++) tr.axis[k].update(d.v[k], k < 3 ? d.sigma : prm.size_sigma);
             tr.last_seen = t, tr.cls = d.cls, tr.score = d.score;
+            remember(tr, d, t);
             if (++tr.hits >= prm.min_hits) tr.confirmed = true;
             matched[rows[r]] = true;
             used[m[r]] = true;
@@ -206,7 +215,7 @@ inline int selftest(void (*report)(bool ok, const char* what)) {
     check(m[0] == 0 && m[1] == -1 && m[2] == 1, "assignment: rectangular, gated");
 
     // A person walking at 1 m/s along x, detected at 4 Hz with depth noise: confirmed on the 2nd frame, velocity
-    // learned, and the extrapolated position 0.3 s after the last frame lands near the truth.
+    // learned, the last 4 detections kept.
     Tracker trk;
     uint32_t seed = 1;
     auto noise = [&]() { seed = seed * 1664525u + 1013904223u; return (int(seed >> 9) % 2001 - 1000) / 1000.f * 0.05f; };
@@ -216,10 +225,10 @@ inline int selftest(void (*report)(bool ok, const char* what)) {
         if (i == 0) check(trk.tracks.size() == 1 && !trk.tracks[0].confirmed, "new track is tentative");
         if (i == 1) check(trk.tracks.size() == 1 && trk.tracks[0].confirmed, "second hit confirms it");
     }
-    float e[5];
-    trk.estimate(trk.tracks[0], 11 * 0.25 + 0.3, e);
-    check(trk.tracks.size() == 1 && std::fabs(trk.tracks[0].axis[0].v - 1) < 0.25f && std::fabs(e[0] - 3.05f) < 0.12f,
-          "velocity learned, extrapolates to now");
+    check(trk.tracks.size() == 1 && std::fabs(trk.tracks[0].axis[0].v - 1) < 0.25f &&
+              trk.tracks[0].history.size() == 4 && trk.tracks[0].history.front().t == 8 * 0.25 &&
+              trk.tracks[0].history.back().t == 11 * 0.25,
+          "velocity learned, last 4 detections kept");
 
     // A weak (low-confidence) detection keeps the track; on its own it starts nothing.
     trk.update({{{3.0f, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}, {{-3, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}}, 3.0);
