@@ -30,6 +30,7 @@
 static const char* kAppKey = "steamframe.guardian";
 static const int kMaxOverlays = 8;
 static bool g_detector = true;       // --no-detector: just log frame stats (baseline for the detector's cost)
+static const unsigned short kHoverTickUs = 1500;  // dashboard hover haptic
 static const float kLabelH = 0.07f;  // label height (m), just above the box
 static const char* kFont = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
 
@@ -1006,6 +1007,9 @@ int main(int argc, char** argv) {
             int c = panel::hit(ev.data.mouse.x, panel::H - ev.data.mouse.y);
             if (ev.eventType == vr::VREvent_MouseMove && c != hover) {
                 hover = c, panel_status.clear();
+                if (c >= 0) {  // the tick the Steam UI gives when the pointer reaches a new item
+                    vr::VRSystem()->TriggerHapticPulse(ev.trackedDeviceIndex, 0, kHoverTickUs);
+                }
             }
             if (ev.eventType == vr::VREvent_MouseButtonDown && c >= 0) {
                 panel::press(c), panel_status.clear();
