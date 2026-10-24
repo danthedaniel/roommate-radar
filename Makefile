@@ -1,7 +1,7 @@
 # Run from the Mac. See README for what each piece does.
 FRAME ?= steamos@frame.local
 
-.PHONY: deploy build logs stream mirror cams ssh sysroot
+.PHONY: deploy build logs stream cams ssh sysroot
 
 # Everything: mirrorserver service, guardian (ship, build). See ansible/site.yml
 deploy:
@@ -18,10 +18,6 @@ logs:
 # Headset view over UDP (mirrorserver service, always on)
 stream:
 	scripts/udpmirror.py
-
-# Headset view over ssh
-mirror:
-	scripts/mirror.sh
 
 # Raw tracking cameras
 cams:

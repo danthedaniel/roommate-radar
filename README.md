@@ -70,7 +70,6 @@ ssh steamos@frame.local 'sudo python3 - --frames 1' < scripts/rawcam.py \
 scripts/udpmirror.py                         # headset view (/dev/video99) from the mirrorserver service; black/~1 fps when not worn
 scripts/udpmirror.py > out.ts                # same, saved
 scripts/udpmirror.py --record out.mp4        # watch and save to MP4 (stream copied, not re-encoded)
-scripts/mirror.sh                            # same over ssh, no service needed
 ```
 
 `mirrorserver.py` runs on the Frame as a systemd user service (`mirrorserver`, UDP 5600, H.264 MPEG-TS, libx264
@@ -125,7 +124,7 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   105.6 mm horizontal baseline.
 
 Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). The `Makefile` wraps the common ones:
-`make deploy | build | logs | stream | mirror | cams | ssh | sysroot`. `make sysroot` copies the Frame's headers into
+`make deploy | build | logs | stream | cams | ssh | sysroot`. `make sysroot` copies the Frame's headers into
 `.sysroot/` so clangd on the Mac (`guardian/compile_flags.txt`, aarch64 target) resolves every include.
 Style: `.clang-format` for the C++, ruff and basedpyright (Python 3.12, the Frame's) in `pyproject.toml`.
 
