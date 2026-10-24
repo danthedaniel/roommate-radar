@@ -45,7 +45,7 @@
         rm -r yolo11n-grayscale_ncnn_model
         python3 ../guardian/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
       args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
-      loop: [320]
+      loop: [320, 480, 640]
       tags: guardian
 
 - hosts: frame

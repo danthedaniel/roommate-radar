@@ -40,7 +40,11 @@ struct Settings {
     bool hands = true;                                // ignore boxes around a controller: your hands (holds_controller)
     bool games_only = false;                          // pause while no game is running (SteamVR home, dashboard)
     float max_dist = 3;                               // ignore detections farther than this (m, horizontal)
+    int size = 320;                                   // YOLO per-view size, one of kSizes
+    float hz = 4;                                     // YOLO runs per second, one of kRates
 };
+static const int kSizes[] = {320, 480, 640};
+static const float kRates[] = {2, 4, 8, 16};
 static Settings g_set;
 static std::string g_conf;  // empty: don't save (selftest)
 
@@ -65,6 +69,10 @@ static void load_settings() {
             g_set.games_only = v != 0;
         } else if (key == "max_dist") {
             g_set.max_dist = v;
+        } else if (key == "size" && std::find(std::begin(kSizes), std::end(kSizes), int(v)) != std::end(kSizes)) {
+            g_set.size = int(v);
+        } else if (key == "hz" && std::find(std::begin(kRates), std::end(kRates), v) != std::end(kRates)) {
+            g_set.hz = v;
         }
     }
     fclose(f);
@@ -75,8 +83,8 @@ static void save_settings() {
     if (!f) {
         return;
     }
-    fprintf(f, "enabled=%d\npeople=%d\npets=%d\nhands=%d\ngames_only=%d\nmax_dist=%.1f\n", g_set.enabled, g_set.people,
-            g_set.pets, g_set.hands, g_set.games_only, g_set.max_dist);
+    fprintf(f, "enabled=%d\npeople=%d\npets=%d\nhands=%d\ngames_only=%d\nmax_dist=%.1f\nsize=%d\nhz=%g\n",
+            g_set.enabled, g_set.people, g_set.pets, g_set.hands, g_set.games_only, g_set.max_dist, g_set.size, g_set.hz);
     fclose(f);
 }
 
@@ -265,23 +273,51 @@ static std::vector<uint8_t> label(const char* name, int pct, int cls, int& w, in
 
 namespace panel {
 
-const int W = 1000, H = 772, kPad = 48, kTop = 190, kRowH = 92;
+const int W = 1000, H = 956, kPad = 48, kTop = 190, kRowH = 92;
 enum Ctl {
     kEnabled,
     kGamesOnly,
     kPeople,
     kPets,
     kHands,
+    kSize,  // dropdowns: open their popup
+    kRate,
     kRangeMinus,
-    kRangePlus
+    kRangePlus,
+    kItem  // the open popup's items: kItem + choice index
 };
-const int kToggles = kRangeMinus, kRangeRow = kToggles;  // one row per switch, then the range row
-const char* kRows[] = {"Enabled", "Only in Games", "Detect People", "Detect Cats and Dogs", "Ignore My Hands", "Range"};
-const int kToggleW = 104, kToggleH = 56, kBtnR = 28;
+// one row per switch, then the dropdown rows and the range row
+const int kToggles = kSize, kRangeRow = kRate + 1;
+const char* kRows[] = {"Enabled",         "Only in Games",        "Detect People",  "Detect Cats and Dogs",
+                       "Ignore My Hands", "Detection Resolution", "Detection Rate", "Range"};
+const char* kSizeLabels[] = {"Low (320px)", "Medium (480px)", "High (640px)"};
+const char* kRateLabels[] = {"2Hz", "4Hz", "8Hz", "16Hz"};
+const int kToggleW = 104, kToggleH = 56, kBtnR = 28, kDropW = 300, kDropH = 60, kItemH = 60;
+static int popup = -1;  // the dropdown (kSize, kRate) whose popup is showing
 
 static float row_cy(int row) {
     return kTop + (row + 0.5f) * kRowH;
 }
+
+static int choices(int drop) {
+    return drop == kSize ? 3 : 4;
+}
+static const char* label(int drop, int i) {
+    return drop == kSize ? kSizeLabels[i] : kRateLabels[i];
+}
+static int choice(int drop) {  // 0 for a --size / --max-hz that isn't one of the choices
+    int i = drop == kSize ? int(std::find(std::begin(kSizes), std::end(kSizes), g_set.size) - std::begin(kSizes))
+                          : int(std::find(std::begin(kRates), std::end(kRates), g_set.hz) - std::begin(kRates));
+    return i < choices(drop) ? i : 0;
+}
+static float drop_x0() {
+    return W - kPad - kDropW;
+}
+// The popup opens with the current choice over the dropdown, moved up as needed to stay inside the panel.
+static float popup_top(int drop) {
+    return std::min(row_cy(drop) - (choice(drop) + 0.5f) * kItemH, H - choices(drop) * kItemH - 8.f);
+}
+
 static float minus_cx() {
     return W - kPad - kBtnR - 220.f;
 }
@@ -291,11 +327,15 @@ static float plus_cx() {
 
 // Which control (texture pixel, y down) is under the pointer: the whole row for toggles, the buttons for range.
 static int hit(float x, float y) {
+    if (popup >= 0) {
+        int i = int(std::floor((y - popup_top(popup)) / kItemH));
+        return x >= drop_x0() && x <= drop_x0() + kDropW && i >= 0 && i < choices(popup) ? kItem + i : -1;
+    }
     int row = int(std::floor((y - kTop) / kRowH));
     if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow || (row > kEnabled && !g_set.enabled)) {
         return -1;  // greyed-out rows (Enabled off) don't hover or press
     }
-    if (row < kToggles) {
+    if (row < kRangeRow) {
         return row;
     }
     if (std::hypot(x - minus_cx(), y - row_cy(kRangeRow)) < kBtnR + 12) {
@@ -307,7 +347,22 @@ static int hit(float x, float y) {
     return -1;
 }
 
+// While a popup is open any press closes it (-1: outside it); an item also picks that choice.
 static void press(int ctl) {
+    if (popup >= 0) {
+        int drop = popup, i = ctl - kItem;
+        popup = -1;
+        if (i < 0) {
+            return;
+        }
+        if (drop == kSize) {
+            g_set.size = g_det_size = kSizes[i];  // the detector reloads at the new size
+        } else {
+            g_set.hz = g_det_hz = kRates[i];
+        }
+        save_settings();
+        return;
+    }
     switch (ctl) {
     case kEnabled:
         g_set.enabled = !g_set.enabled;
@@ -330,6 +385,10 @@ static void press(int ctl) {
     case kRangePlus:
         g_set.max_dist = std::min(8.0f, g_set.max_dist + 0.5f);
         break;
+    case kSize:
+    case kRate:
+        popup = ctl;
+        return;
     default:
         return;
     }
@@ -382,6 +441,15 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
                         white, dim ? 0.6f : 1);
             continue;
         }
+        if (row < kRangeRow) {  // dropdown: current choice and a chevron
+            fill_rrect(px, drop_x0(), cy - kDropH / 2.f, kDropW, kDropH, 14, btn,
+                       (hover == row ? 1 : 0.8f) * (dim ? 0.5f : 1));
+            draw_text(&px, W, H, int(drop_x0() + 22), int(cy + 10), label(row, choice(row)), dim ? grey : white, 28);
+            for (int k = -8; k <= 8; k++) {
+                fill_circle(px, W - kPad - 34 + k, cy - 3 + (8 - std::abs(k)) * 0.6f, 2.f, dim ? grey : white, 1);
+            }
+            continue;
+        }
         for (int b = 0; b < 2; b++) {  // range: (-) value (+)
             float cx = b ? plus_cx() : minus_cx();
             fill_circle(px, cx, cy, kBtnR, btn, (hover == kRangeMinus + b ? 1 : 0.8f) * (dim ? 0.5f : 1));
@@ -394,6 +462,20 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
         snprintf(v, sizeof v, "%.1f m", g_set.max_dist);
         int tw = draw_text(nullptr, 0, 0, 0, 0, v, white, 36);
         draw_text(&px, W, H, int((minus_cx() + plus_cx()) / 2 - tw / 2.f), int(cy + 13), v, dim ? grey : white, 36);
+    }
+    if (popup >= 0) {  // over the rows: the choices, the current one in the accent color
+        float y0 = popup_top(popup);
+        int n = choices(popup);
+        fill_rrect(px, drop_x0() - 2, y0 - 2, kDropW + 4, n * kItemH + 4, 16, white, 0.15f);
+        fill_rrect(px, drop_x0(), y0, kDropW, n * kItemH, 14, btn, 1);
+        for (int i = 0; i < n; i++) {
+            float iy = y0 + i * kItemH;
+            if (hover == kItem + i) {
+                fill_rrect(px, drop_x0() + 6, iy + 4, kDropW - 12, kItemH - 8, 10, white, 0.1f);
+            }
+            draw_text(&px, W, H, int(drop_x0() + 22), int(iy + kItemH / 2.f + 10), label(popup, i),
+                      i == choice(popup) ? accent : white, 28);
+        }
     }
     return px;
 }
@@ -869,6 +951,19 @@ static int selftest() {
     bool pressed = !g_set.people && g_set.max_dist == 8 && !wanted(0) && wanted(16);
     panel::press(panel::kPeople);
     g_set.max_dist = 3;
+    panel::press(panel::kSize);
+    float iy = panel::popup_top(panel::kSize) + 2.5f * panel::kItemH;  // the third choice
+    bool picked = panel::popup == panel::kSize && panel::hit(500, iy) == -1 &&
+                  panel::hit(panel::drop_x0() + 10, iy) == panel::kItem + 2;
+    panel::press(panel::kItem + 2);
+    picked = picked && g_set.size == 640 && g_det_size == 640 && panel::popup < 0;
+    panel::press(panel::kSize), panel::press(-1);
+    panel::press(panel::kRate);
+    float bottom = panel::popup_top(panel::kRate) + 4 * panel::kItemH;
+    panel::press(panel::kItem + 3);
+    check(picked && g_set.size == 640 && g_set.hz == 16 && g_det_hz == 16 && panel::popup < 0 && bottom <= panel::H,
+          "dropdowns: pick, a press outside closes, the rate popup fits the panel");
+    g_set.size = 320, g_set.hz = 4;
     std::vector<uint8_t> pn = panel::render(panel::kPets, "Watching");
     check(pressed && g_set.people && at(pn, panel::W, 0, 0)[3] == 0 && at(pn, panel::W, 500, 5)[3] > 200,
           "dashboard press and render");
@@ -915,14 +1010,13 @@ static int selftest() {
 }
 
 int main(int argc, char** argv) {
-    g_det.size = 320;
-    g_det.max_hz = 4;
     g_det.conf = 0.1f;  // ByteTrack wants the weak detections too; only >= --track-thresh ones start tracks
     track::Tracker tracker;
     if (const char* home = getenv("HOME")) {
         g_conf = std::string(home) + "/.config/guardian.conf";
     }
     load_settings();
+    g_det.size = g_set.size, g_det.max_hz = g_set.hz;  // --size and --max-hz override them for this run
     for (int i = 1; i < argc; i++) {
         std::string a = argv[i];
         auto next = [&]() -> const char* {
@@ -959,6 +1053,7 @@ int main(int argc, char** argv) {
     if (!finish_detector_options()) {
         return 2;
     }
+    g_set.size = g_det.size, g_set.hz = g_det.max_hz;
     setvbuf(stdout, nullptr, _IOLBF, 0);
     signal(SIGINT, [](int) {
         g_quit = true;
@@ -1027,8 +1122,11 @@ int main(int argc, char** argv) {
 
     uint64_t seen_det_id = 0, last_det_ns = 0;
     // Playback runs this far behind now: detection age (capture -> here) plus one detection period, smoothed.
-    const float period_s = g_det.max_hz > 0 ? 1 / g_det.max_hz : 0.1f;
-    float lag_s = period_s + 0.1f;
+    auto period_s = [] {
+        float hz = g_det_hz;
+        return hz > 0 ? 1 / hz : 0.1f;
+    };
+    float lag_s = period_s() + 0.1f;
     int shown_before = 0;
     while (!g_quit) {
         // Once per compositor frame; sleep instead if there's no frame to sync to.
@@ -1055,7 +1153,7 @@ int main(int argc, char** argv) {
                     vr::VRSystem()->TriggerHapticPulse(ev.trackedDeviceIndex, 0, kHoverTickUs);
                 }
             }
-            if (ev.eventType == vr::VREvent_MouseButtonDown && c >= 0) {
+            if (ev.eventType == vr::VREvent_MouseButtonDown && (c >= 0 || panel::popup >= 0)) {  // outside closes it
                 panel::press(c), panel_status.clear();
             }
         }
@@ -1079,7 +1177,7 @@ int main(int argc, char** argv) {
             last_det_ns = now;
             // Negative prediction = head pose in the past, at capture time.
             float ago = -seconds(now, d.t_capture_ns);
-            lag_s += (-ago + period_s - lag_s) * 0.1f;
+            lag_s += (-ago + period_s() - lag_s) * 0.1f;
             vr::HmdMatrix34_t head = head_pose(ago, ok);
             if (ok) {
                 tracker.update(measurements(d.objs, head, controllers(ago)), d.t_capture_ns / 1e9);

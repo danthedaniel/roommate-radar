@@ -64,6 +64,8 @@ struct DetectorOptions {
 };
 static DetectorOptions g_det;
 static std::atomic<bool> g_det_paused{false};  // skip frames (no GPU work) while set
+static std::atomic<int> g_det_size{0};         // per-view size to run at (set from g_det.size); a change reloads
+static std::atomic<float> g_det_hz{0};         // max_hz, changeable while running
 static std::atomic<float> g_det_yolo_ms{0};    // mean YOLO time over the last stats period
 
 // Parses one detector flag (argv[i], value via next()); false if it isn't one. Call finish_detector_options() after.
@@ -99,9 +101,7 @@ static bool finish_detector_options() {
         fprintf(stderr, "--size must be a multiple of 32\n");
         return false;
     }
-    if (g_det.model.empty()) {
-        g_det.model = "../models/yolo11n-grayscale_" + std::to_string(g_det.size) + "_gray.ncnn";
-    }
+    g_det_size = g_det.size, g_det_hz = g_det.max_hz;
     return true;
 }
 
@@ -308,9 +308,9 @@ static void write_pgm(const std::string& path, const uint8_t* p, int w, int h) {
     fclose(f);
 }
 
-static void detect_loop() {
+// One run at size S, until g_det_size changes or quit.
+static void detect_run(const int S) {
     const CamCal cal[2] = {load_calib(g_det.calib, shm::kCamNames[0]), load_calib(g_det.calib, shm::kCamNames[1])};
-    const int S = g_det.size;
     Rectifier rect[2] = {Rectifier(cal[0], S, g_det.hfov_deg), Rectifier(cal[1], S, g_det.hfov_deg)};
     const float f = rect[0].f;
     const float baseline = cal[1].t[0] - cal[0].t[0];  // right cam is at +x in the head frame
@@ -322,8 +322,10 @@ static void detect_loop() {
     // ~1 ms faster on the Adreno 750 (Turnip) at every size; ncnn's other Vulkan defaults measured best.
     net.opt.use_sgemm_convolution = false;
     net.opt.use_winograd63_convolution = false;
-    if (net.load_param((g_det.model + ".param").c_str()) || net.load_model((g_det.model + ".bin").c_str())) {
-        throw std::runtime_error("failed to load model " + g_det.model + " (see prep_model.py)");
+    const std::string model =
+        g_det.model.empty() ? "../models/yolo11n-grayscale_" + std::to_string(S) + "_gray.ncnn" : g_det.model;
+    if (net.load_param((model + ".param").c_str()) || net.load_model((model + ".bin").c_str())) {
+        throw std::runtime_error("failed to load model " + model + " (see prep_model.py)");
     }
     printf("detector: ncnn %s\n", net.opt.use_vulkan_compute ? "Vulkan GPU" : "CPU");
 
@@ -357,13 +359,13 @@ static void detect_loop() {
     double t_rect = 0, t_net = 0, t_post = 0;
     bool printed_shape = false;
 
-    while (!g_quit) {
+    while (!g_quit && g_det_size == S) {
         if (g_det_paused) {
             usleep(100000);
             continue;
         }
-        if (g_det.max_hz > 0) {
-            uint64_t t = now_ns(), due = last_run + uint64_t(1e9 / g_det.max_hz);
+        if (float hz = g_det_hz; hz > 0) {
+            uint64_t t = now_ns(), due = last_run + uint64_t(1e9 / hz);
             if (t < due) {
                 usleep(std::min<uint64_t>((due - t) / 1000, 100000));
                 continue;
@@ -563,5 +565,13 @@ static void detect_loop() {
             t_rect = t_net = t_post = 0;
             stat_t = t;
         }
+    }
+    munmap((void*)hdr, sizeof(shm::Header));
+    close(shm_fd);
+}
+
+static void detect_loop() {
+    while (!g_quit) {
+        detect_run(g_det_size);
     }
 }
