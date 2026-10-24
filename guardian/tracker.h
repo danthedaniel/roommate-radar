@@ -88,9 +88,11 @@ inline std::vector<int> assign(const std::vector<std::vector<float>>& cost, floa
     }
     bool flip = n > m;  // the algorithm wants rows <= columns
     size_t R = flip ? m : n, C = flip ? n : m;
-    auto a = [&](size_t i, size_t j) {  // 1-based; over-gate pairs get a large finite cost so they're picked last
+    // 1-based; over-gate (and NaN) pairs get a large finite cost so they're picked last; a NaN would never compare
+    // below `delta` and the search below would loop forever
+    auto a = [&](size_t i, size_t j) {
         float c = flip ? cost[j - 1][i - 1] : cost[i - 1][j - 1];
-        return c > gate ? gate * 100 : c;
+        return c <= gate ? c : gate * 100;
     };
     const float inf = std::numeric_limits<float>::infinity();
     std::vector<float> u(R + 1), v(C + 1);
@@ -259,6 +261,7 @@ inline int selftest(void (*report)(bool ok, const char* what)) {
     check(m[0] == 1 && m[1] == 0, "assignment is optimal, not greedy");
     m = assign({{0.1f, 5}, {5, 5}, {5, 0.2f}}, 1);  // more rows than columns, one row gated out
     check(m[0] == 0 && m[1] == -1 && m[2] == 1, "assignment: rectangular, gated");
+    check(assign({{NAN}}, 1)[0] == -1, "assignment: NaN cost is gated (used to hang)");
 
     // A person walking at 1 m/s along x, detected at 4 Hz with depth noise: confirmed on the 2nd frame, velocity
     // learned, the last 4 detections kept.

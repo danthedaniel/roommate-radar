@@ -700,7 +700,8 @@ class Textures {
         if (staging_) {
             vkDestroyBuffer(dev_, staging_, nullptr), vkFreeMemory(dev_, staging_mem_, nullptr);
         }
-        staging_ = VK_NULL_HANDLE, staging_size_ = 0;
+        // Cleared so a failed allocation below can't leave the freed handles to be freed again next time.
+        staging_ = VK_NULL_HANDLE, staging_mem_ = VK_NULL_HANDLE, staging_size_ = 0;
         VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
         bci.size = size;
         bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;

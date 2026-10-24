@@ -32,7 +32,8 @@ struct Header {
 };
 
 inline void write(Slot& s, const uint8_t* y, uint64_t t_ns, uint32_t frame_seq) {
-    uint64_t q = s.seq.load(std::memory_order_relaxed);
+    // Rounded down to even: a camserver killed mid-write leaves seq odd, and q + 2 would keep it odd for good.
+    uint64_t q = s.seq.load(std::memory_order_relaxed) & ~uint64_t(1);
     s.seq.store(q + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
     std::memcpy(s.y, y, sizeof s.y);
@@ -42,20 +43,21 @@ inline void write(Slot& s, const uint8_t* y, uint64_t t_ns, uint32_t frame_seq) 
     s.seq.store(q + 2, std::memory_order_release);
 }
 
-// Copies the slot if it changed since `last_seq`. Returns false if unchanged or torn.
+// Copies the slot if it changed since `last_seq`. Returns false if unchanged or torn; `y` is garbage after a torn
+// read, the other outputs are left alone.
 inline bool read(const Slot& s, uint64_t& last_seq, uint8_t* y, uint64_t& t_ns, uint32_t& frame_seq) {
     uint64_t q = s.seq.load(std::memory_order_acquire);
     if (q & 1 || q == last_seq) {
         return false;
     }
     std::memcpy(y, s.y, sizeof s.y);
-    t_ns = s.t_mono_ns;
-    frame_seq = s.frame_seq;
+    uint64_t t = s.t_mono_ns;
+    uint32_t f = s.frame_seq;
     std::atomic_thread_fence(std::memory_order_acquire);
     if (s.seq.load(std::memory_order_relaxed) != q) {
         return false;
     }
-    last_seq = q;
+    last_seq = q, t_ns = t, frame_seq = f;
     return true;
 }
 

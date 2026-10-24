@@ -5,6 +5,7 @@
 #pragma once
 #include <fcntl.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <openxr/openxr.h>  // XrVector3f only
@@ -326,8 +327,14 @@ static void detect_loop() {
     }
     printf("detector: ncnn %s\n", net.opt.use_vulkan_compute ? "Vulkan GPU" : "CPU");
 
+    // camserver creates the file before sizing it; touching a mapping past its end is SIGBUS.
     int shm_fd = -1;
-    while (!g_quit && (shm_fd = open(shm::kPath, O_RDONLY)) < 0) {
+    struct stat st = {};
+    while (!g_quit && ((shm_fd = open(shm::kPath, O_RDONLY)) < 0 || fstat(shm_fd, &st) ||
+                       st.st_size < off_t(sizeof(shm::Header)))) {
+        if (shm_fd >= 0) {
+            close(shm_fd);
+        }
         fprintf(stderr, "waiting for camserver (%s)\n", shm::kPath);
         sleep(1);
     }
@@ -335,9 +342,14 @@ static void detect_loop() {
         return;
     }
     auto* hdr = (const shm::Header*)mmap(nullptr, sizeof(shm::Header), PROT_READ, MAP_SHARED, shm_fd, 0);
+    if (hdr == MAP_FAILED) {
+        throw std::runtime_error(std::string("mmap ") + shm::kPath + ": " + strerror(errno));
+    }
 
+    // A torn read leaves garbage in its buffer, so frames are read into `scratch` and swapped in only when intact.
     std::vector<uint8_t> raw[2] = {std::vector<uint8_t>(shm::kStride * shm::kH),
                                    std::vector<uint8_t>(shm::kStride * shm::kH)};
+    std::vector<uint8_t> scratch(shm::kStride * shm::kH);
     std::vector<uint8_t> input(size_t(S) * S * 2);
     uint64_t last_seq[2] = {0, 0}, t_ns[2] = {0, 0}, last_pair = 0;
     uint32_t fseq[2];
@@ -358,7 +370,9 @@ static void detect_loop() {
             }
         }
         for (int i = 0; i < 2; i++) {
-            shm::read(hdr->slots[i], last_seq[i], raw[i].data(), t_ns[i], fseq[i]);
+            if (shm::read(hdr->slots[i], last_seq[i], scratch.data(), t_ns[i], fseq[i])) {
+                raw[i].swap(scratch);
+            }
         }
         // Both cameras are hardware-synchronized: wait for a pair with the same capture time.
         if (t_ns[0] == 0 || t_ns[0] == last_pair || std::llabs(int64_t(t_ns[0]) - int64_t(t_ns[1])) > 2000000) {
@@ -410,6 +424,9 @@ static void detect_loop() {
         if (!printed_shape) {
             printf("detector: out0 w=%d h=%d c=%d\n", out.w, out.h, out.c);
             printed_shape = true;
+        }
+        if (out.h < 4 + 80) {  // extract failed, or not a COCO head: out.row(4 + k) below would read past the end
+            continue;
         }
 
         // Decode [4 + 80, N]: cx, cy, w, h in input pixels, then per-class sigmoid scores.
