@@ -1,0 +1,9 @@
+-xc++
+-std=c++17
+--target=aarch64-unknown-linux-gnu
+--sysroot=../.sysroot
+-isystem=/usr/include/freetype2
+-isystem../.sysroot/ncnn
+-isystem../.sysroot/openvr
+-I../.sysroot/gen
+-I.

@@ -6,3 +6,5 @@ yoloxr/calib.txt
 # Valve binaries pulled from the Frame for reverse engineering; never commit
 re/
 __pycache__/
+# Frame headers for clangd on the Mac (make sysroot)
+.sysroot/
