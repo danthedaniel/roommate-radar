@@ -38,6 +38,7 @@ static const char* kFont = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
 struct Settings {
     bool enabled = true, people = true, pets = true;  // pets: cats and dogs
     bool hands = true;                                // ignore boxes around a controller: your hands (holds_controller)
+    bool games_only = false;                          // pause while no game is running (SteamVR home, dashboard)
     float max_dist = 3;                               // ignore detections farther than this (m, horizontal)
 };
 static Settings g_set;
@@ -60,6 +61,8 @@ static void load_settings() {
             g_set.pets = v != 0;
         } else if (key == "hands") {
             g_set.hands = v != 0;
+        } else if (key == "games_only") {
+            g_set.games_only = v != 0;
         } else if (key == "max_dist") {
             g_set.max_dist = v;
         }
@@ -72,8 +75,8 @@ static void save_settings() {
     if (!f) {
         return;
     }
-    fprintf(f, "enabled=%d\npeople=%d\npets=%d\nhands=%d\nmax_dist=%.1f\n", g_set.enabled, g_set.people, g_set.pets,
-            g_set.hands, g_set.max_dist);
+    fprintf(f, "enabled=%d\npeople=%d\npets=%d\nhands=%d\ngames_only=%d\nmax_dist=%.1f\n", g_set.enabled, g_set.people,
+            g_set.pets, g_set.hands, g_set.games_only, g_set.max_dist);
     fclose(f);
 }
 
@@ -252,17 +255,18 @@ static std::vector<uint8_t> label(const char* name, int pct, int cls, int& w, in
 
 namespace panel {
 
-const int W = 1000, H = 680, kPad = 48, kTop = 190, kRowH = 92;
+const int W = 1000, H = 772, kPad = 48, kTop = 190, kRowH = 92;
 enum Ctl {
     kEnabled,
     kPeople,
     kPets,
     kHands,
+    kGamesOnly,
     kRangeMinus,
     kRangePlus
 };
 const int kToggles = kRangeMinus, kRangeRow = kToggles;  // one row per switch, then the range row
-const char* kRows[] = {"Enabled", "People", "Cats and dogs", "Ignore my hands", "Range"};
+const char* kRows[] = {"Enabled", "People", "Cats and dogs", "Ignore my hands", "Only in games", "Range"};
 const int kToggleW = 104, kToggleH = 56, kBtnR = 28;
 
 static float row_cy(int row) {
@@ -307,6 +311,9 @@ static void press(int ctl) {
     case kHands:
         g_set.hands = !g_set.hands;
         break;
+    case kGamesOnly:
+        g_set.games_only = !g_set.games_only;
+        break;
     case kRangeMinus:
         g_set.max_dist = std::max(1.0f, g_set.max_dist - 0.5f);
         break;
@@ -342,7 +349,7 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
     fill_rrect(px, 0, 0, W, H, 32, bg, 0.94f);
     draw_text(&px, W, H, kPad, 100, "Guardian", white, 56);
     draw_text(&px, W, H, kPad, 150, status.c_str(), grey, 30);
-    bool on[kToggles] = {g_set.enabled, g_set.people, g_set.pets, g_set.hands};
+    bool on[kToggles] = {g_set.enabled, g_set.people, g_set.pets, g_set.hands, g_set.games_only};
     for (int row = 0; row <= kRangeRow; row++) {
         float cy = row_cy(row);
         if (hover == row) {
@@ -970,6 +977,11 @@ int main(int argc, char** argv) {
         textures.set(dash, px, panel::W, panel::H);
     }
     int hover = -1;
+    // A game is starting, loading or running (its intro counts); passthrough itself isn't reported to apps.
+    auto game_running = [] {
+        return vr::VRApplications()->GetSceneApplicationState() != vr::EVRSceneApplicationState_None;
+    };
+    bool in_game = game_running();
     std::string panel_status;  // what the panel was last drawn with ("" = redraw)
 
     std::thread det;
@@ -1001,6 +1013,9 @@ int main(int argc, char** argv) {
                 vr::VRSystem()->AcknowledgeQuit_Exiting();
                 g_quit = true;
             }
+            if (ev.eventType == vr::VREvent_SceneApplicationStateChanged) {
+                in_game = game_running();
+            }
         }
         while (vr::VROverlay()->PollNextOverlayEvent(dash, &ev, sizeof ev)) {
             // Mouse y is up from the bottom of the texture.
@@ -1015,8 +1030,9 @@ int main(int argc, char** argv) {
                 panel::press(c), panel_status.clear();
             }
         }
-        g_det_paused = !g_set.enabled;
-        if (!g_set.enabled) {
+        bool run = g_set.enabled && (in_game || !g_set.games_only);
+        g_det_paused = !run;
+        if (!run) {
             tracker.tracks.clear();
         }
 
@@ -1104,6 +1120,8 @@ int main(int argc, char** argv) {
             char st[128];
             if (!g_set.enabled) {
                 snprintf(st, sizeof st, "Off");
+            } else if (!run) {
+                snprintf(st, sizeof st, "Paused: no game running");
             } else if (!g_detector) {
                 snprintf(st, sizeof st, "Detector off (--no-detector)");
             } else if (now - last_det_ns > 2000000000ull) {
