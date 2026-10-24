@@ -98,7 +98,9 @@ static XrVector3f v_mul(XrVector3f a, float s) {
 // Your own arms and hands (YOLO often calls them "person"; it doesn't know the controller, so an arm box can stop at
 // the wrist and leave it out): a point on the forearm, from 40% of the way from the shoulder to a controller up to the
 // controller, inside the box: within its rectangle scaled to that point's depth (seen from the camera) and grown by
-// 15 cm, and within 40 cm of its depth. Box and controllers are in the head frame at capture time.
+// 15 cm, and from 40 cm behind its depth to 80 cm in front of it (arm boxes measure too far: cut off by the image edge
+// differently in each view, or merged with what's behind the arm). Box and controllers are in the head frame at
+// capture time.
 static bool holds_controller(const Obj& o, const std::vector<XrVector3f>& controllers) {
     const float m = 0.15f;
     const XrVector3f c = o.origin;
@@ -110,7 +112,7 @@ static bool holds_controller(const Obj& o, const std::vector<XrVector3f>& contro
             float s = (p.z - c.z) / (b[0].z - c.z);
             if (s > 0 && p.x > c.x + (b[0].x - c.x) * s - m && p.x < c.x + (b[1].x - c.x) * s + m &&
                 p.y > c.y + (b[3].y - c.y) * s - m && p.y < c.y + (b[0].y - c.y) * s + m &&
-                std::fabs(p.z - b[0].z) < 0.4f) {
+                p.z - b[0].z > -0.4f && p.z - b[0].z < 0.8f) {
                 return true;
             }
         }
@@ -882,6 +884,8 @@ static int selftest() {
             true, {}};  // forearm reaching out to a controller 45 cm further, outside the box
     check(measurements({arm}, head, {{0.3f, 1.3f, -0.75f}}).empty() && measurements({arm}, head, {}).size() == 1,
           "arm box that leaves out the controller dropped");
+    Obj far_arm = obj(0, 1.2f, 0);  // the arm merged with the chair behind it: measured at 1.2 m, controller at 0.6 m
+    check(measurements({far_arm}, head, {{0, 1.3f, -0.6f}}).empty(), "arm box measured too far dropped");
     check(ms.size() == 1 && std::fabs(ms[0].v[0] - 0.2f) < 1e-5f && std::fabs(ms[0].v[1] - 1.35f) < 1e-5f &&
               std::fabs(ms[0].v[3] - 0.6f) < 1e-5f && std::fabs(ms[0].v[4] - 1.5f) < 1e-5f,
           "head frame -> standing universe center and size");
