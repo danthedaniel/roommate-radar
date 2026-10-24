@@ -120,6 +120,14 @@ static bool holds_controller(const Obj& o, const std::vector<XrVector3f>& contro
     return false;
 }
 
+// Your own arm or lap, controller or not: the box reaches the bottom 10% of the view, is within 1.2 m, and its top is
+// below eye level (anyone else that close shows their head). Head frame, like holds_controller.
+static bool own_arm(const Obj& o) {
+    const XrVector3f* b = o.corners;
+    float Z = o.origin.z - b[3].z, edge = std::tan(g_det.hfov_deg * float(M_PI) / 360);
+    return Z > 0 && Z < 1.2f && (o.origin.y - b[3].y) / Z > 0.8f * edge && b[0].y < o.origin.y;
+}
+
 static float v_len(XrVector3f a) {
     return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
 }
@@ -361,7 +369,12 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
             fill_rrect(px, kPad, cy - kRowH / 2.f, W - 2 * kPad, 1.5f, 0, white, 0.08f);
         }
         bool dim = row > 0 && !g_set.enabled;  // the other settings don't matter while it's off
-        draw_text(&px, W, H, kPad, int(cy + 13), kRows[row], dim ? grey : white, 36);
+        if (row == kHands) {  // title nudged up, detail line below it
+            draw_text(&px, W, H, kPad, int(cy + 1), kRows[row], dim ? grey : white, 36);
+            draw_text(&px, W, H, kPad, int(cy + 33), "Works best when holding controllers", grey, 24);
+        } else {
+            draw_text(&px, W, H, kPad, int(cy + 13), kRows[row], dim ? grey : white, 36);
+        }
         if (row < kToggles) {  // switch: accent track with the knob right when on; grey when dimmed
             float x0 = W - kPad - kToggleW, y0 = cy - kToggleH / 2.f;
             fill_rrect(px, x0, y0, kToggleW, kToggleH, kToggleH / 2.f, on[row] && !dim ? accent : off, dim ? 0.5f : 1);
@@ -472,7 +485,7 @@ static std::vector<track::Meas> measurements(const std::vector<Obj>& objs, const
     }
     std::vector<track::Meas> ms;
     for (const Obj& o : objs) {
-        if (!o.stereo || !wanted(o.cls) || holds_controller(o, ctrl_head)) {
+        if (!o.stereo || !wanted(o.cls) || holds_controller(o, ctrl_head) || (g_set.hands && own_arm(o))) {
             continue;
         }
         XrVector3f w[4];
@@ -480,7 +493,8 @@ static std::vector<track::Meas> measurements(const std::vector<Obj>& objs, const
             w[k] = apply(head, o.corners[k]);
         }
         XrVector3f c = v_center(w);
-        if (std::hypot(c.x - h.x, c.z - h.z) > g_set.max_dist) {
+        float dist = std::hypot(c.x - h.x, c.z - h.z);
+        if (dist > g_set.max_dist || (o.cls == 0 && dist < 0.5f)) {  // a "person" closer than 50 cm is you
             continue;
         }
         // ponytail: isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
@@ -868,9 +882,9 @@ static int selftest() {
         return o;
     };
     Obj hand{0,    0.8f,
-             0.5f, {{-0.1f, -0.25f, -0.5f}, {0.1f, -0.25f, -0.5f}, {0.1f, -0.45f, -0.5f}, {-0.1f, -0.45f, -0.5f}},
+             0.6f, {{-0.1f, -0.25f, -0.6f}, {0.1f, -0.25f, -0.6f}, {0.1f, -0.45f, -0.6f}, {-0.1f, -0.45f, -0.6f}},
              true, {}};
-    std::vector<XrVector3f> ctrl = {{0, 1.25f, -0.5f},
+    std::vector<XrVector3f> ctrl = {{0, 1.25f, -0.6f},
                                     {0.2f, 1.3f, -0.6f}};  // one in the hand box, one before the person
     std::vector<track::Meas> ms = measurements({hand, obj(0, 2, 0.2f), obj(0, 5, 0), obj(41, 1, 0)}, head, ctrl);
     bool hand_kept_without = measurements({hand}, head, {}).size() == 1;
@@ -880,12 +894,20 @@ static int selftest() {
     check(ms.size() == 1 && hand_kept_without && hand_kept_when_off,
           "box around a controller, far person and cup dropped; person behind a controller kept");
     Obj arm{0,    0.8f,
-            0.3f, {{0.18f, -0.2f, -0.3f}, {0.3f, -0.2f, -0.3f}, {0.3f, -0.35f, -0.3f}, {0.18f, -0.35f, -0.3f}},
+            0.55f, {{0.18f, -0.2f, -0.55f}, {0.3f, -0.2f, -0.55f}, {0.3f, -0.27f, -0.55f}, {0.18f, -0.27f, -0.55f}},
             true, {}};  // forearm reaching out to a controller 45 cm further, outside the box
-    check(measurements({arm}, head, {{0.3f, 1.3f, -0.75f}}).empty() && measurements({arm}, head, {}).size() == 1,
+    check(measurements({arm}, head, {{0.3f, 1.3f, -1.0f}}).empty() && measurements({arm}, head, {}).size() == 1,
           "arm box that leaves out the controller dropped");
     Obj far_arm = obj(0, 1.2f, 0);  // the arm merged with the chair behind it: measured at 1.2 m, controller at 0.6 m
     check(measurements({far_arm}, head, {{0, 1.3f, -0.6f}}).empty(), "arm box measured too far dropped");
+    auto low = [](float z, float top) {  // box from `top` down to the bottom edge of the view (100 deg), 0.8 m deep
+        float y1 = -1.2f * z;
+        return Obj{0, 0.8f, z, {{-0.3f, top, -z}, {0.3f, top, -z}, {0.3f, y1, -z}, {-0.3f, y1, -z}}, true, {}};
+    };
+    check(measurements({low(0.8f, -0.3f)}, head, {}).empty() && measurements({low(0.8f, 0.1f)}, head, {}).size() == 1 &&
+              measurements({low(2, -0.3f)}, head, {}).size() == 1,
+          "bare arm at the bottom edge dropped; with a head above eye level, or 2 m away, kept");
+    check(measurements({obj(0, 0.4f, 0)}, head, {}).empty(), "person closer than 50 cm dropped");
     check(ms.size() == 1 && std::fabs(ms[0].v[0] - 0.2f) < 1e-5f && std::fabs(ms[0].v[1] - 1.35f) < 1e-5f &&
               std::fabs(ms[0].v[3] - 0.6f) < 1e-5f && std::fabs(ms[0].v[4] - 1.5f) < 1e-5f,
           "head frame -> standing universe center and size");
