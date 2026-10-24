@@ -67,6 +67,7 @@ static DetectorOptions g_det;
 static std::atomic<bool> g_det_paused{false};  // skip frames (no GPU work) while set
 static std::atomic<int> g_det_size{0};         // per-view size to run at (set from g_det.size); a change reloads
 static std::atomic<float> g_det_hz{0};         // max_hz, changeable while running
+static std::atomic<int> g_det_loading{0};      // size being loaded (model, then its first run compiles shaders); 0 = done
 static std::atomic<float> g_det_yolo_ms{0};    // mean YOLO time over the last stats period
 
 // Parses one detector flag (argv[i], value via next()); false if it isn't one. Call finish_detector_options() after.
@@ -313,6 +314,8 @@ static void write_pgm(const std::string& path, const uint8_t* p, int w, int h) {
 
 // One run at size S, until g_det_size changes or quit.
 static void detect_run(const int S) {
+    g_det_loading = S;
+    const uint64_t t_load = now_ns();
     const CamCal cal[2] = {load_calib(g_det.calib, shm::kCamNames[0]), load_calib(g_det.calib, shm::kCamNames[1])};
     Rectifier rect[2] = {Rectifier(cal[0], S, g_det.hfov_deg), Rectifier(cal[1], S, g_det.hfov_deg)};
     const float f = rect[0].f;
@@ -425,6 +428,10 @@ static void detect_run(const int S) {
         ex.input("in0", in);
         ncnn::Mat out;
         ex.extract("out0", out);
+        if (g_det_loading) {
+            printf("detector: %dpx ready %.1f s after loading started\n", S, (now_ns() - t_load) / 1e9);
+            g_det_loading = 0;
+        }
         uint64_t c = now_ns();
         if (!printed_shape) {
             printf("detector: out0 w=%d h=%d c=%d\n", out.w, out.h, out.c);

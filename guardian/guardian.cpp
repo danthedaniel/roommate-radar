@@ -1284,6 +1284,8 @@ int main(int argc, char** argv) {
                 snprintf(st, sizeof st, "Paused: no game running");
             } else if (!g_detector) {
                 snprintf(st, sizeof st, "Detector off (--no-detector)");
+            } else if (int s = g_det_loading) {
+                snprintf(st, sizeof st, "Loading %dpx model…", s);
             } else if (now - last_det_ns > 2000000000ull) {
                 snprintf(st, sizeof st, "Waiting for camera frames");
             } else {
