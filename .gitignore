@@ -8,3 +8,5 @@ re/
 __pycache__/
 # Frame headers for clangd on the Mac (make sysroot)
 .sysroot/
+# Camera snapshots: local only
+captures/
