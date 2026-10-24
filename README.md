@@ -101,11 +101,11 @@ behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead lo
 inside them (same depth) are your hands and are ignored.
 
 - Starts with SteamVR: `build/guardian --register` (in `~/steamframe/guardian`) adds `guardian.vrmanifest` with
-  auto-launch and starts it. `guardian.sh` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
+  auto-launch and starts it. `guardian.py` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
 - "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, range, status. Saved in
   `~/.config/guardian.conf`.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
-  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
+  by `guardian.py`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
   presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
 
 ```
@@ -127,6 +127,7 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
 Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). The `Makefile` wraps the common ones:
 `make deploy | build | logs | stream | mirror | cams | ssh | sysroot`. `make sysroot` copies the Frame's headers into
 `.sysroot/` so clangd on the Mac (`guardian/compile_flags.txt`, aarch64 target) resolves every include.
+Style: `.clang-format` for the C++, ruff and basedpyright (Python 3.12, the Frame's) in `pyproject.toml`.
 
 ```sh
 make build   # from the Mac: ship + build (ansible, see above)

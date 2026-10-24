@@ -4,7 +4,7 @@
 		{
 			"app_key": "steamframe.guardian",
 			"launch_type": "binary",
-			"binary_path_linux_arm": "guardian.sh",
+			"binary_path_linux_arm": "guardian.py",
 			"arguments": "",
 			"is_dashboard_overlay": true,
 			"strings": {

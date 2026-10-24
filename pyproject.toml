@@ -1,0 +1,10 @@
+[tool.ruff]
+line-length = 120  # same as .clang-format
+
+[tool.basedpyright]
+include = ["scripts", "guardian"]
+pythonVersion = "3.12"  # the Frame's /usr/bin/python3; udpmirror.py also runs on the Mac
+pythonPlatform = "Linux"
+typeCheckingMode = "recommended"
+reportUnusedCallResult = false  # write()/argparse results we don't need; `_ =` everywhere is noise
+reportAny = false  # json, ctypes and socket results are Any by nature; casting each one adds nothing

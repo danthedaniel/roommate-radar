@@ -6,20 +6,24 @@ Writes <prefix>_gray.ncnn.{param,bin}:
 - GRAY2RGB and the 1/255 scale are folded into the first conv: the input is the 1-channel 0..255 image.
   (Just the scale for yolo11n-grayscale, which already takes 1 channel.)
 """
+
 import struct
 import sys
 
 src = sys.argv[1]
 dst = src.removesuffix(".ncnn") + "_gray.ncnn"
-lines = open(src + ".param").read().splitlines()
+with open(src + ".param") as f:
+    lines = f.read().splitlines()
 
 # q arrives transposed to (heads, seq, dim) and pre-scaled by the BinaryOp before it, hence scale 1.
 i = next((n for n, l in enumerate(lines) if l.startswith("MatMul")), None)
 assert i is not None, "no MatMul (already converted?)"
-mm1, sm, mm2 = (l.split() for l in lines[i:i + 3])
-assert mm1[0] == "MatMul" and sm[0] == "Softmax" and mm2[0] == "MatMul" and mm2[-1] == "0=1", "unexpected attention block"
+mm1, sm, mm2 = (l.split() for l in lines[i : i + 3])
+assert mm1[0] == "MatMul" and sm[0] == "Softmax" and mm2[0] == "MatMul" and mm2[-1] == "0=1", (
+    "unexpected attention block"
+)
 q, k, v, out = mm1[4], mm1[5], mm2[4], mm2[6]
-lines[i:i + 3] = [
+lines[i : i + 3] = [
     f"Permute sdpa_k_t 1 1 {k} sdpa_k 0=1",
     f"Permute sdpa_v_t 1 1 {v} sdpa_v 0=1",
     f"SDPA sdpa 3 1 {q} sdpa_k sdpa_v sdpa_out 6=1.0",
@@ -35,11 +39,14 @@ co, kk = int(kv["0"]), int(kv["1"]) * int(kv.get("11", kv["1"]))
 cin = int(kv["6"]) // (co * kk)
 assert cin in (1, 3), f"first conv takes {cin} channels"
 lines[i] = lines[i].replace(f"6={kv['6']}", f"6={co * kk}")
-b = open(src + ".bin", "rb").read()
+with open(src + ".bin", "rb") as f:
+    b = f.read()
 assert b[:4] == bytes(4), "weights aren't fp32"
 w = struct.unpack_from(f"<{co * cin * kk}f", b, 4)
 folded = [sum(w[(o * cin + c) * kk + j] for c in range(cin)) / 255 for o in range(co) for j in range(kk)]
 
-open(dst + ".param", "w").write("\n".join(lines) + "\n")
-open(dst + ".bin", "wb").write(b[:4] + struct.pack(f"<{co * kk}f", *folded) + b[4 + co * cin * kk * 4:])
+with open(dst + ".param", "w") as f:
+    f.write("\n".join(lines) + "\n")
+with open(dst + ".bin", "wb") as f:
+    f.write(b[:4] + struct.pack(f"<{co * kk}f", *folded) + b[4 + co * cin * kk * 4 :])
 print("wrote", dst)

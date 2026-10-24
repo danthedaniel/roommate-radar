@@ -10,7 +10,11 @@ namespace shm {
 constexpr const char* kPath = "/dev/shm/steamframe-cams";
 constexpr uint32_t kMagic = 0x53464331;  // "SFC1"
 constexpr int kW = 1056, kH = 1024, kStride = 1152;
-enum Cam { kLeft = 0, kRight = 1, kNumCams = 2 };
+enum Cam {
+    kLeft = 0,
+    kRight = 1,
+    kNumCams = 2
+};
 constexpr const char* kCamNames[kNumCams] = {"slam_left", "slam_right"};
 
 struct Slot {
@@ -41,12 +45,16 @@ inline void write(Slot& s, const uint8_t* y, uint64_t t_ns, uint32_t frame_seq) 
 // Copies the slot if it changed since `last_seq`. Returns false if unchanged or torn.
 inline bool read(const Slot& s, uint64_t& last_seq, uint8_t* y, uint64_t& t_ns, uint32_t& frame_seq) {
     uint64_t q = s.seq.load(std::memory_order_acquire);
-    if (q & 1 || q == last_seq) return false;
+    if (q & 1 || q == last_seq) {
+        return false;
+    }
     std::memcpy(y, s.y, sizeof s.y);
     t_ns = s.t_mono_ns;
     frame_seq = s.frame_seq;
     std::atomic_thread_fence(std::memory_order_acquire);
-    if (s.seq.load(std::memory_order_relaxed) != q) return false;
+    if (s.seq.load(std::memory_order_relaxed) != q) {
+        return false;
+    }
     last_seq = q;
     return true;
 }

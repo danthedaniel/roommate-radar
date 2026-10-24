@@ -1,4 +1,5 @@
 #!/bin/sh
+# shellcheck disable=SC2029  # $remote is built here on purpose, then run by ssh on the Frame
 # Live stream the headset view (SteamVR's /dev/video99 mirror, 1080p30) to this machine.
 # Non-disruptive: SteamVR keeps running. With passthrough on, this is the camera view.
 # Usage: scripts/mirror.sh            -> plays in ffplay
