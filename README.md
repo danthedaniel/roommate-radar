@@ -101,9 +101,9 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
 
 - Starts with SteamVR: `build/guardian --register` (in `~/steamframe/guardian`) adds `guardian.vrmanifest` with
   auto-launch and starts it. `guardian.py` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
-- "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, only in games
-  (runs from a game's launch, intro included, until it quits; passthrough itself isn't reported to apps), range,
-  status. Saved in `~/.config/guardian.conf`.
+- "Guardian" tab in the SteamVR dashboard: on/off, only in games (runs from a game's launch,
+  intro included, until it quits; passthrough itself isn't reported to apps), people, cats and dogs, ignore my hands,
+  range, status. Saved in `~/.config/guardian.conf`.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
   by `guardian.py`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
   presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.

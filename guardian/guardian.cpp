@@ -258,15 +258,15 @@ namespace panel {
 const int W = 1000, H = 772, kPad = 48, kTop = 190, kRowH = 92;
 enum Ctl {
     kEnabled,
+    kGamesOnly,
     kPeople,
     kPets,
     kHands,
-    kGamesOnly,
     kRangeMinus,
     kRangePlus
 };
 const int kToggles = kRangeMinus, kRangeRow = kToggles;  // one row per switch, then the range row
-const char* kRows[] = {"Enabled", "People", "Cats and dogs", "Ignore my hands", "Only in games", "Range"};
+const char* kRows[] = {"Enabled", "Only in games", "People", "Cats and dogs", "Ignore my hands", "Range"};
 const int kToggleW = 104, kToggleH = 56, kBtnR = 28;
 
 static float row_cy(int row) {
@@ -282,8 +282,8 @@ static float plus_cx() {
 // Which control (texture pixel, y down) is under the pointer: the whole row for toggles, the buttons for range.
 static int hit(float x, float y) {
     int row = int(std::floor((y - kTop) / kRowH));
-    if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow) {
-        return -1;
+    if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow || (row > kEnabled && !g_set.enabled)) {
+        return -1;  // greyed-out rows (Enabled off) don't hover or press
     }
     if (row < kToggles) {
         return row;
@@ -349,7 +349,7 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
     fill_rrect(px, 0, 0, W, H, 32, bg, 0.94f);
     draw_text(&px, W, H, kPad, 100, "Guardian", white, 56);
     draw_text(&px, W, H, kPad, 150, status.c_str(), grey, 30);
-    bool on[kToggles] = {g_set.enabled, g_set.people, g_set.pets, g_set.hands, g_set.games_only};
+    bool on[kToggles] = {g_set.enabled, g_set.games_only, g_set.people, g_set.pets, g_set.hands};
     for (int row = 0; row <= kRangeRow; row++) {
         float cy = row_cy(row);
         if (hover == row) {
@@ -360,19 +360,19 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
         }
         bool dim = row > 0 && !g_set.enabled;  // the other settings don't matter while it's off
         draw_text(&px, W, H, kPad, int(cy + 13), kRows[row], dim ? grey : white, 36);
-        if (row < kToggles) {  // switch: accent track with the knob right when on
+        if (row < kToggles) {  // switch: accent track with the knob right when on; grey when dimmed
             float x0 = W - kPad - kToggleW, y0 = cy - kToggleH / 2.f;
-            fill_rrect(px, x0, y0, kToggleW, kToggleH, kToggleH / 2.f, on[row] ? accent : off, dim ? 0.5f : 1);
+            fill_rrect(px, x0, y0, kToggleW, kToggleH, kToggleH / 2.f, on[row] && !dim ? accent : off, dim ? 0.5f : 1);
             fill_circle(px, on[row] ? x0 + kToggleW - kToggleH / 2.f : x0 + kToggleH / 2.f, cy, kToggleH / 2.f - 5,
                         white, dim ? 0.6f : 1);
             continue;
         }
         for (int b = 0; b < 2; b++) {  // range: (-) value (+)
             float cx = b ? plus_cx() : minus_cx();
-            fill_circle(px, cx, cy, kBtnR, btn, hover == kRangeMinus + b ? 1 : 0.8f);
-            fill_rrect(px, cx - 11, cy - 1.5f, 22, 3, 1.5f, white, 1);
+            fill_circle(px, cx, cy, kBtnR, btn, (hover == kRangeMinus + b ? 1 : 0.8f) * (dim ? 0.5f : 1));
+            fill_rrect(px, cx - 11, cy - 1.5f, 22, 3, 1.5f, dim ? grey : white, 1);
             if (b) {
-                fill_rrect(px, cx - 1.5f, cy - 11, 3, 22, 1.5f, white, 1);
+                fill_rrect(px, cx - 1.5f, cy - 11, 3, 22, 1.5f, dim ? grey : white, 1);
             }
         }
         char v[16];
@@ -841,7 +841,9 @@ static int selftest() {
     // Dashboard: rows and buttons hit-test to their controls, pressing them changes the settings.
     check(panel::hit(500, panel::row_cy(panel::kPeople)) == panel::kPeople &&
               panel::hit(panel::plus_cx(), panel::row_cy(panel::kRangeRow)) == panel::kRangePlus &&
-              panel::hit(500, panel::row_cy(panel::kHands)) == panel::kHands && panel::hit(500, 50) == -1,
+              panel::hit(500, panel::row_cy(panel::kHands)) == panel::kHands && panel::hit(500, 50) == -1 &&
+              (g_set.enabled = false, panel::hit(500, panel::row_cy(panel::kPeople)) == -1) &&
+              panel::hit(500, panel::row_cy(panel::kEnabled)) == panel::kEnabled && (g_set.enabled = true),
           "dashboard hit test");
     panel::press(panel::kPeople);
     for (int i = 0; i < 20; i++) {
