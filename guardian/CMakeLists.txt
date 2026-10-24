@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(yoloxr CXX)
+project(guardian CXX)
 set(CMAKE_CXX_STANDARD 17)
 if(NOT CMAKE_BUILD_TYPE)
   set(CMAKE_BUILD_TYPE Release)
@@ -9,21 +9,6 @@ endif()
 set(ncnn_DIR "${CMAKE_SOURCE_DIR}/../third_party/ncnn-install/lib/cmake/ncnn" CACHE PATH "")
 find_package(ncnn REQUIRED)
 find_package(Vulkan REQUIRED)
-# SteamVR's shared loader (/usr/lib only has a static libopenxr_loader.a that doesn't link here)
-find_library(OPENXR_LOADER NAMES libopenxr_loader.so PATHS /opt/steamvr/bin/linuxarm64 NO_DEFAULT_PATH REQUIRED)
-
-foreach(stage vert frag)
-  add_custom_command(
-    OUTPUT box.${stage}.inc
-    COMMAND glslc -mfmt=num -o box.${stage}.inc ${CMAKE_SOURCE_DIR}/box.${stage}
-    DEPENDS box.${stage})
-endforeach()
-
-add_executable(yoloxr yoloxr.cpp box.vert.inc box.frag.inc)
-target_include_directories(yoloxr PRIVATE ${CMAKE_BINARY_DIR} ${CMAKE_SOURCE_DIR})
-target_link_libraries(yoloxr PRIVATE ncnn Vulkan::Vulkan ${OPENXR_LOADER} pthread)
-get_filename_component(OPENXR_DIR ${OPENXR_LOADER} DIRECTORY)
-set_target_properties(yoloxr PROPERTIES BUILD_RPATH ${OPENXR_DIR})
 
 add_executable(camserver camserver.cpp)
 

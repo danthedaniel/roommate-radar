@@ -1,4 +1,4 @@
-// Shared by yoloxr and guardian: the stereo YOLO detector thread. Reads the two SLAM camera frames published by
+// guardian's stereo YOLO detector thread. Reads the two SLAM camera frames published by
 // camserver, rectifies each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified
 // stereo pair), runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views
 // and triangulates depth from disparity. Results (head frame at capture time) go to g_dets.

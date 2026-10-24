@@ -1,4 +1,4 @@
-// Shared-memory frame handoff from camserver (root) to yoloxr (user).
+// Shared-memory frame handoff from camserver (root) to guardian (user).
 // One seqlock-protected slot per SLAM camera holding the newest normal-exposure Y plane.
 #pragma once
 #include <atomic>

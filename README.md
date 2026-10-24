@@ -74,33 +74,45 @@ ssh steamos@frame.local 'sudo python3 - --frames 1' < rawcam.py \
 ```
 
 `mirrorserver.py` runs on the Frame as a systemd user service (`mirrorserver`, UDP 5600, H.264 MPEG-TS, libx264
-only while a client sends keepalives), independent of yoloxr. Logs: `journalctl --user -u mirrorserver -f`.
+only while a client sends keepalives), independent of guardian. Logs: `journalctl --user -u mirrorserver -f`.
 
 ## Ansible
 
 `ansible/site.yml` sets up a fresh Frame and redeploys an existing one (`make deploy`, or
-`cd ansible && ansible-playbook site.yml [--tags mirror|yoloxr]`). Only Developer Mode has to be switched on by hand.
+`cd ansible && ansible-playbook site.yml [--tags mirror|guardian]`). Only Developer Mode has to be switched on by hand.
 Every first-time step is skipped once its output exists.
 
 - Always: pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
 - `mirror`: ships `mirrorserver.py` and enables the `mirrorserver` user service.
-- `yoloxr`: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
-  320/480/576/640 models into `models/` (`uvx`, needs uv); on the Frame, rsyncs ncnn and builds it, ships the models,
-  rsyncs `yoloxr/` to `~/steamframe/yoloxr` (keeps the Frame's `build/` and `calib.txt`) and builds it (yoloxr,
-  camserver, guardian), clones Valve's steamos-devkit to
-  `~/steamos-devkit`, adds yoloxr to the Steam library if it isn't there yet, and adds a "yoloxr" launcher to the
-  KDE (desktop mode) menu and desktop that starts it through Steam.
+- `guardian`: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
+  320 model into `models/` (`uvx`, needs uv); on the Frame, rsyncs ncnn and builds it, ships the models, and
+  rsyncs `guardian/` to `~/steamframe/guardian` (keeps the Frame's `build/` and `calib.txt`) and builds it (camserver,
+  guardian).
 
-## yoloxr: YOLO boxes over passthrough
+## guardian: people, cats and dogs over any VR app
 
-OpenXR scene app (`XR_ENVIRONMENT_BLEND_MODE_ALPHA_BLEND`, Vulkan) that draws COCO YOLO11n
-detections as world-locked 3D boxes; SteamVR keeps doing tracking and passthrough.
+OpenVR overlay app (`guardian/guardian.cpp`, stereo YOLO detector in `detector.h`) for playing without
+passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
+running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
+Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
+filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
+and sizes follow a Catmull-Rom spline through each track's last 4 detections, played back one detection period
+behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller
+inside them (same depth) are your hands and are ignored.
+
+- Starts with SteamVR: `build/guardian --register` (in `~/steamframe/guardian`) adds `guardian.vrmanifest` with
+  auto-launch and starts it. `guardian.sh` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
+- "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, range, status. Saved in
+  `~/.config/guardian.conf`.
+- GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
+  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
+  presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
 
 ```
-camserver (root)  ──/dev/shm/steamframe-cams──▶  yoloxr detector thread  ──▶  yoloxr XR thread
-newest normal-exposure SLAM L/R frames           rectify both views to          re-anchor boxes with head
-+ capture time (CLOCK_MONOTONIC)                 head-aligned pinholes, YOLO     pose at capture time, draw
-                                                 (ncnn Vulkan) on the stacked    outlines + labels
+camserver (root)  ──/dev/shm/steamframe-cams──▶  detector thread (detector.h)  ──▶  tracker + OpenVR overlays
+newest normal-exposure SLAM L/R frames           rectify both views to           (guardian.cpp)
++ capture time (CLOCK_MONOTONIC)                 head-aligned pinholes, YOLO
+                                                 (ncnn Vulkan) on the stacked
                                                  pair, stereo-match, depth=fB/d
 ```
 
@@ -111,37 +123,15 @@ newest normal-exposure SLAM L/R frames           rectify both views to          
   `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `--latency-ms` tunes the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
   105.6 mm horizontal baseline.
-- A box and its label are shown only while a controller's aim ray (drawn as a green laser, one hand at a time:
-  click a controller's grip to point with it) or, with no controller tracked, the eye gaze (`XR_EXT_eye_gaze_interaction`) hits the
-  box grown by a rectangular margin of `--focus-margin` label heights (default 2), or the label
-  itself once shown. An open
-  SteamVR dashboard keeps the session at VISIBLE (not FOCUSED) and OpenXR then delivers no gaze, so
-  `run.sh` runs `vrcmd --hidedashboard` after launch. Log line `eye gaze tracked in N% of frames`.
-- Gaze accuracy check: `run.sh --gaze-cal 1.5` (no detector) shows 9 world-fixed dots 15° apart, 1.5 m away,
-  one at a time with a countdown ring. Per dot it logs the median gaze − target offset (head frame, from the
-  gaze origin) and its spread, then the mean offset and error; raw samples go to `/tmp/gaze_cal.csv`. It starts
-  once gaze has been tracked for 4 s, and at the end shows the dots, where your gaze landed, and a live cursor.
 
 Build & run on the Frame (ncnn built in `~/steamframe/third_party`, see below). The `Makefile` wraps the common ones:
-`make deploy | build | reload | launch | stop | logs | stream | mirror | cams | ssh | sysroot`. `make sysroot` copies the Frame's headers into `.sysroot/` so clangd on the Mac
-(`yoloxr/compile_flags.txt`, aarch64 target) resolves every include.
+`make deploy | build | logs | stream | mirror | cams | ssh | sysroot`. `make sysroot` copies the Frame's headers into
+`.sysroot/` so clangd on the Mac (`guardian/compile_flags.txt`, aarch64 target) resolves every include.
 
 ```sh
-# from the Mac: ship + build (ansible, see above)
-make build
-# hot reload: rebuild, then restart yoloxr inside a running run.sh (Steam or systemd-run); camserver keeps running
-ssh steamos@frame.local 'cd ~/steamframe/yoloxr && cmake --build build && pkill -USR1 -x run.sh'
-ssh steamos@frame.local '~/steamframe/yoloxr/run.sh --no-xr --dump /tmp/d'   # detector only, debug PGMs
-# in the headset, detached (stop: systemctl --user stop yoloxr; logs: journalctl --user -u yoloxr -f)
-ssh steamos@frame.local 'systemd-run --user --unit=yoloxr --collect --working-directory=$HOME/steamframe/yoloxr $HOME/steamframe/yoloxr/run.sh'
+make build   # from the Mac: ship + build (ansible, see above)
+ssh steamos@frame.local 'cd ~/steamframe/guardian && build/guardian --register'   # once: auto-launch with SteamVR
 ```
-
-Launching from the headset: yoloxr is registered as a Steam devkit title (library entry "yoloxr", a non-Steam
-shortcut), the same way Valve's devkit client registers uploads, with no Steam restart. The ansible `yoloxr` tag does
-this: `~/devkit-game/yoloxr` symlinks to `~/steamframe/yoloxr` (so redeploys need no re-registration), then
-`~/steamos-devkit/client/devkit-utils/steam-client-create-shortcut` registers it (Steam must be running).
-Steam stdout goes to `~/.local/share/Steam/logs/steam_output.log`. Launch it from ssh the same way: `make launch`
-(`steam-devkit-rpc run-game gameid=yoloxr`).
 
 What ansible does for ncnn and the models, by hand. ncnn is the submodule `third_party/ncnn`: branch `ncnn` of this repo,
 a history-less snapshot of upstream c15904b plus our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see guardian). Its URL is `./`,
@@ -153,20 +143,20 @@ so check it out with `git -c protocol.file.allow=always submodule update --init`
 Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 1-channel input;
 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt).
 `yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
-to `~/steamframe/models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 yoloxr/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
-→ `yolo11n-grayscale_<S>_gray.ncnn.*`, which yoloxr loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
+to `~/steamframe/models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 guardian/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
+→ `yolo11n-grayscale_<S>_gray.ncnn.*`, which guardian loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
 1/255 folded into the first conv). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too); `--model` picks one.
-The export bakes in the input size, so each `--size S` needs its own (default S=576; 480 and 640 also exported).
+The export bakes in the input size, so each `--size S` needs its own (guardian uses S=320).
 Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
 Vulkan on the Frame, pycocotools: mAP50-95 **35.8 vs 32.3** (mAP50 49.3 vs 45.4, AP small/medium/large 15.4/40.6/56.6 vs
-13.6/37.9/53.0); speed identical (~26 ms median each, yoloxr stopped).
+13.6/37.9/53.0); speed identical (~26 ms median each, nothing else on the GPU).
 YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running: 23 ms @480, 31.4 ms @576, 38.5 ms @640
 (37 ms @576 before prep_model.py and the conv options).
 
 ### Dead ends (so we don't retry them)
 
-- OpenXR `/interaction_profiles/valve/frame_controller`: SteamVR rejects suggested bindings for it; yoloxr suggests
-  `valve/index_controller` + `khr/simple_controller` aim poses and SteamVR remaps the Frame controllers.
+- OpenXR `/interaction_profiles/valve/frame_controller`: SteamVR rejects suggested bindings for it; suggest
+  `valve/index_controller` + `khr/simple_controller` aim poses instead and SteamVR remaps the Frame controllers.
 - `IVRTrackedCamera` (OpenVR): HMD reports a camera but `Prop_CameraFrameLayout=0`, `GetCameraFrameSize` fails.
 - Reading `/dev/videoN` directly: EBUSY while SteamVR runs. With SteamVR stopped it streams,
   but exposure is ~0 (V4L2 exposes only `analogue_gain`; std OV exposure regs aren't what XRService uses).
@@ -183,26 +173,6 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks
   to. Qualcomm's `cdsp.mbn` (has the unsigned-PD shell built in) sits unused in `/lib/firmware/qcom/sm8650`.
 
-## guardian: people, cats and dogs over any VR app
-
-OpenVR overlay app (`yoloxr/guardian.cpp`, same detector as yoloxr via `detector.h`) for playing without
-passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
-running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
-Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
-filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
-and sizes follow a Catmull-Rom spline through each track's last 4 detections, played back one detection period
-behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller
-inside them (same depth) are your hands and are ignored.
-
-- Starts with SteamVR: `build/guardian --register` (in `~/steamframe/yoloxr`) adds `guardian.vrmanifest` with
-  auto-launch and starts it. `guardian.sh` starts camserver if it isn't running. Log: `/tmp/guardian.log`.
-- "Guardian" tab in the SteamVR dashboard: on/off, people, cats and dogs, ignore my hands, range, status. Saved in
-  `~/.config/guardian.conf`.
-- GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
-  by `guardian.sh`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
-  presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
-- yoloxr's `run.sh` restarts camserver when it starts and kills it when it exits, which leaves guardian without frames
-  until guardian restarts.
 
 ## Finding it if the IP changes
 

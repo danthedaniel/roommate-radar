@@ -1,5 +1,5 @@
 // guardian: outlines people, cats and dogs over whatever VR app is running (OpenVR overlays), so you see them
-// without passthrough. Same detector as yoloxr (detector.h), at a low size and rate to leave the GPU to the game.
+// without passthrough. Stereo YOLO detector in detector.h, at a low size and rate to leave the GPU to the game.
 //
 // Each confirmed track is a box overlay (rounded outline) plus a label overlay (class, confidence): upright sprites
 // turned to face you every compositor frame, in the standing universe. Detections are matched into tracks by a

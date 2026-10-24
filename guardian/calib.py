@@ -1,4 +1,4 @@
-"""Extract SLAM camera calibration into calib.txt for yoloxr.
+"""Extract SLAM camera calibration into calib.txt for guardian.
 
 Chain: head <- CAD (device_config "head") <- cal/cam0 frame (device_config cv/cad_from_cal,
 computed by XRService) <- cam_i (factory extrinsics in /persist/xrservice.json).

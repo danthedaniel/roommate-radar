@@ -5,5 +5,4 @@
 -isystem=/usr/include/freetype2
 -isystem../.sysroot/ncnn
 -isystem../.sysroot/openvr
--I../.sysroot/gen
 -I.

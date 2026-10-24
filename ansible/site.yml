@@ -1,4 +1,4 @@
-# Configure the Frame: cd ansible && ansible-playbook site.yml [--tags mirror|yoloxr] (or make deploy)
+# Configure the Frame: cd ansible && ansible-playbook site.yml [--tags mirror|guardian] (or make deploy)
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
 - hosts: localhost
   gather_facts: false
@@ -28,14 +28,14 @@
     - name: Check out the ncnn submodule
       command: git -c protocol.file.allow=always submodule update --init third_party/ncnn
       args: {chdir: "{{ playbook_dir }}/..", creates: "{{ playbook_dir }}/../third_party/ncnn/CMakeLists.txt"}
-      tags: yoloxr
+      tags: guardian
 
     # Exported on the Mac (ultralytics + torch don't run on the Frame), copied over below.
     - name: Download YOLO11n grayscale weights
       get_url:
         url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt
         dest: "{{ models }}/"
-      tags: yoloxr
+      tags: guardian
 
     - name: Export models (S x 2S input) and adapt them with prep_model.py
       shell: |
@@ -43,16 +43,15 @@
         mv yolo11n-grayscale_ncnn_model/model.ncnn.param yolo11n-grayscale_{{ item }}.ncnn.param
         mv yolo11n-grayscale_ncnn_model/model.ncnn.bin yolo11n-grayscale_{{ item }}.ncnn.bin
         rm -r yolo11n-grayscale_ncnn_model
-        python3 ../yoloxr/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
+        python3 ../guardian/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
       args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
-      loop: [320, 480, 576, 640]
-      tags: yoloxr
+      loop: [320]
+      tags: guardian
 
 - hosts: frame
   vars:
     root: "{{ playbook_dir }}/.."
     ncnn: ~/steamframe/third_party/ncnn
-    devkit_utils: ~/steamos-devkit/client/devkit-utils
   tasks:
     - name: Ship mirrorserver.py
       copy: {src: "{{ root }}/mirrorserver.py", dest: ~/steamframe/}
@@ -76,12 +75,12 @@
         delete: true  # excluded paths are kept
         rsync_opts: [--exclude=/build, --exclude=.git]
       register: ncnn_src
-      tags: yoloxr
+      tags: guardian
 
     - name: Check for a built ncnn
       stat: {path: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
       register: ncnn_built
-      tags: yoloxr
+      tags: guardian
 
     # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h
     - name: Build ncnn
@@ -92,72 +91,27 @@
         && cmake --build build && cmake --install build
       args: {chdir: "{{ ncnn }}"}
       when: ncnn_src is changed or not ncnn_built.stat.exists
-      tags: yoloxr
+      tags: guardian
 
     - name: Ship models
       copy: {src: "{{ item }}", dest: ~/steamframe/models/}
       loop: "{{ query('fileglob', root + '/models/yolo11n-grayscale_*_gray.ncnn.*') }}"
-      tags: yoloxr
+      tags: guardian
 
-    - name: Ship yoloxr source
+    - name: Ship guardian source
       synchronize:
-        src: "{{ root }}/yoloxr/"
-        dest: ~/steamframe/yoloxr/
+        src: "{{ root }}/guardian/"
+        dest: ~/steamframe/guardian/
         delete: true  # excluded paths are kept
         rsync_opts: [--exclude=/build, --exclude=/calib.txt]
-      tags: yoloxr
+      tags: guardian
 
-    - name: Build yoloxr
+    - name: Build guardian (and camserver)
       shell: cmake -S . -B build -G Ninja >/dev/null && cmake --build build
-      args: {chdir: ~/steamframe/yoloxr}
+      args: {chdir: ~/steamframe/guardian}
       register: build
       changed_when: "'no work to do' not in build.stdout"
-      tags: yoloxr
-
-    - name: Fetch Valve's devkit-utils (Steam shortcut tools)
-      git: {repo: https://gitlab.steamos.cloud/devkit/steamos-devkit.git, dest: ~/steamos-devkit, depth: 1}
-      tags: yoloxr
-
-    - name: Link yoloxr as a devkit title
-      file: {src: ~/steamframe/yoloxr, dest: ~/devkit-game/yoloxr, state: link}
-      tags: yoloxr
-
-    - name: List registered devkit titles
-      command: python3 {{ devkit_utils }}/steamos-list-games
-      register: games
-      changed_when: false
-      tags: yoloxr
-
-    # Steam's create-shortcut, as Valve's devkit client does: library entry "yoloxr", no Steam restart.
-    - name: Add yoloxr to the Steam library
-      command:
-        argv:
-          - python3
-          - "{{ devkit_utils }}/steam-client-create-shortcut"
-          - --parms
-          - '{"gameid": "yoloxr", "directory": "{{ ansible_facts.env.HOME }}/devkit-game/yoloxr", "argv": ["./run.sh"], "env": {},
-              "settings": {"compat_tool": ""}, "force_appid": "", "lepton_args": ""}'
-      when: "'yoloxr' not in games.stdout | from_json | map(attribute='gameid')"
-      register: shortcut
-      failed_when: "'error' in shortcut.stdout | from_json"
-      tags: yoloxr
-
-    # KDE (desktop mode) launcher: runs it through Steam like the library entry. Executable so Plasma trusts it.
-    - name: Add yoloxr to the KDE menu and desktop
-      copy:
-        dest: "{{ item }}"
-        mode: "0755"
-        content: |
-          [Desktop Entry]
-          Name=yoloxr
-          Comment=YOLO boxes over passthrough
-          Exec=python3 {{ ansible_facts.env.HOME }}/steamos-devkit/client/devkit-utils/steam-devkit-rpc run-game gameid=yoloxr
-          Icon=camera-video
-          Terminal=false
-          Type=Application
-          Categories=Game;
-      loop: [~/.local/share/applications/yoloxr.desktop, ~/Desktop/yoloxr.desktop]
-      tags: yoloxr
+      tags: guardian
 
   handlers:
     - name: restart mirrorserver
