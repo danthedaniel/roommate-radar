@@ -5,3 +5,4 @@ models/
 yoloxr/calib.txt
 # Valve binaries pulled from the Frame for reverse engineering; never commit
 re/
+__pycache__/
