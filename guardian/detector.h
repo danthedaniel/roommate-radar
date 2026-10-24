@@ -59,6 +59,7 @@ struct DetectorOptions {
     float conf = 0.25f;
     float iou = 0.5f;      // overlapping detections/tracks above this IoU keep only the most confident
     float contain = 0.8f;  // ...same if this fraction of the smaller box lies inside the larger one
+    float min_box = 0.05f;  // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
     float latency_ms = 8;  // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
     float max_hz = 0;      // run YOLO at most this often (0 = every camera frame pair)
 };
@@ -86,6 +87,8 @@ template <class Next> static bool parse_detector_option(const std::string& a, Ne
         g_det.iou = float(atof(next()));
     } else if (a == "--contain") {
         g_det.contain = float(atof(next()));
+    } else if (a == "--min-box") {
+        g_det.min_box = float(atof(next()));
     } else if (a == "--latency-ms") {
         g_det.latency_ms = float(atof(next()));
     } else if (a == "--max-hz") {
@@ -450,7 +453,8 @@ static void detect_run(const int S) {
             int v = cy >= S;  // top half = left view, bottom half = right view
             float oy = v * S;
             Det d{cx - w / 2, std::max(cy - h / 2, oy) - oy, cx + w / 2, std::min(cy + h / 2, oy + S) - oy, bs, best};
-            if (d.y1 - d.y0 > 4) {
+            // > 4 px tall: not a sliver clipped at the seam between the views
+            if (d.y1 - d.y0 > 4 && std::max(d.x1 - d.x0, d.y1 - d.y0) >= g_det.min_box * S) {
                 views[v].push_back(d);
             }
         }
