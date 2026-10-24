@@ -77,8 +77,8 @@ only while a client sends keepalives), independent of guardian. Logs: `journalct
 
 ## Ansible
 
-`ansible/site.yml` sets up a fresh Frame and redeploys an existing one (`make deploy`, or
-`cd ansible && ansible-playbook site.yml [--tags mirror|guardian]`). Only Developer Mode has to be switched on by hand.
+`ansible/deploy.yml` sets up a fresh Frame and redeploys an existing one (`make deploy`, or
+`cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be switched on by hand.
 Every first-time step is skipped once its output exists.
 
 - Always: pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).

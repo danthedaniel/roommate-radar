@@ -1,4 +1,4 @@
-# Configure the Frame: cd ansible && ansible-playbook site.yml [--tags mirror|guardian] (or make deploy)
+# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy)
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
 - hosts: localhost
   gather_facts: false

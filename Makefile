@@ -3,13 +3,13 @@ FRAME ?= steamos@frame.local
 
 .PHONY: deploy build logs stream cams ssh sysroot
 
-# Everything: mirrorserver service, guardian (ship, build). See ansible/site.yml
+# Everything: mirrorserver service, guardian (ship, build). See ansible/deploy.yml
 deploy:
-	cd ansible && ansible-playbook site.yml
+	cd ansible && ansible-playbook deploy.yml
 
 # Ship and build guardian only
 build:
-	cd ansible && ansible-playbook site.yml --tags guardian
+	cd ansible && ansible-playbook deploy.yml --tags guardian
 
 # guardian output (started by SteamVR)
 logs:
