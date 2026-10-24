@@ -81,19 +81,6 @@ static bool wanted(int cls) {
     return cls == 0 ? g_set.people : (cls == 15 || cls == 16) && g_set.pets;
 }
 
-// Your own hands (YOLO often calls them "person"): a controller inside the box, i.e. within its rectangle grown by
-// 15 cm and within 40 cm of its depth. Box and controllers are in the head frame at capture time.
-static bool holds_controller(const Obj& o, const std::vector<XrVector3f>& controllers) {
-    const float m = 0.15f;
-    for (const XrVector3f& p : controllers) {
-        if (p.x > o.corners[0].x - m && p.x < o.corners[1].x + m && p.y > o.corners[3].y - m &&
-            p.y < o.corners[0].y + m && std::fabs(p.z - o.corners[0].z) < 0.4f) {
-            return true;
-        }
-    }
-    return false;
-}
-
 static XrVector3f v_add(XrVector3f a, XrVector3f b) {
     return {a.x + b.x, a.y + b.y, a.z + b.z};
 }
@@ -103,6 +90,30 @@ static XrVector3f v_sub(XrVector3f a, XrVector3f b) {
 static XrVector3f v_mul(XrVector3f a, float s) {
     return {a.x * s, a.y * s, a.z * s};
 }
+
+// Your own arms and hands (YOLO often calls them "person"; it doesn't know the controller, so an arm box can stop at
+// the wrist and leave it out): a point on the forearm, from 40% of the way from the shoulder to a controller up to the
+// controller, inside the box: within its rectangle scaled to that point's depth (seen from the camera) and grown by
+// 15 cm, and within 40 cm of its depth. Box and controllers are in the head frame at capture time.
+static bool holds_controller(const Obj& o, const std::vector<XrVector3f>& controllers) {
+    const float m = 0.15f;
+    const XrVector3f c = o.origin;
+    const XrVector3f* b = o.corners;
+    for (const XrVector3f& hand : controllers) {
+        const XrVector3f shoulder{std::copysign(0.18f, hand.x), -0.25f, 0};  // ponytail: one body size for everyone
+        for (int k = 4; k <= 10; k++) {
+            XrVector3f p = v_add(shoulder, v_mul(v_sub(hand, shoulder), k / 10.f));
+            float s = (p.z - c.z) / (b[0].z - c.z);
+            if (s > 0 && p.x > c.x + (b[0].x - c.x) * s - m && p.x < c.x + (b[1].x - c.x) * s + m &&
+                p.y > c.y + (b[3].y - c.y) * s - m && p.y < c.y + (b[0].y - c.y) * s + m &&
+                std::fabs(p.z - b[0].z) < 0.4f) {
+                return true;
+            }
+        }
+    }
+    return false;
+}
+
 static float v_len(XrVector3f a) {
     return std::sqrt(a.x * a.x + a.y * a.y + a.z * a.z);
 }
@@ -855,6 +866,11 @@ static int selftest() {
     g_set.hands = true;
     check(ms.size() == 1 && hand_kept_without && hand_kept_when_off,
           "box around a controller, far person and cup dropped; person behind a controller kept");
+    Obj arm{0,    0.8f,
+            0.3f, {{0.18f, -0.2f, -0.3f}, {0.3f, -0.2f, -0.3f}, {0.3f, -0.35f, -0.3f}, {0.18f, -0.35f, -0.3f}},
+            true, {}};  // forearm reaching out to a controller 45 cm further, outside the box
+    check(measurements({arm}, head, {{0.3f, 1.3f, -0.75f}}).empty() && measurements({arm}, head, {}).size() == 1,
+          "arm box that leaves out the controller dropped");
     check(ms.size() == 1 && std::fabs(ms[0].v[0] - 0.2f) < 1e-5f && std::fabs(ms[0].v[1] - 1.35f) < 1e-5f &&
               std::fabs(ms[0].v[3] - 0.6f) < 1e-5f && std::fabs(ms[0].v[4] - 1.5f) < 1e-5f,
           "head frame -> standing universe center and size");
