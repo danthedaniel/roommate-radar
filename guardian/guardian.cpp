@@ -21,6 +21,7 @@
 #include <vulkan/vulkan.h>
 #include <openvr.h>
 
+#include <numeric>
 #include <thread>
 #include <unordered_map>
 
@@ -134,6 +135,14 @@ static bool own_arm(const Obj& o) {
     const XrVector3f* b = o.corners;
     float Z = o.origin.z - b[3].z, edge = std::tan(g_det.hfov_deg * float(M_PI) / 360);
     return Z > 0 && Z < 1.2f && (o.origin.y - b[3].y) / Z > 0.8f * edge && b[0].y < o.origin.y;
+}
+
+// A box (center p, width w, height h; standing universe) as seen from the head position: azimuth/elevation (rad) of
+// its edges, so duplicate() can tell two tracks of one person apart from two people.
+static Det angular_box(const float* p, float w, float h, XrVector3f head) {
+    float d = std::hypot(p[0] - head.x, p[2] - head.z), az = std::atan2(p[0] - head.x, head.z - p[2]),
+          el = std::atan2(p[1] - head.y, d), hw = std::atan2(w / 2, d), hh = std::atan2(h / 2, d);
+    return {az - hw, el - hh, az + hw, el + hh, 0, 0};
 }
 
 static float v_len(XrVector3f a) {
@@ -1003,6 +1012,13 @@ static int selftest() {
               measurements({low(2, -0.3f)}, head, {}).size() == 1,
           "bare arm at the bottom edge dropped; with a head above eye level, or 2 m away, kept");
     check(measurements({obj(0, 0.4f, 0)}, head, {}).empty(), "person closer than 50 cm dropped");
+    {
+        const float near[] = {0, 1.2f, -2}, far[] = {0, 1.2f, -2.5f}, beside[] = {0.8f, 1.2f, -2};
+        Det a = angular_box(near, 0.5f, 1.6f, {0, 1.6f, 0});
+        check(duplicate(a, angular_box(far, 0.5f, 1.6f, {0, 1.6f, 0})) &&
+                  !duplicate(a, angular_box(beside, 0.5f, 1.6f, {0, 1.6f, 0})),
+              "one person at two depths is a duplicate, two side by side aren't");
+    }
     check(ms.size() == 1 && std::fabs(ms[0].v[0] - 0.2f) < 1e-5f && std::fabs(ms[0].v[1] - 1.35f) < 1e-5f &&
               std::fabs(ms[0].v[3] - 0.6f) < 1e-5f && std::fabs(ms[0].v[4] - 1.5f) < 1e-5f,
           "head frame -> standing universe center and size");
@@ -1189,7 +1205,17 @@ int main(int argc, char** argv) {
         double t_play = now / 1e9 - lag_s;
         std::string where;  // for the log: each shown box relative to the head
         int n = 0;
-        for (const track::Track& t : tracker.tracks) {
+        // Most recently matched first: when a depth jump misses the tracker's gate, the new track takes over and the
+        // old one, still coasting, would be drawn as a second box just in front of or behind it.
+        std::vector<size_t> order(tracker.tracks.size());
+        std::iota(order.begin(), order.end(), 0);
+        std::sort(order.begin(), order.end(), [&](size_t a, size_t b) {
+            const track::Track &x = tracker.tracks[a], &y = tracker.tracks[b];
+            return x.last_seen != y.last_seen ? x.last_seen > y.last_seen : x.score > y.score;
+        });
+        std::vector<Det> drawn;  // angular boxes (rad) seen from the head, for duplicate()
+        for (size_t ti : order) {
+            const track::Track& t = tracker.tracks[ti];
             // Confirmed and matched recently (the tracker drops stale tracks only when the next detections come).
             if (!t.confirmed || now / 1e9 - t.last_seen > tracker.prm.max_age || n == kMaxOverlays) {
                 continue;
@@ -1197,6 +1223,13 @@ int main(int argc, char** argv) {
             track::Sample sp = spline_at(t.history, t_play);
             const float* p = sp.v;
             float w = std::max(p[3], 0.05f), ht = std::max(p[4], 0.05f);
+            Det a = angular_box(p, w, ht, h);
+            if (std::any_of(drawn.begin(), drawn.end(), [&](const Det& b) {
+                    return duplicate(a, b);
+                })) {
+                continue;
+            }
+            drawn.push_back(a);
             {
                 // Bearing from the head's horizontal forward (-z), + = right; height relative to the eyes.
                 float vx = p[0] - h.x, vz = p[2] - h.z, fx = -head.m[0][2], fz = -head.m[2][2];
