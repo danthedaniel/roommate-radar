@@ -266,7 +266,7 @@ enum Ctl {
     kRangePlus
 };
 const int kToggles = kRangeMinus, kRangeRow = kToggles;  // one row per switch, then the range row
-const char* kRows[] = {"Enabled", "Only in games", "People", "Cats and dogs", "Ignore my hands", "Range"};
+const char* kRows[] = {"Enabled", "Only in Games", "Detect People", "Detect Cats and Dogs", "Ignore My Hands", "Range"};
 const int kToggleW = 104, kToggleH = 56, kBtnR = 28;
 
 static float row_cy(int row) {
