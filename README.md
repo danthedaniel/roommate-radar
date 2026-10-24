@@ -63,14 +63,14 @@ XRService holds the capture queues exclusively, but as root `rawcam.py` duplicat
 read-only), and mmaps that dmabuf. Buffers are NV12 with Y stride 1152 (SLAM) / 640 (upper).
 
 ```sh
-./stream.sh                                    # live 2x2 mosaic in ffplay
-./stream.sh --exposure controller              # the LED-tracking exposure instead
-ssh steamos@frame.local 'sudo python3 - --frames 1' < rawcam.py \
+scripts/stream.sh                            # live 2x2 mosaic in ffplay
+scripts/stream.sh --exposure controller      # the LED-tracking exposure instead
+ssh steamos@frame.local 'sudo python3 - --frames 1' < scripts/rawcam.py \
   | ffmpeg -f rawvideo -pix_fmt gray -s 2112x1504 -i - snap.png   # one raw snapshot
-./udpmirror.py                                 # headset view (/dev/video99) from the mirrorserver service; black/~1 fps when not worn
-./udpmirror.py > out.ts                        # same, saved
-./udpmirror.py --record out.mp4                # watch and save to MP4 (stream copied, not re-encoded)
-./mirror.sh                                    # same over ssh, no service needed
+scripts/udpmirror.py                         # headset view (/dev/video99) from the mirrorserver service; black/~1 fps when not worn
+scripts/udpmirror.py > out.ts                # same, saved
+scripts/udpmirror.py --record out.mp4        # watch and save to MP4 (stream copied, not re-encoded)
+scripts/mirror.sh                            # same over ssh, no service needed
 ```
 
 `mirrorserver.py` runs on the Frame as a systemd user service (`mirrorserver`, UDP 5600, H.264 MPEG-TS, libx264

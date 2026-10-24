@@ -54,7 +54,7 @@
     ncnn: ~/steamframe/third_party/ncnn
   tasks:
     - name: Ship mirrorserver.py
-      copy: {src: "{{ root }}/mirrorserver.py", dest: ~/steamframe/}
+      copy: {src: "{{ root }}/scripts/mirrorserver.py", dest: ~/steamframe/}
       tags: mirror
       notify: restart mirrorserver
 

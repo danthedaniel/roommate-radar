@@ -1,8 +1,8 @@
 #!/bin/sh
 # Live stream all 4 raw tracking cameras to this machine. SteamVR keeps running:
 # rawcam.py reads the frames out of XRService's capture buffers (needs NOPASSWD sudo).
-# Usage: ./stream.sh [rawcam args, e.g. --fps 15 --exposure controller]   -> ffplay
-#        ./stream.sh > out.ts                                              -> save H.264 MPEG-TS
+# Usage: scripts/stream.sh [rawcam args, e.g. --fps 15 --exposure controller]   -> ffplay
+#        scripts/stream.sh > out.ts                                              -> save H.264 MPEG-TS
 cd "$(dirname "$0")"
 host=${FRAME_HOST:-steamos@frame.local}
 fps=30

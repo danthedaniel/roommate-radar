@@ -17,15 +17,15 @@ logs:
 
 # Headset view over UDP (mirrorserver service, always on)
 stream:
-	./udpmirror.py
+	scripts/udpmirror.py
 
 # Headset view over ssh
 mirror:
-	./mirror.sh
+	scripts/mirror.sh
 
 # Raw tracking cameras
 cams:
-	./stream.sh
+	scripts/stream.sh
 
 ssh:
 	ssh $(FRAME)
