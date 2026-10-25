@@ -34,7 +34,7 @@ struct Params {
     float size_rate = 0.3f;   // process noise for box size (m/s^2 equivalent)
     float size_sigma = 0.1f;  // box size measurement std dev (m)
     size_t history = 4;       // matched detections kept per track
-    float size_alpha = 0.3f;  // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
+    float size_alpha = 0.2f;  // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
 };
 
 // One axis: position p, velocity v, covariance P.
