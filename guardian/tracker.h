@@ -6,8 +6,8 @@
 //   3. match the tracks left over to low-confidence detections (keeps a track through a weak frame),
 //   4. unmatched confident detections start tentative tracks; tentative tracks that miss are dropped, confirmed
 //      ones after max_age without a match.
-// Each track also keeps its last few matched detections (history) for drawing; the filter's predictions are only
-// used for matching.
+// Each track also keeps its last few matched detections (history) for drawing, with w and h alpha-smoothed; the
+// filter's predictions are only used for matching.
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -34,6 +34,7 @@ struct Params {
     float size_rate = 0.3f;   // process noise for box size (m/s^2 equivalent)
     float size_sigma = 0.1f;  // box size measurement std dev (m)
     size_t history = 4;       // matched detections kept per track
+    float size_alpha = 0.3f;  // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
 };
 
 // One axis: position p, velocity v, covariance P.
@@ -193,6 +194,11 @@ class Tracker {
     void remember(Track& tr, const Meas& d, double t) {
         Sample s{t, {}};
         std::copy(d.v, d.v + 5, s.v);
+        if (!tr.history.empty()) {
+            for (int c = 3; c < 5; c++) {
+                s.v[c] = tr.history.back().v[c] + prm.size_alpha * (s.v[c] - tr.history.back().v[c]);
+            }
+        }
         if (tr.history.empty() || t > tr.history.back().t) {
             tr.history.push_back(s);
         }
@@ -285,6 +291,14 @@ inline int selftest(void (*report)(bool ok, const char* what)) {
               trk.tracks[0].history.size() == 4 && trk.tracks[0].history.front().t == 8 * 0.25 &&
               trk.tracks[0].history.back().t == 11 * 0.25,
           "velocity learned, last 4 detections kept");
+
+    // Box size is smoothed: a 20 cm jump in height moves the stored height by size_alpha of it.
+    Tracker sz;
+    sz.update({{{0, 1, -2, 0.5f, 1.7f}, 0.05f, 0.8f, 0}}, 0);
+    sz.update({{{0, 1, -2, 0.5f, 1.9f}, 0.05f, 0.8f, 0}}, 0.25);
+    check(std::fabs(sz.tracks[0].history.back().v[4] - (1.7f + sz.prm.size_alpha * 0.2f)) < 1e-5f &&
+              sz.tracks[0].history.back().v[3] == 0.5f,
+          "box size is alpha-smoothed");
 
     // A weak (low-confidence) detection keeps the track; on its own it starts nothing.
     trk.update({{{3.0f, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}, {{-3, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}}, 3.0);

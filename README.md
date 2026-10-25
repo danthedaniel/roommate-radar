@@ -95,8 +95,8 @@ passthrough: outlines people, cats and dogs within range, with class and confide
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
 Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
 filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
-and sizes follow a Catmull-Rom spline through each track's last 4 detections, played back one detection period
-behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller,
+and sizes follow a Catmull-Rom spline through each track's last 4 detections (sizes alpha-smoothed first,
+`--size-alpha 0.3`), played back one detection period behind (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller,
 or the forearm leading to it, inside them (same depth) are your arms and are ignored.
 
 - Starts with SteamVR: `build/guardian --register` (in `~/steamframe/guardian`) adds `guardian.vrmanifest` with

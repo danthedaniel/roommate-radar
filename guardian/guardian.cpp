@@ -4,8 +4,8 @@
 // Each confirmed track is a box overlay (rounded outline) plus a label overlay (class, confidence): upright sprites
 // turned to face you every compositor frame, in the standing universe. Detections are matched into tracks by a
 // ByteTrack-style tracker (tracker.h); each box's center and size follow a cubic spline (time-based Catmull-Rom)
-// through its track's last detections, played back one detection period behind the newest one so there is always
-// a segment to be in.
+// through its track's last detections (sizes alpha-smoothed, --size-alpha), played back one detection period behind
+// the newest one so there is always a segment to be in.
 //
 // A "Guardian" tab in the SteamVR dashboard toggles it and what it shows; settings persist in ~/.config/guardian.conf.
 //
@@ -1057,6 +1057,8 @@ int main(int argc, char** argv) {
             tracker.prm.gate = float(atof(next()));
         } else if (a == "--accel") {
             tracker.prm.accel = float(atof(next()));
+        } else if (a == "--size-alpha") {
+            tracker.prm.size_alpha = std::clamp(float(atof(next())), 0.01f, 1.f);
         } else if (a == "--no-detector") {
             g_detector = false;
         } else if (parse_detector_option(a, next)) {
