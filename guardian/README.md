@@ -50,7 +50,7 @@ normal-exposure SLAM L/R frames                            head-aligned pinholes
 Build, then install, from the Mac. `make logs` tails the log.
 
 ```sh
-make build             # build.yml: compile on the Frame in the Steam Runtime SDK, copy dist/guardian back
+make build             # build.yml: compile on the Mac in the Steam Runtime SDK (docker) into dist/guardian
 make deploy-guardian   # deploy.yml: install dist/guardian as a Steam app
 ```
 
@@ -58,7 +58,7 @@ Then start "Devkit Game: guardian" from the Steam Library once, and restart Stea
 auto-launches with SteamVR.
 
 - Build (`build.yml`): like a Store depot, in the Steam Runtime 4 arm64 SDK (`registry.gitlab.steamos.cloud/steamrt/
-  steamrt4/sdk/arm64`, rootless podman on the Frame) in `~/steamframe/build` (this repo's layout). `cmake --install`
+  steamrt4/sdk/arm64`, natively in the Mac's arm64 Docker Desktop) in `build-sdk/`. `cmake --install`
   makes the app: `guardian.py`, `calib.py`, the font, `models/`, `bin/guardian` + `bin/libopenvr_api.so` (OpenVR
   SDK v2.15.6, `$ORIGIN` rpath), `driver/` (manifest + `bin/linuxarm64/driver_guardian.so`, static libstdc++ as it
   loads into the host's vrserver). Nothing from the host: glslang is the SDK's static one, the font is shipped.

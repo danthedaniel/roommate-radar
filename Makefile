@@ -3,7 +3,7 @@ FRAME ?= steamos@frame.local
 
 .PHONY: build deploy deploy-mirror deploy-guardian logs stream cams ssh sysroot
 
-# Build guardian on the Frame (Steam Runtime SDK) into dist/guardian on the Mac (ansible/build.yml)
+# Build guardian on the Mac (Steam Runtime SDK, docker) into dist/guardian (ansible/build.yml)
 build:
 	cd ansible && ansible-playbook build.yml
 

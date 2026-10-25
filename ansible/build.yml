@@ -1,4 +1,3 @@
-# Build what deploy.yml installs: cd ansible && ansible-playbook build.yml (or make build). Compiles on the Frame,
-# copies the artifacts back to the Mac (dist/).
-- import_playbook: pair.yml
+# Build what deploy.yml installs: cd ansible && ansible-playbook build.yml (or make build). Compiles on the Mac in
+# the Steam Runtime SDK (docker) into dist/.
 - import_playbook: ../guardian/build.yml

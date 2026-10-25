@@ -1,5 +1,6 @@
-# The installed app, built on the Frame (make build)
+# The installed app and its build tree (make build)
 guardian/build/
+build-sdk/
 dist/
 models/
 # From guardian/build.yml: OpenVR SDK pieces, the label font, ncnn built in the Steam Runtime SDK
