@@ -1,7 +1,7 @@
 """Serve the headset view (SteamVR's /dev/video99 compositor mirror) as H.264 in MPEG-TS over UDP.
 
 Clients send any datagram to the port at least every few seconds (see udpmirror.py) and get the stream back
-from it. ffmpeg only runs while someone is watching. Runs as the mirrorserver user service (ansible/). Usage: mirrorserver.py [port]
+from it. ffmpeg only runs while someone is watching. Runs as the mirrorserver user service (deploy.yml). Usage: mirrorserver.py [port]
 """
 
 import os

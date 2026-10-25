@@ -1,0 +1,18 @@
+# mirrorserver user service. Run through ansible/deploy.yml (make deploy-mirror), which pairs the ssh key first.
+- hosts: frame
+  tags: mirror
+  tasks:
+    - name: Ship mirrorserver.py
+      copy: {src: mirrorserver.py, dest: ~/steamframe/}
+      notify: restart mirrorserver
+
+    - name: Install mirrorserver user service
+      copy: {src: mirrorserver.service, dest: ~/.config/systemd/user/}
+      notify: restart mirrorserver
+
+    - name: Enable mirrorserver
+      systemd_service: {name: mirrorserver, scope: user, enabled: true, state: started, daemon_reload: true}
+
+  handlers:
+    - name: restart mirrorserver
+      systemd_service: {name: mirrorserver, scope: user, state: restarted, daemon_reload: true}

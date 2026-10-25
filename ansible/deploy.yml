@@ -1,10 +1,9 @@
-# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy)
+# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy[-mirror|-guardian])
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
 - hosts: localhost
   gather_facts: false
   vars:
     frame: "{{ hostvars.frame.ansible_user }}@{{ hostvars.frame.ansible_host }}"
-    models: "{{ playbook_dir }}/../models"
   tasks:
     - name: Check the ssh key works
       command: ssh -o BatchMode=yes -o ConnectTimeout=5 {{ frame }} true
@@ -23,96 +22,5 @@
       when: ssh.rc != 0
       tags: always
 
-    # ncnn is a submodule: branch "ncnn" of this repo (upstream snapshot + our patches). Its URL is ./ (this repo),
-    # which needs file transport allowed for submodules.
-    - name: Check out the ncnn submodule
-      command: git -c protocol.file.allow=always submodule update --init third_party/ncnn
-      args: {chdir: "{{ playbook_dir }}/..", creates: "{{ playbook_dir }}/../third_party/ncnn/CMakeLists.txt"}
-      tags: guardian
-
-    # Exported on the Mac (ultralytics + torch don't run on the Frame), copied over below.
-    - name: Download YOLO11n grayscale weights
-      get_url:
-        url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt
-        dest: "{{ models }}/"
-      tags: guardian
-
-    - name: Export models (S x 2S input) and adapt them with prep_model.py
-      shell: |
-        uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz={{ 2 * item }},{{ item }}
-        mv yolo11n-grayscale_ncnn_model/model.ncnn.param yolo11n-grayscale_{{ item }}.ncnn.param
-        mv yolo11n-grayscale_ncnn_model/model.ncnn.bin yolo11n-grayscale_{{ item }}.ncnn.bin
-        rm -r yolo11n-grayscale_ncnn_model
-        python3 ../guardian/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
-      args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
-      loop: [320, 480, 640]
-      tags: guardian
-
-- hosts: frame
-  vars:
-    root: "{{ playbook_dir }}/.."
-    ncnn: ~/steamframe/third_party/ncnn
-  tasks:
-    - name: Ship mirrorserver.py
-      copy: {src: "{{ root }}/scripts/mirrorserver.py", dest: ~/steamframe/}
-      tags: mirror
-      notify: restart mirrorserver
-
-    - name: Install mirrorserver user service
-      copy: {src: mirrorserver.service, dest: ~/.config/systemd/user/}
-      tags: mirror
-      notify: restart mirrorserver
-
-    - name: Enable mirrorserver
-      systemd_service: {name: mirrorserver, scope: user, enabled: true, state: started, daemon_reload: true}
-      tags: mirror
-
-    # The submodule's working tree (see the localhost play); the Frame keeps its build/ so rebuilds are incremental.
-    - name: Ship ncnn source
-      synchronize:
-        src: "{{ root }}/third_party/ncnn/"
-        dest: "{{ ncnn }}/"
-        delete: true  # excluded paths are kept
-        rsync_opts: [--exclude=/build, --exclude=.git]
-      register: ncnn_src
-      tags: guardian
-
-    - name: Check for a built ncnn
-      stat: {path: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
-      register: ncnn_built
-      tags: guardian
-
-    # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h
-    - name: Build ncnn
-      shell: >
-        cmake -S . -B build -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
-        -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
-        -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install
-        && cmake --build build && cmake --install build
-      args: {chdir: "{{ ncnn }}"}
-      when: ncnn_src is changed or not ncnn_built.stat.exists
-      tags: guardian
-
-    - name: Ship models
-      copy: {src: "{{ item }}", dest: ~/steamframe/models/}
-      loop: "{{ query('fileglob', root + '/models/yolo11n-grayscale_*_gray.ncnn.*') }}"
-      tags: guardian
-
-    - name: Ship guardian source
-      synchronize:
-        src: "{{ root }}/guardian/"
-        dest: ~/steamframe/guardian/
-        delete: true  # excluded paths are kept
-        rsync_opts: [--exclude=/build, --exclude=/calib.txt]
-      tags: guardian
-
-    - name: Build guardian (and camserver)
-      shell: cmake -S . -B build -G Ninja >/dev/null && cmake --build build
-      args: {chdir: ~/steamframe/guardian}
-      register: build
-      changed_when: "'no work to do' not in build.stdout"
-      tags: guardian
-
-  handlers:
-    - name: restart mirrorserver
-      systemd_service: {name: mirrorserver, scope: user, state: restarted, daemon_reload: true}
+- import_playbook: ../mirror/deploy.yml
+- import_playbook: ../guardian/deploy.yml

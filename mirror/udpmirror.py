@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Watch the headset view streamed by mirrorserver.py (a user service on the Frame, see ansible/) over UDP.
-Usage: scripts/udpmirror.py [host] [port]             -> plays in ffplay
-       scripts/udpmirror.py [host] [port] > out.ts    -> saves the H.264 MPEG-TS stream
-       scripts/udpmirror.py --record out.mp4          -> plays and also saves the stream (no re-encode) to an MP4
+"""Watch the headset view streamed by mirrorserver.py (a user service on the Frame, see deploy.yml) over UDP.
+Usage: mirror/udpmirror.py [host] [port]             -> plays in ffplay
+       mirror/udpmirror.py [host] [port] > out.ts    -> saves the H.264 MPEG-TS stream
+       mirror/udpmirror.py --record out.mp4          -> plays and also saves the stream (no re-encode) to an MP4
 """
 
 import argparse

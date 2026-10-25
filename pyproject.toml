@@ -2,7 +2,7 @@
 line-length = 120  # same as .clang-format
 
 [tool.basedpyright]
-include = ["scripts", "guardian"]
+include = ["scripts", "mirror", "guardian"]
 pythonVersion = "3.12"  # the Frame's /usr/bin/python3; udpmirror.py also runs on the Mac
 pythonPlatform = "Linux"
 typeCheckingMode = "recommended"
