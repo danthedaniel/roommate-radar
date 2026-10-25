@@ -2,6 +2,8 @@
 
 Chain: head <- CAD (device_config "head") <- cal/cam0 frame (device_config cv/cad_from_cal,
 computed by XRService) <- cam_i (factory extrinsics in /persist/xrservice.json).
+Usage: calib.py [OUT [DIR]]: reads DIR/device_config.json and DIR/xrservice.json (default /persist; inside the Steam
+Runtime container, the driver's copy in /dev/shm/steamframe-calib).
 Every frame here is given as plus_x / plus_z axes (+ position) expressed in its parent,
 with plus_y = plus_z x plus_x. Camera frames are OpenCV-style (x right, y down, z forward).
 """
@@ -53,9 +55,10 @@ def fmt(vals: list[float]) -> str:
 
 
 def main() -> None:
-    with open("/persist/device_config.json") as f:
+    src = sys.argv[2] if len(sys.argv) > 2 else "/persist"
+    with open(f"{src}/device_config.json") as f:
         dev = json.load(f)
-    with open("/persist/xrservice.json") as f:
+    with open(f"{src}/xrservice.json") as f:
         xrs = json.load(f)
     head_from_cad = inv(frame(dev["head"]))
     cad_from_cal = frame(dev["cv"]["cad_from_cal"])

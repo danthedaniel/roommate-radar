@@ -8,10 +8,11 @@
 // one detection period behind the newest one so there is always a segment to be in.
 //
 // A "Guardian" tab in the SteamVR dashboard toggles it and what it shows; settings persist in ~/.config/guardian.conf.
+// Run from the app's install directory (guardian.py does): models/, NotoSans-Medium.ttf, guardian.vrmanifest.
 //
 // Usage: guardian [--max-dist 3] [--size 320] [--max-hz 4] [detector options, detector.h]
 //        guardian --no-detector   (only log the VR app's frame stats, as a baseline)
-//        guardian --register   (add guardian.vrmanifest to SteamVR, auto-launch with SteamVR, start it now)
+//        guardian --register   (add the overlay's manifest to SteamVR, auto-launch; guardian.py runs it first)
 //        guardian --selftest
 #include <limits.h>
 #include <signal.h>
@@ -28,12 +29,12 @@
 #include "detector.h"
 #include "tracker.h"
 
-static const char* kAppKey = "steamframe.guardian";
+static const char* kOverlayKey = "steamframe.guardian";  // prefix of our overlays' keys
 static const int kMaxOverlays = 8;
 static bool g_detector = true;       // --no-detector: just log frame stats (baseline for the detector's cost)
 static const unsigned short kHoverTickUs = 1500;  // dashboard hover haptic
 static const float kLabelH = 0.07f;  // label height (m), just above the box
-static const char* kFont = "/usr/share/fonts/noto/NotoSans-Medium.ttf";
+static const char* kFont = "NotoSans-Medium.ttf";  // shipped with the app
 
 // Set from the dashboard tab, saved to g_conf.
 struct Settings {
@@ -43,11 +44,13 @@ struct Settings {
     float max_dist = 3;                               // ignore detections farther than this (m, horizontal)
     int size = 320;                                   // YOLO per-view size, one of kSizes
     float hz = 4;                                     // YOLO runs per second, one of kRates
+    bool autolaunch_set = false;                      // not in the tab: auto-launch was switched on once (--register)
 };
 static const int kSizes[] = {320, 480, 640};
 static const float kRates[] = {2, 4, 8, 16};
 static Settings g_set;
-static std::string g_conf;  // empty: don't save (selftest)
+static std::string g_conf;     // empty: don't save (selftest)
+static std::string g_app_key;  // SteamVR's key for this app, steam.overlay.<SteamAppId>; empty if not started by Steam
 
 static void load_settings() {
     FILE* f = fopen(g_conf.c_str(), "r");
@@ -68,6 +71,8 @@ static void load_settings() {
             g_set.hands = v != 0;
         } else if (key == "games_only") {
             g_set.games_only = v != 0;
+        } else if (key == "autolaunch_set") {
+            g_set.autolaunch_set = v != 0;
         } else if (key == "max_dist") {
             g_set.max_dist = v;
         } else if (key == "size" && std::find(std::begin(kSizes), std::end(kSizes), int(v)) != std::end(kSizes)) {
@@ -84,8 +89,11 @@ static void save_settings() {
     if (!f) {
         return;
     }
-    fprintf(f, "enabled=%d\npeople=%d\npets=%d\nhands=%d\ngames_only=%d\nmax_dist=%.1f\nsize=%d\nhz=%g\n",
-            g_set.enabled, g_set.people, g_set.pets, g_set.hands, g_set.games_only, g_set.max_dist, g_set.size, g_set.hz);
+    fprintf(
+        f,
+        "enabled=%d\npeople=%d\npets=%d\nhands=%d\ngames_only=%d\nmax_dist=%.1f\nsize=%d\nhz=%g\nautolaunch_set=%d\n",
+        g_set.enabled, g_set.people, g_set.pets, g_set.hands, g_set.games_only, g_set.max_dist, g_set.size, g_set.hz,
+        g_set.autolaunch_set);
     fclose(f);
 }
 
@@ -282,9 +290,10 @@ static std::vector<uint8_t> label(const char* name, int pct, int cls, int& w, in
 
 namespace panel {
 
-const int W = 1000, H = 956, kPad = 48, kTop = 190, kRowH = 92;
+const int W = 1000, H = 1048, kPad = 48, kTop = 190, kRowH = 92;
 enum Ctl {
     kEnabled,
+    kAutoLaunch,  // SteamVR's auto-launch for this app, not one of g_set
     kGamesOnly,
     kPeople,
     kPets,
@@ -297,8 +306,9 @@ enum Ctl {
 };
 // one row per switch, then the dropdown rows and the range row
 const int kToggles = kSize, kRangeRow = kRate + 1;
-const char* kRows[] = {"Enabled",         "Only in Games",        "Detect People",  "Detect Cats and Dogs",
-                       "Ignore My Hands", "Detection Resolution", "Detection Rate", "Range"};
+const char* kRows[] = {
+    "Enabled",         "Start with SteamVR",   "Only in Games",  "Detect People", "Detect Cats and Dogs",
+    "Ignore My Hands", "Detection Resolution", "Detection Rate", "Range"};
 const char* kSizeLabels[] = {"Low (320px)", "Medium (480px)", "High (640px)"};
 const char* kRateLabels[] = {"2Hz", "4Hz", "8Hz", "16Hz"};
 const int kToggleW = 104, kToggleH = 56, kBtnR = 28, kDropW = 300, kDropH = 60, kItemH = 60;
@@ -306,6 +316,14 @@ static int popup = -1;  // the dropdown (kSize, kRate) whose popup is showing
 
 static float row_cy(int row) {
     return kTop + (row + 0.5f) * kRowH;
+}
+
+static bool autolaunch() {
+    return !g_app_key.empty() && vr::VRApplications()->GetApplicationAutoLaunch(g_app_key.c_str());
+}
+// Greyed out: the detection settings while Enabled is off, Start with SteamVR when not started by Steam.
+static bool dimmed(int row) {
+    return row == kAutoLaunch ? g_app_key.empty() : row > kAutoLaunch && !g_set.enabled;
 }
 
 static int choices(int drop) {
@@ -341,8 +359,8 @@ static int hit(float x, float y) {
         return x >= drop_x0() && x <= drop_x0() + kDropW && i >= 0 && i < choices(popup) ? kItem + i : -1;
     }
     int row = int(std::floor((y - kTop) / kRowH));
-    if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow || (row > kEnabled && !g_set.enabled)) {
-        return -1;  // greyed-out rows (Enabled off) don't hover or press
+    if (x < kPad || x > W - kPad || row < 0 || row > kRangeRow || dimmed(row)) {
+        return -1;  // greyed-out rows don't hover or press
     }
     if (row < kRangeRow) {
         return row;
@@ -376,6 +394,9 @@ static void press(int ctl) {
     case kEnabled:
         g_set.enabled = !g_set.enabled;
         break;
+    case kAutoLaunch:
+        vr::VRApplications()->SetApplicationAutoLaunch(g_app_key.c_str(), !autolaunch());
+        return;
     case kPeople:
         g_set.people = !g_set.people;
         break;
@@ -427,7 +448,7 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
     fill_rrect(px, 0, 0, W, H, 32, bg, 0.94f);
     draw_text(&px, W, H, kPad, 100, "Guardian", white, 56);
     draw_text(&px, W, H, kPad, 150, status.c_str(), grey, 30);
-    bool on[kToggles] = {g_set.enabled, g_set.games_only, g_set.people, g_set.pets, g_set.hands};
+    bool on[kToggles] = {g_set.enabled, autolaunch(), g_set.games_only, g_set.people, g_set.pets, g_set.hands};
     for (int row = 0; row <= kRangeRow; row++) {
         float cy = row_cy(row);
         if (hover == row) {
@@ -436,7 +457,7 @@ static std::vector<uint8_t> render(int hover, const std::string& status) {
         if (row) {
             fill_rrect(px, kPad, cy - kRowH / 2.f, W - 2 * kPad, 1.5f, 0, white, 0.08f);
         }
-        bool dim = row > 0 && !g_set.enabled;  // the other settings don't matter while it's off
+        bool dim = dimmed(row);
         if (row == kHands) {  // title nudged up, detail line below it
             draw_text(&px, W, H, kPad, int(cy + 1), kRows[row], dim ? grey : white, 36);
             draw_text(&px, W, H, kPad, int(cy + 33), "Works best when holding controllers", grey, 24);
@@ -867,11 +888,14 @@ static void log_frame_stats() {
     prev = st;
 }
 
+// guardian --register, run by guardian.py before the overlay. SteamVR knows an overlay app started by Steam as
+// steam.overlay.<SteamAppId>. A Store install's manifest for that key comes from Steam ("Launch SteamVR Overlay"); a
+// devkit install has the one guardian.py writes, added here. That has to happen before the overlay connects: SteamVR
+// then makes up an entry for the key (a "binary" app, not a dashboard overlay) and skips manifests describing it until
+// it restarts. Once the manifest's entry is there, auto-launch is switched on, once (the user may turn it off).
 static int register_app() {
-    // VR_Init would start SteamVR outside its systemd service, which then can't come up until that one is killed.
-    if (system("pgrep -x vrserver > /dev/null")) {
-        fprintf(stderr, "SteamVR isn't running\n");
-        return 1;
+    if (g_app_key.empty()) {
+        return 0;  // not started by Steam
     }
     vr::EVRInitError err;
     vr::VR_Init(&err, vr::VRApplication_Utility);
@@ -879,22 +903,27 @@ static int register_app() {
         fprintf(stderr, "VR_Init: %s\n", vr::VR_GetVRInitErrorAsEnglishDescription(err));
         return 1;
     }
-    char path[PATH_MAX];
-    if (!realpath("guardian.vrmanifest", path)) {
-        perror("guardian.vrmanifest");
-        return 1;
-    }
+    const std::string& key = g_app_key;
     auto* apps = vr::VRApplications();
-    vr::EVRApplicationError e = apps->AddApplicationManifest(path, false);
-    printf("AddApplicationManifest(%s): %s\n", path, apps->GetApplicationsErrorNameFromEnum(e));
-    e = apps->SetApplicationAutoLaunch(kAppKey, true);
-    printf("SetApplicationAutoLaunch: %s\n", apps->GetApplicationsErrorNameFromEnum(e));
-    if (!apps->GetApplicationProcessId(kAppKey)) {
-        e = apps->LaunchApplication(kAppKey);
-        printf("LaunchApplication: %s\n", apps->GetApplicationsErrorNameFromEnum(e));
+    auto described = [&] {
+        vr::EVRApplicationError pe;
+        return apps->GetApplicationPropertyBool(key.c_str(), vr::VRApplicationProperty_IsDashboardOverlay_Bool, &pe);
+    };
+    char path[PATH_MAX];
+    if (!described() && realpath("guardian.vrmanifest", path)) {
+        vr::EVRApplicationError e = apps->AddApplicationManifest(path, false);
+        printf("guardian: AddApplicationManifest(%s): %s\n", path, apps->GetApplicationsErrorNameFromEnum(e));
+    }
+    if (!described()) {
+        printf("guardian: %s isn't a dashboard overlay yet; restart SteamVR\n", key.c_str());
+    } else if (!g_set.autolaunch_set) {
+        vr::EVRApplicationError e = apps->SetApplicationAutoLaunch(key.c_str(), true);
+        printf("guardian: SetApplicationAutoLaunch(%s): %s\n", key.c_str(), apps->GetApplicationsErrorNameFromEnum(e));
+        g_set.autolaunch_set = !e;
+        save_settings();
     }
     vr::VR_Shutdown();
-    return e ? 1 : 0;
+    return 0;
 }
 
 static int selftest() {
@@ -952,7 +981,8 @@ static int selftest() {
               panel::hit(panel::plus_cx(), panel::row_cy(panel::kRangeRow)) == panel::kRangePlus &&
               panel::hit(500, panel::row_cy(panel::kHands)) == panel::kHands && panel::hit(500, 50) == -1 &&
               (g_set.enabled = false, panel::hit(500, panel::row_cy(panel::kPeople)) == -1) &&
-              panel::hit(500, panel::row_cy(panel::kEnabled)) == panel::kEnabled && (g_set.enabled = true),
+              panel::hit(500, panel::row_cy(panel::kEnabled)) == panel::kEnabled && (g_set.enabled = true) &&
+              panel::hit(500, panel::row_cy(panel::kAutoLaunch)) == -1,  // greyed out: not started by Steam
           "dashboard hit test");
     panel::press(panel::kPeople);
     for (int i = 0; i < 20; i++) {
@@ -1032,6 +1062,9 @@ int main(int argc, char** argv) {
     if (const char* home = getenv("HOME")) {
         g_conf = std::string(home) + "/.config/guardian.conf";
     }
+    if (const char* appid = getenv("SteamAppId")) {
+        g_app_key = std::string("steam.overlay.") + appid;
+    }
     load_settings();
     g_det.size = g_set.size, g_det.max_hz = g_set.hz;  // --size and --max-hz override them for this run
     for (int i = 1; i < argc; i++) {
@@ -1096,7 +1129,7 @@ int main(int argc, char** argv) {
     std::string label_text[kMaxOverlays];
     for (int i = 0; i < kMaxOverlays * 2; i++) {
         std::string key =
-            std::string(kAppKey) + (i < kMaxOverlays ? ".box" : ".label") + std::to_string(i % kMaxOverlays);
+            std::string(kOverlayKey) + (i < kMaxOverlays ? ".box" : ".label") + std::to_string(i % kMaxOverlays);
         if (vr::VROverlay()->CreateOverlay(key.c_str(), "guardian",
                                            i < kMaxOverlays ? &overlays[i] : &labels[i - kMaxOverlays])) {
             fprintf(stderr, "CreateOverlay %s failed\n", key.c_str());
@@ -1105,7 +1138,7 @@ int main(int argc, char** argv) {
     }
 
     vr::VROverlayHandle_t dash, dash_icon;
-    if (vr::VROverlay()->CreateDashboardOverlay((std::string(kAppKey) + ".dashboard").c_str(), "Guardian", &dash,
+    if (vr::VROverlay()->CreateDashboardOverlay((std::string(kOverlayKey) + ".dashboard").c_str(), "Guardian", &dash,
                                                 &dash_icon)) {
         fprintf(stderr, "CreateDashboardOverlay failed\n");
         return 1;
@@ -1129,8 +1162,14 @@ int main(int argc, char** argv) {
     bool in_game = game_running();
     std::string panel_status;  // what the panel was last drawn with ("" = redraw)
 
+    // guardian.py makes calib.txt from the driver's copy of the factory calibration: none means driver_guardian wasn't
+    // loaded when this SteamVR started (the first run registers it).
+    const bool setup_pending = access(g_det.calib.c_str(), R_OK) != 0;
+    if (setup_pending) {
+        printf("guardian: no %s: restart SteamVR to load driver_guardian\n", g_det.calib.c_str());
+    }
     std::thread det;
-    if (g_detector) {
+    if (g_detector && !setup_pending) {
         det = std::thread([] {
             try {
                 detect_loop();
@@ -1285,6 +1324,8 @@ int main(int argc, char** argv) {
             char st[128];
             if (!g_set.enabled) {
                 snprintf(st, sizeof st, "Off");
+            } else if (setup_pending) {
+                snprintf(st, sizeof st, "Restart SteamVR to finish setup");
             } else if (!run) {
                 snprintf(st, sizeof st, "Paused: no game running");
             } else if (!g_detector) {

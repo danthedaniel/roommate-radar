@@ -1,0 +1,127 @@
+# guardian's build, the way a Store depot is built: in the Steam Runtime 4 arm64 SDK. Run through ansible/build.yml
+# (make build), which pairs the ssh key first. deploy.yml installs the result.
+# On the Mac: the inputs (ncnn submodule, models, OpenVR SDK pieces, font). On the Frame: those and the source synced
+# to ~/steamframe/build (same layout as this repo), built with podman in the SDK image (build-sdk/, incremental), and
+# `cmake --install` into dist/guardian, which is copied back to the Mac's dist/guardian.
+# ncnn's install is kept on the Mac (third_party/ncnn-install, stamped with the source it was built from: the
+# submodule's commit and its uncommitted diff), so it's only rebuilt when that changes.
+- hosts: localhost
+  gather_facts: false
+  tags: guardian
+  vars:
+    root: "{{ playbook_dir }}/.."
+    models: "{{ root }}/models"
+    openvr: https://raw.githubusercontent.com/ValveSoftware/openvr/v2.15.6
+  tasks:
+    # ncnn is a submodule: branch "ncnn" of this repo (upstream snapshot + our patches). Its URL is ./ (this repo),
+    # which needs file transport allowed for submodules.
+    - name: Check out the ncnn submodule
+      command: git -c protocol.file.allow=always submodule update --init third_party/ncnn
+      args: {chdir: "{{ root }}", creates: "{{ root }}/third_party/ncnn/CMakeLists.txt"}
+
+    # Exported on the Mac (ultralytics + torch don't run on the Frame)
+    - name: Download YOLO11n grayscale weights
+      get_url:
+        url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt
+        dest: "{{ models }}/"
+
+    - name: Export models (S x 2S input) and adapt them with prep_model.py
+      shell: |
+        uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz={{ 2 * item }},{{ item }}
+        mv yolo11n-grayscale_ncnn_model/model.ncnn.param yolo11n-grayscale_{{ item }}.ncnn.param
+        mv yolo11n-grayscale_ncnn_model/model.ncnn.bin yolo11n-grayscale_{{ item }}.ncnn.bin
+        rm -r yolo11n-grayscale_ncnn_model
+        python3 ../guardian/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
+      args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
+      loop: [320, 480, 640]
+
+    - name: Fingerprint the ncnn source
+      shell: git rev-parse HEAD && git diff HEAD | shasum
+      args: {chdir: "{{ root }}/third_party/ncnn"}
+      register: ncnn_source
+      changed_when: false
+
+    - name: Make the download directories
+      file: {path: "{{ root }}/third_party/{{ item }}", state: directory}
+      loop: [openvr/headers, openvr/bin/linuxarm64, fonts]
+
+    # The OpenVR SDK pieces guardian builds against and ships (libopenvr_api.so next to the binary)
+    - name: Download the OpenVR SDK headers and arm64 libopenvr_api.so
+      get_url:
+        url: "{{ openvr }}/{{ item }}"
+        dest: "{{ root }}/third_party/openvr/{{ item }}"
+      loop: [headers/openvr.h, headers/openvr_driver.h, bin/linuxarm64/libopenvr_api.so]
+
+    # Label font, shipped with the app (OFL)
+    - name: Download Noto Sans Medium
+      get_url:
+        url: https://raw.githubusercontent.com/notofonts/notofonts.github.io/d3abdda968b38bb6eb0ec59f6f9f58b8c2139bca/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf
+        dest: "{{ root }}/third_party/fonts/NotoSans-Medium.ttf"
+        checksum: sha256:635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb
+
+- hosts: frame
+  tags: guardian
+  vars:
+    root: "{{ playbook_dir }}/.."
+    build: ~/steamframe/build
+    sdk: registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:latest
+    ncnn_source: "{{ hostvars.localhost.ncnn_source.stdout }}"
+    ncnn_cached: "{{ lookup('file', root + '/third_party/ncnn-install/.source', errors='ignore') == ncnn_source }}"
+    podman: podman run --rm -v {{ build }}:/src:z -w /src {{ sdk }} sh -ec
+  tasks:
+    - name: Make the build tree
+      file: {path: "{{ build }}/{{ item }}", state: directory}
+      loop: [guardian, third_party, models]
+
+    - name: Ship the source and inputs
+      synchronize:
+        src: "{{ root }}/{{ item.src }}"
+        dest: "{{ build }}/{{ item.dest }}"
+        delete: true
+        rsync_opts: [--exclude=.git, --exclude=/build, --exclude=/calib.txt]
+      loop:
+        - {src: guardian/, dest: guardian/}
+        # the cached build, or the source to build it from
+        - "{{ {'src': 'third_party/ncnn-install', 'dest': 'third_party/'} if ncnn_cached else
+              {'src': 'third_party/ncnn', 'dest': 'third_party/'} }}"
+        - {src: third_party/openvr, dest: third_party/}
+        - {src: third_party/fonts, dest: third_party/}
+        - {src: models/, dest: models/}
+
+    # Rootless podman: the container's root is steamos outside. ncnn links the SDK's glslang (static);
+    # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h.
+    - name: Build ncnn in the Steam Runtime SDK
+      shell: >
+        {{ podman }} '
+        cmake -S third_party/ncnn -B build-sdk/ncnn -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
+        -DGLSLANG_TARGET_DIR=/usr/lib/aarch64-linux-gnu/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
+        -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/src/third_party/ncnn-install >/dev/null;
+        cmake --build build-sdk/ncnn; rm -rf third_party/ncnn-install; cmake --install build-sdk/ncnn >/dev/null'
+      when: not ncnn_cached
+
+    - name: Keep ncnn's install on the Mac
+      synchronize:
+        mode: pull
+        src: "{{ build }}/third_party/ncnn-install/"
+        dest: "{{ root }}/third_party/ncnn-install/"
+        delete: true
+      when: not ncnn_cached
+
+    - name: Stamp it with its source
+      copy: {dest: "{{ root }}/third_party/ncnn-install/.source", content: "{{ ncnn_source }}"}
+      delegate_to: localhost
+      when: not ncnn_cached
+
+    # dist/guardian is rebuilt from scratch so it holds exactly what's installed.
+    - name: Build guardian in the Steam Runtime SDK into dist/guardian
+      shell: >
+        {{ podman }} '
+        cmake -S guardian -B build-sdk/guardian -G Ninja -Dncnn_DIR=/src/third_party/ncnn-install/lib/cmake/ncnn >/dev/null;
+        cmake --build build-sdk/guardian; rm -rf dist/guardian; cmake --install build-sdk/guardian --prefix /src/dist/guardian'
+
+    - name: Copy dist/guardian back to the Mac
+      synchronize:
+        mode: pull
+        src: "{{ build }}/dist/guardian/"
+        dest: "{{ root }}/dist/guardian/"
+        delete: true

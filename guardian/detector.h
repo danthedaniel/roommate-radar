@@ -51,7 +51,7 @@ static uint64_t now_ns() {
 
 struct DetectorOptions {
     std::string dump;  // directory for debug PGMs (empty = off)
-    // default ../models/yolo11n-grayscale_<size>_gray.ncnn (exported at exactly size x 2*size, then prep_model.py)
+    // default models/yolo11n-grayscale_<size>_gray.ncnn (exported at exactly size x 2*size, then prep_model.py)
     std::string model;
     std::string calib = "calib.txt";
     int size = 576;        // per-view rectified size (YOLO input is size x 2*size)
@@ -316,12 +316,6 @@ static void write_pgm(const std::string& path, const uint8_t* p, int w, int h) {
 static void detect_run(const int S) {
     g_det_loading = S;
     const uint64_t t_load = now_ns();
-    const CamCal cal[2] = {load_calib(g_det.calib, shm::kCamNames[0]), load_calib(g_det.calib, shm::kCamNames[1])};
-    Rectifier rect[2] = {Rectifier(cal[0], S, g_det.hfov_deg), Rectifier(cal[1], S, g_det.hfov_deg)};
-    const float f = rect[0].f;
-    const float baseline = cal[1].t[0] - cal[0].t[0];  // right cam is at +x in the head frame
-    printf("detector: %dx%d views, f=%.1f px, baseline %.1f mm\n", S, S, f, baseline * 1000);
-
     ncnn::Net net;
     net.opt.use_vulkan_compute = ncnn::get_gpu_count() > 0;
     net.opt.num_threads = 2;
@@ -329,21 +323,24 @@ static void detect_run(const int S) {
     net.opt.use_sgemm_convolution = false;
     net.opt.use_winograd63_convolution = false;
     const std::string model =
-        g_det.model.empty() ? "../models/yolo11n-grayscale_" + std::to_string(S) + "_gray.ncnn" : g_det.model;
+        g_det.model.empty() ? "models/yolo11n-grayscale_" + std::to_string(S) + "_gray.ncnn" : g_det.model;
     if (net.load_param((model + ".param").c_str()) || net.load_model((model + ".bin").c_str())) {
         throw std::runtime_error("failed to load model " + model + " (see prep_model.py)");
     }
     printf("detector: ncnn %s\n", net.opt.use_vulkan_compute ? "Vulkan GPU" : "CPU");
 
-    // camserver creates the file before sizing it; touching a mapping past its end is SIGBUS.
+    // driver_guardian creates the file before sizing it; touching a mapping past its end is SIGBUS.
     int shm_fd = -1;
     struct stat st = {};
-    while (!g_quit && ((shm_fd = open(shm::kPath, O_RDONLY)) < 0 || fstat(shm_fd, &st) ||
-                       st.st_size < off_t(sizeof(shm::Header)))) {
+    for (bool logged = false; !g_quit && ((shm_fd = open(shm::kPath, O_RDONLY)) < 0 || fstat(shm_fd, &st) ||
+                                          st.st_size < off_t(sizeof(shm::Header)));
+         logged = true) {
         if (shm_fd >= 0) {
             close(shm_fd);
         }
-        fprintf(stderr, "waiting for camserver (%s)\n", shm::kPath);
+        if (!logged) {
+            fprintf(stderr, "waiting for driver_guardian (%s; restart SteamVR after the first run)\n", shm::kPath);
+        }
         sleep(1);
     }
     if (g_quit) {
@@ -353,6 +350,12 @@ static void detect_run(const int S) {
     if (hdr == MAP_FAILED) {
         throw std::runtime_error(std::string("mmap ") + shm::kPath + ": " + strerror(errno));
     }
+    // After the frames: calib.txt comes from the driver's copy of the factory calibration (guardian.py)
+    const CamCal cal[2] = {load_calib(g_det.calib, shm::kCamNames[0]), load_calib(g_det.calib, shm::kCamNames[1])};
+    Rectifier rect[2] = {Rectifier(cal[0], S, g_det.hfov_deg), Rectifier(cal[1], S, g_det.hfov_deg)};
+    const float f = rect[0].f;
+    const float baseline = cal[1].t[0] - cal[0].t[0];  // right cam is at +x in the head frame
+    printf("detector: %dx%d views, f=%.1f px, baseline %.1f mm\n", S, S, f, baseline * 1000);
 
     // A torn read leaves garbage in its buffer, so frames are read into `scratch` and swapped in only when intact.
     std::vector<uint8_t> raw[2] = {std::vector<uint8_t>(shm::kStride * shm::kH),

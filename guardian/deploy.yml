@@ -1,76 +1,39 @@
-# guardian: models (on the Mac), ncnn and guardian (on the Frame). Run through ansible/deploy.yml (make deploy-guardian),
-# which pairs the ssh key first.
-- hosts: localhost
-  gather_facts: false
-  tags: guardian
-  vars:
-    models: "{{ playbook_dir }}/../models"
-  tasks:
-    # ncnn is a submodule: branch "ncnn" of this repo (upstream snapshot + our patches). Its URL is ./ (this repo),
-    # which needs file transport allowed for submodules.
-    - name: Check out the ncnn submodule
-      command: git -c protocol.file.allow=always submodule update --init third_party/ncnn
-      args: {chdir: "{{ playbook_dir }}/..", creates: "{{ playbook_dir }}/../third_party/ncnn/CMakeLists.txt"}
-
-    # Exported on the Mac (ultralytics + torch don't run on the Frame), copied over below.
-    - name: Download YOLO11n grayscale weights
-      get_url:
-        url: https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt
-        dest: "{{ models }}/"
-
-    - name: Export models (S x 2S input) and adapt them with prep_model.py
-      shell: |
-        uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz={{ 2 * item }},{{ item }}
-        mv yolo11n-grayscale_ncnn_model/model.ncnn.param yolo11n-grayscale_{{ item }}.ncnn.param
-        mv yolo11n-grayscale_ncnn_model/model.ncnn.bin yolo11n-grayscale_{{ item }}.ncnn.bin
-        rm -r yolo11n-grayscale_ncnn_model
-        python3 ../guardian/prep_model.py yolo11n-grayscale_{{ item }}.ncnn
-      args: {chdir: "{{ models }}", creates: "{{ models }}/yolo11n-grayscale_{{ item }}_gray.ncnn.param"}
-      loop: [320, 480, 640]
-
+# guardian, installed as it would be from the Steam store: what build.yml (make build) left in dist/guardian. Run
+# through ansible/deploy.yml (make deploy-guardian), which pairs the ssh key first.
+# Valve's devkit install: dist/guardian synced to ~/devkit-game/guardian and added to Steam as a shortcut that runs in
+# Steam Linux Runtime 4 (steamrt4-any, the tool Store apps native to Linux get). The app's own setup (driver, overlay
+# manifest) happens on its first run: Steam has no install scripts on Linux (guardian.py).
 - hosts: frame
   tags: guardian
   vars:
-    root: "{{ playbook_dir }}/.."
-    ncnn: ~/steamframe/third_party/ncnn
+    gameid: guardian
+    dir: ~/devkit-game/{{ gameid }}
   tasks:
-    # The submodule's working tree (see the localhost play); the Frame keeps its build/ so rebuilds are incremental.
-    - name: Ship ncnn source
+    # The "depot". Kept: what the app writes into its install directory (Steam leaves those alone on updates too).
+    - name: Install dist/guardian to ~/devkit-game/guardian
       synchronize:
-        src: "{{ root }}/third_party/ncnn/"
-        dest: "{{ ncnn }}/"
-        delete: true  # excluded paths are kept
-        rsync_opts: [--exclude=/build, --exclude=.git]
-      register: ncnn_src
+        src: "{{ playbook_dir }}/../dist/guardian/"
+        dest: "{{ dir }}/"
+        delete: true
+        rsync_opts: [--exclude=/calib.txt, --exclude=/guardian.vrmanifest]
 
-    - name: Check for a built ncnn
-      stat: {path: ~/steamframe/third_party/ncnn-install/lib/cmake/ncnn/ncnnConfig.cmake}
-      register: ncnn_built
+    # What the devkit client's upload writes: the command line, and the runtime Steam should run it in
+    - name: Set the launch command and runtime
+      copy:
+        dest: ~/devkit-game/{{ gameid }}-{{ item.key }}.json
+        content: "{{ item.value | to_json }}"
+      loop: "{{ {'argv': ['./guardian.py'], 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
 
-    # SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h
-    - name: Build ncnn
-      shell: >
-        cmake -S . -B build -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON
-        -DGLSLANG_TARGET_DIR=/usr/lib/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF
-        -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=$HOME/steamframe/third_party/ncnn-install
-        && cmake --build build && cmake --install build
-      args: {chdir: "{{ ncnn }}"}
-      when: ncnn_src is changed or not ncnn_built.stat.exists
-
-    - name: Ship models
-      copy: {src: "{{ item }}", dest: ~/steamframe/models/}
-      loop: "{{ query('fileglob', root + '/models/yolo11n-grayscale_*_gray.ncnn.*') }}"
-
-    - name: Ship guardian source
-      synchronize:
-        src: "{{ root }}/guardian/"
-        dest: ~/steamframe/guardian/
-        delete: true  # excluded paths are kept
-        rsync_opts: [--exclude=/build, --exclude=/calib.txt]
-
-    - name: Build guardian (and camserver)
-      shell: cmake -S . -B build -G Ninja >/dev/null && cmake --build build
-      args: {chdir: ~/steamframe/guardian}
-      register: build
-      changed_when: "'no work to do' not in build.stdout"
-
+    # devkit-utils/steam-client-create-shortcut: a devkit-1 command on Steam's pipe; Steam answers in a file
+    - name: Add it to Steam (devkit shortcut)
+      shell: |
+        d=$(mktemp -d /tmp/create-shortcutXXXXXXXX)
+        r=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote_plus(sys.argv[1]))' "$d/registered")
+        printf 'devkit-1 steam://devkit-1/%s/create-shortcut?response=%s&gameid={{ gameid }}\n' "$(cat ~/.steam/steam.token)" "$r" > ~/.steam/steam.pipe
+        for i in $(seq 15); do
+          sleep 1
+          if [ -e "$d/registered.error" ]; then cat "$d/registered.error"; exit 1; fi
+          if [ -e "$d/registered" ] && [ ! -e "$d/registered.lock" ]; then cat "$d/registered"; rm -r "$d"; exit 0; fi
+        done
+        echo "Steam didn't answer (is it running?)"; exit 1
+      changed_when: false

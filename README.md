@@ -48,10 +48,10 @@ Root: `steamos` has passwordless sudo via `/etc/sudoers.d/zz-steamos-nopasswd`.
 - [`mirror/`](mirror/README.md): the headset view (`/dev/video99`) as H.264 over UDP to the Mac.
 - [`guardian/`](guardian/README.md): OpenVR overlay outlining people, cats and dogs over any VR app.
 
-Each has its own `deploy.yml`; `ansible/` holds the inventory, the key pairing and the playbook that runs both.
-Shared at the top: `scripts/` (raw camera tools), `third_party/` (ncnn, used by guardian), `models/` (built by
-guardian's deploy), lint/format config (`.clang-format` for the C++, ruff and basedpyright, Python 3.12 (the Frame's),
-in `pyproject.toml`) and the `Makefile`: `make deploy | deploy-mirror | deploy-guardian | logs | stream | cams | ssh |
+Each has its own `deploy.yml` (guardian also a `build.yml`); `ansible/` holds the inventory, the key pairing and the
+playbooks that run them. Shared at the top: `scripts/` (raw camera tools), `third_party/` (ncnn, used by guardian, plus
+its downloads), `models/` and `dist/` (guardian's build), lint/format config (`.clang-format` for the C++, ruff and basedpyright, Python 3.12 (the Frame's),
+in `pyproject.toml`) and the `Makefile`: `make build | deploy | deploy-mirror | deploy-guardian | logs | stream | cams | ssh |
 sysroot`. `make sysroot` copies the Frame's headers into `.sysroot/` so clangd on the Mac
 (`guardian/compile_flags.txt`, aarch64 target) resolves every include.
 
@@ -83,17 +83,18 @@ ssh steamos@frame.local 'sudo python3 - --frames 1' < scripts/rawcam.py \
 
 ## Ansible
 
-`ansible/deploy.yml` pairs the key, then imports `mirror/deploy.yml` and `guardian/deploy.yml`. It sets up a fresh Frame
-and redeploys an existing one (`make deploy | deploy-mirror | deploy-guardian`, or
-`cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be switched on by hand.
-Every first-time step is skipped once its output exists.
+`ansible/build.yml` builds, `ansible/deploy.yml` installs; both pair the key first (`ansible/pair.yml`). Together they
+set up a fresh Frame and redeploy an existing one (`make build`, then `make deploy | deploy-mirror | deploy-guardian`,
+or `cd ansible && ansible-playbook build.yml | deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be
+switched on by hand. Every first-time step is skipped once its output exists.
 
 - Always: pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
-- `mirror`: ships `mirrorserver.py` and enables the `mirrorserver` user service.
-- `guardian`: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
-  320 model into `models/` (`uvx`, needs uv); on the Frame, rsyncs ncnn and builds it, ships the models, and
-  rsyncs `guardian/` to `~/steamframe/guardian` (keeps the Frame's `build/` and `calib.txt`) and builds it (camserver,
-  guardian).
+- `mirror` (deploy): ships `mirrorserver.py` and enables the `mirrorserver` user service.
+- `guardian` build: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
+  models into `models/` (`uvx`, needs uv), downloads the OpenVR SDK pieces and the font; on the Frame, builds ncnn and
+  guardian in the Steam Runtime SDK (podman) and copies the app back to `dist/guardian`.
+- `guardian` deploy: installs `dist/guardian` as a Steam app (devkit shortcut, Steam Linux Runtime 4), as from the
+  Store; see [guardian](guardian/README.md).
 
 ## Dead ends (so we don't retry them)
 

@@ -1,26 +1,6 @@
 # Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy[-mirror|-guardian])
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
-- hosts: localhost
-  gather_facts: false
-  vars:
-    frame: "{{ hostvars.frame.ansible_user }}@{{ hostvars.frame.ansible_host }}"
-  tasks:
-    - name: Check the ssh key works
-      command: ssh -o BatchMode=yes -o ConnectTimeout=5 {{ frame }} true
-      register: ssh
-      changed_when: false
-      failed_when: false
-      tags: always
-
-    # Devkit host pairing (see README); approve on the headset if it asks.
-    - name: Pair ~/.ssh/id_rsa.pub
-      uri:
-        url: http://{{ hostvars.frame.ansible_host }}:32000/register
-        method: POST
-        headers: {Content-Type: text/plain}
-        body: "{{ (lookup('file', '~/.ssh/id_rsa.pub').split())[:2] | join(' ') }} devkit-client:{{ lookup('env', 'USER') }}@{{ lookup('pipe', 'hostname -s') }} 900b919520e4cf601998a71eec318fec\n"
-      when: ssh.rc != 0
-      tags: always
-
+# guardian installs what build.yml (make build) left in dist/guardian.
+- import_playbook: pair.yml
 - import_playbook: ../mirror/deploy.yml
 - import_playbook: ../guardian/deploy.yml

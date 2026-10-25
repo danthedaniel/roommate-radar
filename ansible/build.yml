@@ -1,0 +1,4 @@
+# Build what deploy.yml installs: cd ansible && ansible-playbook build.yml (or make build). Compiles on the Frame,
+# copies the artifacts back to the Mac (dist/).
+- import_playbook: pair.yml
+- import_playbook: ../guardian/build.yml

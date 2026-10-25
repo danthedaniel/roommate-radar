@@ -1,15 +1,13 @@
-// camserver: publish the newest normal-exposure SLAM camera frames to shared memory.
-// Must run as root (pidfd_getfd on XRService needs CAP_SYS_PTRACE with ptrace_scope=1).
+// camserver: publish the newest normal-exposure SLAM camera frames to shared memory. Runs on a thread inside vrserver
+// (driver.cpp): pidfd_getfd on XRService needs ptrace rights, which Yama (ptrace_scope=1) only grants to XRService's
+// ancestors (vrserver is its parent) or CAP_SYS_PTRACE.
 // Read-only with respect to XRService: VIDIOC_QUERYBUF + mmap of its dmabufs, nothing else.
-//
-// Usage: sudo camserver [--left video3] [--right video0]
 // (video0 = og01a1b 4-0036 = slam_right, video3 = og01a1b 4-0060 = slam_left; verified by rectifying
 // both with calib.txt: only this assignment gives an upright pair with purely horizontal disparity.)
 #include <dirent.h>
 #include <fcntl.h>
 #include <linux/dma-buf.h>
 #include <linux/videodev2.h>
-#include <signal.h>
 #include <sys/ioctl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -17,6 +15,8 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <atomic>
+#include <cstdarg>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -27,7 +27,20 @@
 
 #include "shm.h"
 
-static volatile sig_atomic_t g_quit = 0;
+static std::atomic<bool> g_quit{false};
+
+void (*camserver_log)(const char* line) = [](const char* line) {
+    fputs(line, stderr);
+};
+
+__attribute__((format(printf, 1, 2))) static void log_line(const char* fmt, ...) {
+    char line[256];
+    va_list ap;
+    va_start(ap, fmt);
+    vsnprintf(line, sizeof line, fmt, ap);
+    va_end(ap);
+    camserver_log(line);
+}
 
 static uint64_t now_ns() {
     timespec ts;
@@ -182,31 +195,21 @@ static double sample_mean(const uint8_t* y) {
     return double(s) / n;
 }
 
-int main(int argc, char** argv) {
-    std::string nodes[shm::kNumCams] = {"/dev/video3", "/dev/video0"};
-    for (int i = 1; i + 1 < argc; i += 2) {
-        if (!strcmp(argv[i], "--left")) {
-            nodes[shm::kLeft] = std::string("/dev/") + argv[i + 1];
-        } else if (!strcmp(argv[i], "--right")) {
-            nodes[shm::kRight] = std::string("/dev/") + argv[i + 1];
-        }
-    }
-    signal(SIGINT, [](int) {
-        g_quit = 1;
-    });
-    signal(SIGTERM, [](int) {
-        g_quit = 1;
-    });
+void camserver_stop() {
+    g_quit = true;
+}
 
+// Runs until camserver_stop(). nodes: left, right.
+int camserver_run(const std::string (&nodes)[shm::kNumCams]) {
     int shm_fd = open(shm::kPath, O_RDWR | O_CREAT, 0644);
-    fchmod(shm_fd, 0644);
-    if (shm_fd < 0 || ftruncate(shm_fd, sizeof(shm::Header)) < 0) {
-        perror(shm::kPath);
+    if (shm_fd < 0 || fchmod(shm_fd, 0644) < 0 || ftruncate(shm_fd, sizeof(shm::Header)) < 0) {
+        log_line("%s: %s\n", shm::kPath, strerror(errno));
         return 1;
     }
     auto* hdr = (shm::Header*)mmap(nullptr, sizeof(shm::Header), PROT_READ | PROT_WRITE, MAP_SHARED, shm_fd, 0);
     if (hdr == MAP_FAILED) {
-        perror(shm::kPath);
+        log_line("mmap %s: %s\n", shm::kPath, strerror(errno));
+        close(shm_fd);
         return 1;
     }
     hdr->magic = shm::kMagic;
@@ -218,6 +221,7 @@ int main(int argc, char** argv) {
     std::vector<uint8_t> frame(shm::kStride * shm::kH);
     std::vector<Buf> bufs;
     int pid = -1, pidfd = -1;
+    bool waiting = false;
     uint64_t published = 0, last_report = now_ns();
 
     while (!g_quit) {
@@ -236,13 +240,17 @@ int main(int argc, char** argv) {
                 ok = ok && c.remote_vfd >= 0;
             }
             if (!ok) {
-                fprintf(stderr, "waiting for XRService (%s)\n", pidfd < 0 ? "not running" : strerror(errno));
+                if (!waiting) {
+                    log_line("waiting for XRService (%s)\n", pidfd < 0 ? "not running" : strerror(errno));
+                }
+                waiting = true;
                 pid = -1;
                 sleep(1);
                 continue;
             }
-            fprintf(stderr, "attached to XRService pid %d (%s=left, %s=right)\n", pid, cams[0].node.c_str(),
-                    cams[1].node.c_str());
+            waiting = false;
+            log_line("attached to XRService pid %d (%s=left, %s=right)\n", pid, cams[0].node.c_str(),
+                     cams[1].node.c_str());
         }
 
         for (int ci = 0; ci < shm::kNumCams; ci++) {
@@ -294,9 +302,9 @@ int main(int argc, char** argv) {
 
         uint64_t t = now_ns();
         if (t - last_report > 5000000000ull) {
-            fprintf(stderr, "published %.1f frames/s; clock offset %.2f / %.2f ms; mean %.0f / %.0f\n",
-                    published / ((t - last_report) / 1e9), cams[0].clock_offset_ns / 1e6, cams[1].clock_offset_ns / 1e6,
-                    cams[0].normal_mean, cams[1].normal_mean);
+            log_line("published %.1f frames/s; clock offset %.2f / %.2f ms; mean %.0f / %.0f\n",
+                     published / ((t - last_report) / 1e9), cams[0].clock_offset_ns / 1e6,
+                     cams[1].clock_offset_ns / 1e6, cams[0].normal_mean, cams[1].normal_mean);
             published = 0;
             last_report = t;
         }
@@ -305,5 +313,10 @@ int main(int argc, char** argv) {
     for (auto& c : cams) {
         c.close_all();
     }
+    if (pidfd >= 0) {
+        close(pidfd);
+    }
+    munmap(hdr, sizeof(shm::Header));
+    close(shm_fd);
     return 0;
 }

@@ -1,4 +1,4 @@
-// Shared-memory frame handoff from camserver (root) to guardian (user).
+// Shared-memory frame handoff from camserver (driver_guardian, in vrserver) to guardian.
 // One seqlock-protected slot per SLAM camera holding the newest normal-exposure Y plane.
 #pragma once
 #include <atomic>
@@ -8,6 +8,7 @@
 namespace shm {
 
 constexpr const char* kPath = "/dev/shm/steamframe-cams";
+constexpr const char* kCalibDir = "/dev/shm/steamframe-calib";  // the driver's copy of /persist's calibration
 constexpr uint32_t kMagic = 0x53464331;  // "SFC1"
 constexpr int kW = 1056, kH = 1024, kStride = 1152;
 enum Cam {
