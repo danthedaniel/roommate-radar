@@ -36,7 +36,7 @@ struct Params {
     float size_sigma = 0.1f;  // box size measurement std dev (m)
     size_t history = 4;       // matched detections kept per track
     float size_alpha = 0.2f;  // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
-    float dist_alpha = 0.2f;  // same for the distance from the eye (stereo depth); the bearing stays raw
+    float dist_alpha = 0.4f;  // same for the distance from the eye (stereo depth); the bearing stays raw
 };
 
 // One axis: position p, velocity v, covariance P.

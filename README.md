@@ -96,7 +96,7 @@ running. Each one is an upright sprite (rounded outline + label) facing you, wor
 Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
 filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
 and sizes follow a Catmull-Rom spline through each track's last 4 detections (sizes and distance
-alpha-smoothed first, `--size-alpha 0.2`, `--dist-alpha 0.2`), played back one detection period behind (~300-350 ms
+alpha-smoothed first, `--size-alpha 0.2`, `--dist-alpha 0.4`), played back one detection period behind (~300-350 ms
 total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller,
 or the forearm leading to it, inside them (same depth) are your arms and are ignored.
 
