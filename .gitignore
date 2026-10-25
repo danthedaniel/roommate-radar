@@ -3,7 +3,7 @@ guardian/build/
 build-sdk/
 dist/
 models/
-# From guardian/build.yml: OpenVR SDK pieces, the label font, ncnn built in the Steam Runtime SDK
+# From guardian/build.sh: OpenVR SDK pieces, the label font, ncnn built in the Steam Runtime SDK
 third_party/openvr/
 third_party/fonts/
 third_party/ncnn-install/

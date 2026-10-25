@@ -1,4 +1,4 @@
-# Pairs ~/.ssh/id_rsa.pub with the Frame if ssh with it fails. Imported by deploy.yml and build.yml.
+# Pairs ~/.ssh/id_rsa.pub with the Frame if ssh with it fails. Imported by deploy.yml.
 - hosts: localhost
   gather_facts: false
   vars:

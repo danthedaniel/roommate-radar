@@ -1,4 +1,4 @@
-# guardian, installed as it would be from the Steam store: what build.yml (make build) left in dist/guardian. Run
+# guardian, installed as it would be from the Steam store: what build.sh (make build) left in dist/guardian. Run
 # through ansible/deploy.yml (make deploy-guardian), which pairs the ssh key first.
 # Valve's devkit install: dist/guardian synced to ~/devkit-game/guardian and added to Steam as a shortcut that runs in
 # Steam Linux Runtime 4 (steamrt4-any, the tool Store apps native to Linux get). The app's own setup (driver, overlay

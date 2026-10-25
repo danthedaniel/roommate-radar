@@ -1,3 +1,8 @@
-# Build what deploy.yml installs: cd ansible && ansible-playbook build.yml (or make build). Compiles on the Mac in
-# the Steam Runtime SDK (docker) into dist/.
-- import_playbook: ../guardian/build.yml
+# Build what deploy.yml installs: cd ansible && ansible-playbook build.yml (or make build). Runs guardian/build.sh,
+# which compiles on the Mac in the Steam Runtime SDK (docker) into dist/.
+- hosts: localhost
+  gather_facts: false
+  tags: guardian
+  tasks:
+    - name: Build guardian into dist/guardian (guardian/build.sh)
+      command: "{{ playbook_dir }}/../guardian/build.sh"
