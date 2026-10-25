@@ -59,7 +59,7 @@ if os.environ.get("SteamAppId") and os.environ.get("SteamGameId"):
     write_manifest(os.environ["SteamAppId"], os.environ["SteamGameId"])
 if os.path.exists(f"{CALIB_DIR}/xrservice.json"):
     subprocess.run([sys.executable, "calib.py", "calib.txt", CALIB_DIR], check=False)
-subprocess.run(["bin/guardian", "--register"], check=False)  # before the overlay connects, see guardian.cpp
+subprocess.run(["bin/guardian", "--register"], check=False)  # before the overlay connects, see register.h
 app = subprocess.Popen(["bin/guardian", *sys.argv[1:]])
 
 

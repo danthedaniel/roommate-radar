@@ -212,7 +212,6 @@ int camserver_run(const std::string (&nodes)[shm::kNumCams]) {
         close(shm_fd);
         return 1;
     }
-    hdr->magic = shm::kMagic;
 
     Camera cams[shm::kNumCams];
     for (int i = 0; i < shm::kNumCams; i++) {
@@ -293,7 +292,7 @@ int camserver_run(const std::string (&nodes)[shm::kNumCams]) {
                     continue;
                 }
                 c.normal_mean = c.normal_mean == 0 ? m : 0.9 * c.normal_mean + 0.1 * m;
-                shm::write(hdr->slots[ci], frame.data(), b.ts_ns - c.clock_offset_ns, b.seq);
+                shm::write(hdr->slots[ci], frame.data(), b.ts_ns - c.clock_offset_ns);
                 c.last_published = b.seq;
                 published++;
                 break;

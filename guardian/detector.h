@@ -1,18 +1,17 @@
 // guardian's stereo YOLO detector thread. Reads the two SLAM camera frames published by
 // camserver, rectifies each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified
-// stereo pair), runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views
-// and triangulates depth from disparity. Results (head frame at capture time) go to g_dets.
+// stereo pair, calib.h), runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across
+// views and triangulates depth from disparity (stereo.h). Results (head frame at capture time) go to g_dets.
 #pragma once
 #include <fcntl.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
-#include <openxr/openxr.h>  // XrVector3f only
 
 #include <algorithm>
 #include <atomic>
-#include <cmath>
+#include <cerrno>
 #include <cstdio>
 #include <cstring>
 #include <mutex>
@@ -22,7 +21,9 @@
 
 #include <net.h>
 
+#include "calib.h"
 #include "shm.h"
+#include "stereo.h"
 
 static const char* kCoco[80] = {
     "person",         "bicycle",    "car",           "motorcycle",    "airplane",     "bus",           "train",
@@ -46,6 +47,11 @@ static uint64_t now_ns() {
     return uint64_t(ts.tv_sec) * 1000000000ull + ts.tv_nsec;
 }
 
+// Seconds from `then` to `now` (CLOCK_MONOTONIC ns), signed: negating an unsigned difference wraps around.
+static float seconds(uint64_t now, uint64_t then) {
+    return float(int64_t(now - then)) / 1e9f;
+}
+
 // ---------------------------------------------------------------------------------------------
 // Detector options
 
@@ -57,18 +63,18 @@ struct DetectorOptions {
     int size = 576;        // per-view rectified size (YOLO input is size x 2*size)
     float hfov_deg = 100;  // virtual camera field of view
     float conf = 0.25f;
-    float iou = 0.5f;      // overlapping detections/tracks above this IoU keep only the most confident
-    float contain = 0.8f;  // ...same if this fraction of the smaller box lies inside the larger one
+    float iou = 0.5f;       // overlapping detections/tracks above this IoU keep only the most confident
+    float contain = 0.8f;   // ...same if this fraction of the smaller box lies inside the larger one
     float min_box = 0.05f;  // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
-    float latency_ms = 8;  // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
-    float max_hz = 0;      // run YOLO at most this often (0 = every camera frame pair)
+    float latency_ms = 8;   // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
+    float max_hz = 0;       // run YOLO at most this often (0 = every camera frame pair)
 };
 static DetectorOptions g_det;
 static std::atomic<bool> g_det_paused{false};  // skip frames (no GPU work) while set
 static std::atomic<int> g_det_size{0};         // per-view size to run at (set from g_det.size); a change reloads
 static std::atomic<float> g_det_hz{0};         // max_hz, changeable while running
-static std::atomic<int> g_det_loading{0};      // size being loaded (model, then its first run compiles shaders); 0 = done
-static std::atomic<float> g_det_yolo_ms{0};    // mean YOLO time over the last stats period
+static std::atomic<int> g_det_loading{0};    // size being loaded (model, then its first run compiles shaders); 0 = done
+static std::atomic<float> g_det_yolo_ms{0};  // mean YOLO time over the last stats period
 
 // Parses one detector flag (argv[i], value via next()); false if it isn't one. Call finish_detector_options() after.
 template <class Next> static bool parse_detector_option(const std::string& a, Next next) {
@@ -108,111 +114,6 @@ static bool finish_detector_options() {
     g_det_size = g_det.size, g_det_hz = g_det.max_hz;
     return true;
 }
-
-// ---------------------------------------------------------------------------------------------
-// Calibration (written by calib.py): Kannala-Brandt intrinsics + head_from_cam pose per SLAM camera
-
-struct CamCal {
-    float fx, fy, cx, cy, k[4];
-    float R[9];  // head_from_cam rotation, row-major; camera frame is OpenCV (x right, y down, z fwd)
-    float t[3];  // camera position in head frame (m)
-};
-
-static CamCal load_calib(const std::string& path, const char* name) {
-    FILE* f = fopen(path.c_str(), "r");
-    if (!f) {
-        throw std::runtime_error("cannot open " + path + " (run calib.py)");
-    }
-    char line[2048];
-    while (fgets(line, sizeof line, f)) {
-        char n[64];
-        CamCal c;
-        float* v[] = {&c.fx,   &c.fy,   &c.cx,   &c.cy,   &c.k[0], &c.k[1], &c.k[2], &c.k[3], &c.R[0], &c.R[1],
-                      &c.R[2], &c.R[3], &c.R[4], &c.R[5], &c.R[6], &c.R[7], &c.R[8], &c.t[0], &c.t[1], &c.t[2]};
-        int off = 0;
-        if (sscanf(line, "%63s%n", n, &off) != 1 || strcmp(n, name)) {
-            continue;
-        }
-        char* p = line + off;
-        for (float* x : v) {
-            *x = strtof(p, &p);
-        }
-        fclose(f);
-        return c;
-    }
-    fclose(f);
-    throw std::runtime_error(std::string("camera ") + name + " not in " + path);
-}
-
-// ---------------------------------------------------------------------------------------------
-// Rectification: virtual pinhole camera at the SLAM camera's position, axes aligned with the head
-// (x right, y down, looking along head -z). Both views share orientation -> rectified stereo pair.
-
-struct Rectifier {
-    int S;
-    float f;
-    std::vector<float> map;  // (src x, src y) per output pixel; x < 0 = outside the fisheye
-
-    Rectifier(const CamCal& c, int size, float hfov_deg) : S(size), map(size * size * 2) {
-        f = (S / 2.0f) / std::tan(hfov_deg * float(M_PI) / 360.0f);
-        for (int v = 0; v < S; v++) {
-            for (int u = 0; u < S; u++) {
-                // Ray in head frame for virtual pixel center (u, v).
-                float hx = (u + 0.5f - S / 2.0f) / f, hy = -(v + 0.5f - S / 2.0f) / f, hz = -1;
-                // cam_from_head = R^T
-                float x = c.R[0] * hx + c.R[3] * hy + c.R[6] * hz;
-                float y = c.R[1] * hx + c.R[4] * hy + c.R[7] * hz;
-                float z = c.R[2] * hx + c.R[5] * hy + c.R[8] * hz;
-                float* m = &map[(v * S + u) * 2];
-                float r = std::sqrt(x * x + y * y), th = std::atan2(r, z);
-                if (th > 88 * float(M_PI) / 180) {
-                    m[0] = -1;
-                    continue;
-                }
-                float t2 = th * th;
-                float thd = th * (1 + t2 * (c.k[0] + t2 * (c.k[1] + t2 * (c.k[2] + t2 * c.k[3]))));
-                float s = r > 1e-9f ? thd / r : 0;
-                m[0] = c.fx * x * s + c.cx;
-                m[1] = c.fy * y * s + c.cy;
-                if (m[0] < 0 || m[1] < 0 || m[0] > shm::kW - 2 || m[1] > shm::kH - 2) {
-                    m[0] = -1;
-                }
-            }
-        }
-    }
-
-    void apply(const uint8_t* src, uint8_t* dst) const {
-        for (int i = 0; i < S * S; i++) {
-            float sx = map[i * 2], sy = map[i * 2 + 1];
-            if (sx < 0) {
-                dst[i] = 0;
-                continue;
-            }
-            int x = int(sx), y = int(sy);
-            float ax = sx - x, ay = sy - y;
-            const uint8_t* p = src + y * shm::kStride + x;
-            float top = p[0] + ax * (p[1] - p[0]);
-            float bot = p[shm::kStride] + ax * (p[shm::kStride + 1] - p[shm::kStride]);
-            dst[i] = uint8_t(top + ay * (bot - top) + 0.5f);
-        }
-    }
-};
-
-// ---------------------------------------------------------------------------------------------
-// Detection + stereo
-
-struct Det {
-    float x0, y0, x1, y1, score;
-    int cls;
-};
-
-struct Obj {
-    int cls;
-    float score, dist;
-    XrVector3f corners[4];  // head frame at capture time: TL, TR, BR, BL
-    bool stereo;            // false: seen in the left view only, corners are on the 1 m plane
-    XrVector3f origin;      // camera position (head frame) the corners were projected from
-};
 
 struct DetectionSet {
     uint64_t id = 0;
@@ -260,56 +161,119 @@ static void nms(std::vector<Det>& d) {
     d.swap(keep);
 }
 
-// Sub-pixel disparity refinement by NCC of the left box interior along the (horizontal) epipolar line.
-static float refine_disparity(const uint8_t* L, const uint8_t* R, int S, const Det& l, float d0) {
-    float w = l.x1 - l.x0, h = l.y1 - l.y0;
-    int x0 = int(l.x0 + 0.2f * w), x1 = int(l.x1 - 0.2f * w), y0 = int(l.y0 + 0.2f * h), y1 = int(l.y1 - 0.2f * h);
-    int step = std::max(1, int(std::max(x1 - x0, y1 - y0) / 24));
-    if (x1 - x0 < 6 || y1 - y0 < 6) {
-        return d0;
-    }
-    const int R_ = 6;
-    float score[2 * R_ + 1];
-    for (int k = -R_; k <= R_; k++) {
-        int d = int(std::lround(d0)) + k;
-        double sl = 0, sr = 0, sll = 0, srr = 0, slr = 0;
-        int n = 0;
-        for (int y = y0; y < y1; y += step) {
-            for (int x = x0; x < x1; x += step) {
-                int xr = x - d;
-                if (x < 0 || y < 0 || x >= S || y >= S || xr < 0 || xr >= S) {
-                    continue;
-                }
-                double a = L[y * S + x], b = R[y * S + xr];
-                sl += a;
-                sr += b;
-                sll += a * a;
-                srr += b * b;
-                slr += a * b;
-                n++;
-            }
+// The frames driver_guardian publishes, once it has; nullptr on quit.
+static const shm::Header* open_frames() {
+    // driver_guardian creates the file before sizing it; touching a mapping past its end is SIGBUS.
+    int fd = -1;
+    struct stat st = {};
+    for (bool logged = false; !g_quit && ((fd = open(shm::kPath, O_RDONLY)) < 0 || fstat(fd, &st) ||
+                                          st.st_size < off_t(sizeof(shm::Header)));
+         logged = true) {
+        if (fd >= 0) {
+            close(fd);
         }
-        double cov = slr - sl * sr / std::max(n, 1);
-        double var = (sll - sl * sl / std::max(n, 1)) * (srr - sr * sr / std::max(n, 1));
-        score[k + R_] = n > 20 && var > 1e-3 ? float(cov / std::sqrt(var)) : -1;
+        if (!logged) {
+            fprintf(stderr, "waiting for driver_guardian (%s; restart SteamVR after the first run)\n", shm::kPath);
+        }
+        sleep(1);
     }
-    int best = int(std::max_element(score, score + 2 * R_ + 1) - score);
-    if (score[best] < 0.6f || best == 0 || best == 2 * R_) {
-        return d0;
+    if (g_quit) {
+        return nullptr;
     }
-    float a = score[best - 1], b = score[best], c = score[best + 1];
-    float sub = (a - c) / (2 * (a - 2 * b + c) + 1e-9f);
-    return std::lround(d0) + (best - R_) + std::clamp(sub, -0.5f, 0.5f);
+    void* p = mmap(nullptr, sizeof(shm::Header), PROT_READ, MAP_SHARED, fd, 0);
+    close(fd);
+    if (p == MAP_FAILED) {
+        throw std::runtime_error(std::string("mmap ") + shm::kPath + ": " + strerror(errno));
+    }
+    return (const shm::Header*)p;
 }
 
-static void write_pgm(const std::string& path, const uint8_t* p, int w, int h) {
-    FILE* f = fopen(path.c_str(), "wb");
-    if (!f) {
-        return;
+// The SLAM frames are dim and low-contrast; stretch the 1st..99th percentile to full range.
+// Pixels outside the fisheye are 0 -> YOLO's letterbox gray (114), so they don't look like edges.
+static void stretch(std::vector<uint8_t>& input) {
+    uint32_t hist[256] = {};
+    for (size_t i = 0; i < input.size(); i += 7) {
+        hist[input[i]]++;
     }
-    fprintf(f, "P5\n%d %d\n255\n", w, h);
-    fwrite(p, 1, size_t(w) * h, f);
-    fclose(f);
+    uint32_t total = 0, acc = 0;
+    for (int v = 1; v < 256; v++) {
+        total += hist[v];
+    }
+    int lo = 1, hi = 255;
+    for (int v = 1; v < 256; v++) {
+        acc += hist[v];
+        if (acc < total / 100) {
+            lo = v;
+        }
+        if (acc <= total * 99 / 100) {
+            hi = v;
+        }
+    }
+    uint8_t lut[256];
+    lut[0] = 114;
+    for (int v = 1; v < 256; v++) {
+        lut[v] = uint8_t(std::clamp((v - lo) * 255 / std::max(hi - lo, 1), 0, 255));
+    }
+    for (uint8_t& p : input) {
+        p = lut[p];
+    }
+}
+
+// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then per-class sigmoid scores) as boxes in each S x S view.
+static void decode(const ncnn::Mat& out, int S, std::vector<Det> views[2]) {
+    for (int i = 0; i < out.w; i++) {
+        int best = 0;
+        float bs = 0;
+        for (int k = 0; k < 80; k++) {
+            float s = out.row(4 + k)[i];
+            if (s > bs) {
+                bs = s;
+                best = k;
+            }
+        }
+        if (bs < g_det.conf) {
+            continue;
+        }
+        float cx = out.row(0)[i], cy = out.row(1)[i], w = out.row(2)[i], h = out.row(3)[i];
+        int v = cy >= S;  // top half = left view, bottom half = right view
+        float oy = v * S;
+        Det d{cx - w / 2, std::max(cy - h / 2, oy) - oy, cx + w / 2, std::min(cy + h / 2, oy + S) - oy, bs, best};
+        // > 4 px tall: not a sliver clipped at the seam between the views
+        if (d.y1 - d.y0 > 4 && std::max(d.x1 - d.x0, d.y1 - d.y0) >= g_det.min_box * S) {
+            views[v].push_back(d);
+        }
+    }
+}
+
+// --dump: the stacked input with each view's boxes as a PGM in g_det.dump, and the stereo objects to stdout.
+static void dump(const std::vector<uint8_t>& input, const std::vector<Det> views[2], const std::vector<Obj>& objs,
+                 int S) {
+    static uint64_t n = 0;
+    std::vector<uint8_t> img = input;
+    for (int v = 0; v < 2; v++) {
+        for (const Det& d : views[v]) {
+            int x0 = std::clamp(int(d.x0), 0, S - 1), x1 = std::clamp(int(d.x1), 0, S - 1);
+            int y0 = std::clamp(int(d.y0), 0, S - 1) + v * S, y1 = std::clamp(int(d.y1), 0, S - 1) + v * S;
+            for (int x = x0; x <= x1; x++) {
+                img[y0 * S + x] = img[y1 * S + x] = 255;
+            }
+            for (int y = y0; y <= y1; y++) {
+                img[y * S + x0] = img[y * S + x1] = 255;
+            }
+        }
+    }
+    char path[512];
+    snprintf(path, sizeof path, "%s/det_%04llu.pgm", g_det.dump.c_str(), (unsigned long long)n++);
+    if (FILE* f = fopen(path, "wb")) {
+        fprintf(f, "P5\n%d %d\n255\n", S, 2 * S);
+        fwrite(img.data(), 1, img.size(), f);
+        fclose(f);
+    }
+    for (const Obj& o : objs) {
+        if (o.stereo) {
+            printf("  %s %.2f at %.2fm\n", kCoco[o.cls], o.score, o.dist);
+        }
+    }
 }
 
 // One run at size S, until g_det_size changes or quit.
@@ -329,26 +293,9 @@ static void detect_run(const int S) {
     }
     printf("detector: ncnn %s\n", net.opt.use_vulkan_compute ? "Vulkan GPU" : "CPU");
 
-    // driver_guardian creates the file before sizing it; touching a mapping past its end is SIGBUS.
-    int shm_fd = -1;
-    struct stat st = {};
-    for (bool logged = false; !g_quit && ((shm_fd = open(shm::kPath, O_RDONLY)) < 0 || fstat(shm_fd, &st) ||
-                                          st.st_size < off_t(sizeof(shm::Header)));
-         logged = true) {
-        if (shm_fd >= 0) {
-            close(shm_fd);
-        }
-        if (!logged) {
-            fprintf(stderr, "waiting for driver_guardian (%s; restart SteamVR after the first run)\n", shm::kPath);
-        }
-        sleep(1);
-    }
-    if (g_quit) {
+    const shm::Header* hdr = open_frames();
+    if (!hdr) {
         return;
-    }
-    auto* hdr = (const shm::Header*)mmap(nullptr, sizeof(shm::Header), PROT_READ, MAP_SHARED, shm_fd, 0);
-    if (hdr == MAP_FAILED) {
-        throw std::runtime_error(std::string("mmap ") + shm::kPath + ": " + strerror(errno));
     }
     // After the frames: calib.txt comes from the driver's copy of the factory calibration (guardian.py)
     const CamCal cal[2] = {load_calib(g_det.calib, shm::kCamNames[0]), load_calib(g_det.calib, shm::kCamNames[1])};
@@ -363,8 +310,7 @@ static void detect_run(const int S) {
     std::vector<uint8_t> scratch(shm::kStride * shm::kH);
     std::vector<uint8_t> input(size_t(S) * S * 2);
     uint64_t last_seq[2] = {0, 0}, t_ns[2] = {0, 0}, last_pair = 0;
-    uint32_t fseq[2];
-    uint64_t frames = 0, stat_t = now_ns(), dump_n = 0, last_run = 0;
+    uint64_t frames = 0, stat_t = now_ns(), last_run = 0;
     double t_rect = 0, t_net = 0, t_post = 0;
     bool printed_shape = false;
 
@@ -381,7 +327,7 @@ static void detect_run(const int S) {
             }
         }
         for (int i = 0; i < 2; i++) {
-            if (shm::read(hdr->slots[i], last_seq[i], scratch.data(), t_ns[i], fseq[i])) {
+            if (shm::read(hdr->slots[i], last_seq[i], scratch.data(), t_ns[i])) {
                 raw[i].swap(scratch);
             }
         }
@@ -395,34 +341,7 @@ static void detect_run(const int S) {
         uint64_t a = last_run = now_ns();
         rect[0].apply(raw[0].data(), input.data());
         rect[1].apply(raw[1].data(), input.data() + size_t(S) * S);
-        // The SLAM frames are dim and low-contrast; stretch the 1st..99th percentile to full range.
-        // Pixels outside the fisheye are 0 -> YOLO's letterbox gray (114), so they don't look like edges.
-        uint32_t hist[256] = {};
-        for (size_t i = 0; i < input.size(); i += 7) {
-            hist[input[i]]++;
-        }
-        uint32_t total = 0, acc = 0;
-        for (int v = 1; v < 256; v++) {
-            total += hist[v];
-        }
-        int lo = 1, hi = 255;
-        for (int v = 1; v < 256; v++) {
-            acc += hist[v];
-            if (acc < total / 100) {
-                lo = v;
-            }
-            if (acc <= total * 99 / 100) {
-                hi = v;
-            }
-        }
-        uint8_t lut[256];
-        lut[0] = 114;
-        for (int v = 1; v < 256; v++) {
-            lut[v] = uint8_t(std::clamp((v - lo) * 255 / std::max(hi - lo, 1), 0, 255));
-        }
-        for (uint8_t& p : input) {
-            p = lut[p];
-        }
+        stretch(input);
         uint64_t b = now_ns();
 
         // prep_model.py folded GRAY2RGB and the 1/255 scale into the first conv.
@@ -444,87 +363,13 @@ static void detect_run(const int S) {
             continue;
         }
 
-        // Decode [4 + 80, N]: cx, cy, w, h in input pixels, then per-class sigmoid scores.
         std::vector<Det> views[2];
-        for (int i = 0; i < out.w; i++) {
-            int best = 0;
-            float bs = 0;
-            for (int k = 0; k < 80; k++) {
-                float s = out.row(4 + k)[i];
-                if (s > bs) {
-                    bs = s;
-                    best = k;
-                }
-            }
-            if (bs < g_det.conf) {
-                continue;
-            }
-            float cx = out.row(0)[i], cy = out.row(1)[i], w = out.row(2)[i], h = out.row(3)[i];
-            int v = cy >= S;  // top half = left view, bottom half = right view
-            float oy = v * S;
-            Det d{cx - w / 2, std::max(cy - h / 2, oy) - oy, cx + w / 2, std::min(cy + h / 2, oy + S) - oy, bs, best};
-            // > 4 px tall: not a sliver clipped at the seam between the views
-            if (d.y1 - d.y0 > 4 && std::max(d.x1 - d.x0, d.y1 - d.y0) >= g_det.min_box * S) {
-                views[v].push_back(d);
-            }
-        }
+        decode(out, S, views);
         nms(views[0]);
         nms(views[1]);
 
-        // Stereo match: same rows, similar size, positive disparity. Class-agnostic like nms() (the views
-        // can disagree on laptop/tv for one object), with a mild preference for the same class.
-        std::vector<Obj> objs;
-        std::vector<bool> used(views[1].size());
-        const uint8_t* L = input.data();
-        const uint8_t* R = input.data() + size_t(S) * S;
-        const XrVector3f origin{cal[0].t[0], cal[0].t[1], cal[0].t[2]};
-        auto make_obj = [&](int cls, float score, float Z, float bx0, float by0, float bx1, float by1, bool stereo) {
-            Obj o{cls, score, Z, {}, stereo, origin};
-            float us[4] = {bx0, bx1, bx1, bx0}, vs[4] = {by0, by0, by1, by1};
-            for (int k = 0; k < 4; k++) {
-                float X = (us[k] - S / 2.0f) / f * Z, Y = (vs[k] - S / 2.0f) / f * Z;
-                o.corners[k] = {origin.x + X, origin.y - Y, origin.z - Z};
-            }
-            return o;
-        };
-        for (const Det& l : views[0]) {
-            int bi = -1;
-            float bc = 1e9f;
-            float lh = l.y1 - l.y0, lw = l.x1 - l.x0;
-            for (size_t j = 0; j < views[1].size(); j++) {
-                const Det& r = views[1][j];
-                if (used[j]) {
-                    continue;
-                }
-                float rh = r.y1 - r.y0, rw = r.x1 - r.x0;
-                float dy = std::fabs((l.y0 + l.y1) - (r.y0 + r.y1)) / 2 / lh;
-                float dsize = std::fabs(lh - rh) / std::max(lh, rh) + std::fabs(lw - rw) / std::max(lw, rw);
-                float disp = ((l.x0 + l.x1) - (r.x0 + r.x1)) / 2;
-                if (dy > 0.15f || dsize > 0.5f || disp < 0.3f || disp > f * baseline / 0.2f) {
-                    continue;
-                }
-                float cost = dy + dsize + (r.cls != l.cls) * 0.2f;
-                if (cost < bc) {
-                    bc = cost;
-                    bi = int(j);
-                }
-            }
-            if (bi < 0) {
-                // Direction-only measurement: the XR side can still update an existing track with it.
-                objs.push_back(make_obj(l.cls, l.score, 1, l.x0, l.y0, l.x1, l.y1, false));
-                continue;
-            }
-            used[bi] = true;
-            const Det& r = views[1][bi];
-            float d0 = ((l.x0 - r.x0) + (l.x1 - r.x1)) / 2;
-            float d = refine_disparity(L, R, S, l, d0);
-            float Z = f * baseline / std::max(d, 0.3f);
-            // Average the two views' boxes (right box shifted by the disparity) in the left view.
-            float bx0 = (l.x0 + r.x0 + d) / 2, bx1 = (l.x1 + r.x1 + d) / 2;
-            float by0 = (l.y0 + r.y0) / 2, by1 = (l.y1 + r.y1) / 2;
-            const Det& top = l.score >= r.score ? l : r;
-            objs.push_back(make_obj(top.cls, top.score, Z, bx0, by0, bx1, by1, true));
-        }
+        const std::vector<Obj> objs = match_stereo(views, input.data(), input.data() + size_t(S) * S, S, f, baseline,
+                                                   {cal[0].t[0], cal[0].t[1], cal[0].t[2]});
         uint64_t e = now_ns();
 
         {
@@ -535,27 +380,7 @@ static void detect_run(const int S) {
         }
 
         if (!g_det.dump.empty() && frames % 30 == 0) {
-            std::vector<uint8_t> img = input;
-            for (int v = 0; v < 2; v++) {
-                for (const Det& d : views[v]) {
-                    int x0 = std::clamp(int(d.x0), 0, S - 1), x1 = std::clamp(int(d.x1), 0, S - 1);
-                    int y0 = std::clamp(int(d.y0), 0, S - 1) + v * S, y1 = std::clamp(int(d.y1), 0, S - 1) + v * S;
-                    for (int x = x0; x <= x1; x++) {
-                        img[y0 * S + x] = img[y1 * S + x] = 255;
-                    }
-                    for (int y = y0; y <= y1; y++) {
-                        img[y * S + x0] = img[y * S + x1] = 255;
-                    }
-                }
-            }
-            char path[512];
-            snprintf(path, sizeof path, "%s/det_%04llu.pgm", g_det.dump.c_str(), (unsigned long long)dump_n++);
-            write_pgm(path, img.data(), S, 2 * S);
-            for (const Obj& o : objs) {
-                if (o.stereo) {
-                    printf("  %s %.2f at %.2fm\n", kCoco[o.cls], o.score, o.dist);
-                }
-            }
+            dump(input, views, objs, S);
         }
 
         frames++;
@@ -581,7 +406,6 @@ static void detect_run(const int S) {
         }
     }
     munmap((void*)hdr, sizeof(shm::Header));
-    close(shm_fd);
 }
 
 static void detect_loop() {

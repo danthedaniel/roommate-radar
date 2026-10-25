@@ -1,6 +1,6 @@
 # guardian: people, cats and dogs over any VR app
 
-OpenVR overlay app (`guardian/guardian.cpp`, stereo YOLO detector in `detector.h`) for playing without
+OpenVR overlay app (`guardian/guardian.cpp`, sources below) for playing without
 passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
 Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
@@ -33,11 +33,17 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
 
 ```
 driver_guardian (camserver   ──/dev/shm/steamframe-cams──▶  detector thread (detector.h)  ──▶  tracker + OpenVR overlays
-thread in vrserver): newest                                rectify both views to           (guardian.cpp)
-normal-exposure SLAM L/R frames                            head-aligned pinholes, YOLO
+thread in vrserver): newest                                rectify both views to           (measure.h, tracker.h,
+normal-exposure SLAM L/R frames                            head-aligned pinholes, YOLO     boxes.h)
 + capture time (CLOCK_MONOTONIC)                           (ncnn Vulkan) on the stacked
                                                            pair, stereo-match, depth=fB/d
 ```
+
+Sources, header-only (one translation unit per binary): `guardian.cpp` (main loop, options), `detector.h` (the
+detector thread; `calib.h` rectification, `stereo.h` matching and depth), `measure.h` (detections to tracker
+measurements, your own arms dropped), `tracker.h`, `boxes.h` (tracks as overlays), `panel.h` (dashboard tab), `draw.h`
+(CPU drawing), `textures.h` (Vulkan overlay textures), `settings.h`, `register.h` (`--register`), `selftest.h`. The
+driver: `driver.cpp` + `camserver.cpp`, and `shm.h` between them and guardian.
 
 - Calibration: `/persist/xrservice.json` (factory KB4 intrinsics + extrinsics) and
   `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `calib.py` chains
@@ -68,7 +74,7 @@ auto-launches with SteamVR.
   `~/.steam/steam.pipe` (`devkit-1 steam://devkit-1/<steam.token>/create-shortcut?response=...&gameid=guardian`).
 - What differs from a Store install: a shortcut, not an app id (its `SteamAppId` is made up by Steam), so Steam doesn't
   generate the overlay's manifest entry and guardian adds its own. With a real app id and the "Launch SteamVR
-  Overlay" launch option, Steam provides it (`guardian.cpp` `register_app` then only finds it).
+  Overlay" launch option, Steam provides it (`register.h` `register_app` then only finds it).
 
 ncnn is the submodule `third_party/ncnn`: branch `ncnn` of this repo, a history-less snapshot of upstream c15904b plus
 our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see guardian). Its URL is `./`, so check it out with
