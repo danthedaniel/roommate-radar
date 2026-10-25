@@ -4,8 +4,8 @@
 // Each confirmed track is a box overlay (rounded outline) plus a label overlay (class, confidence): upright sprites
 // turned to face you every compositor frame, in the standing universe. Detections are matched into tracks by a
 // ByteTrack-style tracker (tracker.h); each box's center and size follow a cubic spline (time-based Catmull-Rom)
-// through its track's last detections (sizes alpha-smoothed, --size-alpha), played back one detection period behind
-// the newest one so there is always a segment to be in.
+// through its track's last detections (sizes and distance alpha-smoothed, --size-alpha, --dist-alpha), played back
+// one detection period behind the newest one so there is always a segment to be in.
 //
 // A "Guardian" tab in the SteamVR dashboard toggles it and what it shows; settings persist in ~/.config/guardian.conf.
 //
@@ -591,7 +591,8 @@ static std::vector<track::Meas> measurements(const std::vector<Obj>& objs, const
         // ponytail: isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
         // ray would track lateral motion tighter
         float sigma = 0.05f + 0.02f * o.dist * o.dist;
-        ms.push_back({{c.x, c.y, c.z, v_len(v_sub(w[1], w[0])), v_len(v_sub(w[3], w[0]))}, sigma, o.score, o.cls});
+        ms.push_back({{c.x, c.y, c.z, v_len(v_sub(w[1], w[0])), v_len(v_sub(w[3], w[0]))}, sigma, o.score, o.cls,
+                      {h.x, h.y, h.z}});
     }
     return ms;
 }
@@ -1059,6 +1060,8 @@ int main(int argc, char** argv) {
             tracker.prm.accel = float(atof(next()));
         } else if (a == "--size-alpha") {
             tracker.prm.size_alpha = std::clamp(float(atof(next())), 0.01f, 1.f);
+        } else if (a == "--dist-alpha") {
+            tracker.prm.dist_alpha = std::clamp(float(atof(next())), 0.01f, 1.f);
         } else if (a == "--no-detector") {
             g_detector = false;
         } else if (parse_detector_option(a, next)) {

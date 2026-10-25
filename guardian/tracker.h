@@ -6,8 +6,8 @@
 //   3. match the tracks left over to low-confidence detections (keeps a track through a weak frame),
 //   4. unmatched confident detections start tentative tracks; tentative tracks that miss are dropped, confirmed
 //      ones after max_age without a match.
-// Each track also keeps its last few matched detections (history) for drawing, with w and h alpha-smoothed; the
-// filter's predictions are only used for matching.
+// Each track also keeps its last few matched detections (history) for drawing, with w, h and the distance from the
+// eye alpha-smoothed; the filter's predictions are only used for matching.
 #pragma once
 #include <algorithm>
 #include <cmath>
@@ -23,6 +23,7 @@ struct Meas {
     float sigma;  // position measurement std dev (m); stereo depth gets worse with distance
     float score;
     int cls;
+    float eye[3] = {};  // head position at capture: distance is smoothed along the ray from it
 };
 
 struct Params {
@@ -35,6 +36,7 @@ struct Params {
     float size_sigma = 0.1f;  // box size measurement std dev (m)
     size_t history = 4;       // matched detections kept per track
     float size_alpha = 0.2f;  // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
+    float dist_alpha = 0.2f;  // same for the distance from the eye (stereo depth); the bearing stays raw
 };
 
 // One axis: position p, velocity v, covariance P.
@@ -198,6 +200,19 @@ class Tracker {
             for (int c = 3; c < 5; c++) {
                 s.v[c] = tr.history.back().v[c] + prm.size_alpha * (s.v[c] - tr.history.back().v[c]);
             }
+            // Previous distance measured from this eye, so the head moving isn't smoothed away.
+            float r = 0, rp = 0;
+            for (int c = 0; c < 3; c++) {
+                r += (s.v[c] - d.eye[c]) * (s.v[c] - d.eye[c]);
+                rp += (tr.history.back().v[c] - d.eye[c]) * (tr.history.back().v[c] - d.eye[c]);
+            }
+            r = std::sqrt(r), rp = std::sqrt(rp);
+            if (r > 0) {
+                float k = (rp + prm.dist_alpha * (r - rp)) / r;
+                for (int c = 0; c < 3; c++) {
+                    s.v[c] = d.eye[c] + k * (s.v[c] - d.eye[c]);
+                }
+            }
         }
         if (tr.history.empty() || t > tr.history.back().t) {
             tr.history.push_back(s);
@@ -299,6 +314,11 @@ inline int selftest(void (*report)(bool ok, const char* what)) {
     check(std::fabs(sz.tracks[0].history.back().v[4] - (1.7f + sz.prm.size_alpha * 0.2f)) < 1e-5f &&
               sz.tracks[0].history.back().v[3] == 0.5f,
           "box size is alpha-smoothed");
+    // Distance too, along the ray from the eye: 2 m then 2.5 m straight ahead stores 2 + dist_alpha * 0.5.
+    sz.update({{{0, 1, -2.5f, 0.5f, 1.7f}, 0.05f, 0.8f, 0, {0, 1, 0}}}, 0.5);
+    check(std::fabs(sz.tracks[0].history.back().v[2] + 2 + sz.prm.dist_alpha * 0.5f) < 1e-5f &&
+              std::fabs(sz.tracks[0].history.back().v[1] - 1) < 1e-5f,
+          "distance is alpha-smoothed along the view ray");
 
     // A weak (low-confidence) detection keeps the track; on its own it starts nothing.
     trk.update({{{3.0f, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}, {{-3, 1, -2, 0.5f, 1.7f}, 0.05f, 0.2f, 0}}, 3.0);
