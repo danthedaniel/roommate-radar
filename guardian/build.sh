@@ -7,11 +7,16 @@
 set -e
 cd "$(dirname "$0")/.."
 
-# get URL FILE: download unless it's already there
+# get URL FILE SHA256: download unless FILE is already there with that hash; fails if the download doesn't match
 get() {
-	[ -f "$2" ] && return
+	echo "$3  $2" | shasum -a 256 -c --status 2>/dev/null && return
 	mkdir -p "$(dirname "$2")"
 	curl -fsSL -o "$2.part" "$1"
+	echo "$3  $2.part" | shasum -a 256 -c --status || {
+		rm "$2.part"
+		echo "$2: wrong sha256 from $1" >&2
+		exit 1
+	}
 	mv "$2.part" "$2"
 }
 
@@ -20,7 +25,8 @@ get() {
 [ -f third_party/ncnn/CMakeLists.txt ] || git -c protocol.file.allow=always submodule update --init third_party/ncnn
 
 # Exported on the Mac (ultralytics + torch don't run on the Frame), S x 2S input, adapted with prep_model.py
-get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt models/yolo11n-grayscale.pt
+get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt models/yolo11n-grayscale.pt \
+	b81f01d60918e3194df21c305d9bd2275ab33cfddc79b26ca145a9190d1932f5
 for s in 320 480 640; do
 	[ -f "models/yolo11n-grayscale_${s}_gray.ncnn.param" ] && continue
 	(
@@ -34,18 +40,17 @@ for s in 320 480 640; do
 done
 
 # The OpenVR SDK pieces guardian builds against and ships (libopenvr_api.so next to the binary)
-for f in headers/openvr.h headers/openvr_driver.h bin/linuxarm64/libopenvr_api.so; do
-	get "https://raw.githubusercontent.com/ValveSoftware/openvr/v2.15.6/$f" "third_party/openvr/$f"
-done
+openvr=https://raw.githubusercontent.com/ValveSoftware/openvr/v2.15.6
+get $openvr/headers/openvr.h third_party/openvr/headers/openvr.h \
+	1e6ed57199896cc1f7c5484e50fa18955e97be15be690beb28d998c877ead7fd
+get $openvr/headers/openvr_driver.h third_party/openvr/headers/openvr_driver.h \
+	1036efe998d63e82d1d3db2b32a2f58df4a8eeaf5280f50aaf28220ff60a40ab
+get $openvr/bin/linuxarm64/libopenvr_api.so third_party/openvr/bin/linuxarm64/libopenvr_api.so \
+	cc3671d24dd23fb61494e8a8327cf4fe7f638a60508ff7225984a03f2f5947e9
 
 # Label font, shipped with the app (OFL)
-font=third_party/fonts/NotoSans-Medium.ttf
-sum="635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb  $font"
-echo "$sum" | shasum -a 256 -c --status 2>/dev/null || {
-	rm -f "$font"
-	get https://raw.githubusercontent.com/notofonts/notofonts.github.io/d3abdda968b38bb6eb0ec59f6f9f58b8c2139bca/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf "$font"
-	echo "$sum" | shasum -a 256 -c --status
-}
+get https://raw.githubusercontent.com/notofonts/notofonts.github.io/d3abdda968b38bb6eb0ec59f6f9f58b8c2139bca/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf \
+	third_party/fonts/NotoSans-Medium.ttf 635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb
 
 # ncnn links the SDK's glslang (static); SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h.
 # dist/guardian is rebuilt from scratch so it holds exactly what's installed.
