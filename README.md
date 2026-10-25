@@ -83,14 +83,14 @@ ssh steamos@frame.local 'sudo python3 - --frames 1' < scripts/rawcam.py \
 
 ## Ansible
 
-`ansible/build.yml` builds (on the Mac, `guardian/build.sh`), `ansible/deploy.yml` installs; deploy pairs the key first (`ansible/pair.yml`). Together they
+`make build` builds (`guardian/build.sh`, on the Mac), `ansible/deploy.yml` installs; deploy pairs the key first (`ansible/pair.yml`). Together they
 set up a fresh Frame and redeploy an existing one (`make build`, then `make deploy | deploy-mirror | deploy-guardian`,
-or `cd ansible && ansible-playbook build.yml | deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be
+or `cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be
 switched on by hand. Every first-time step is skipped once its output exists.
 
 - Always (deploy): pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
 - `mirror` (deploy): ships `mirrorserver.py` and enables the `mirrorserver` user service.
-- `guardian` build: on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
+- `guardian` build (`guardian/build.sh`): on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
   models into `models/` (`uvx`, needs uv), downloads the OpenVR SDK pieces and the font, then builds ncnn and
   guardian in the Steam Runtime SDK (Docker Desktop; needs a few GB of memory, ncnn's arm
   gemm kernels take ~2 GB to compile) into `dist/guardian`.

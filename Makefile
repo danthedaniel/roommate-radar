@@ -3,9 +3,9 @@ FRAME ?= steamos@frame.local
 
 .PHONY: build deploy deploy-mirror deploy-guardian logs stream cams ssh sysroot
 
-# Build guardian on the Mac (Steam Runtime SDK, docker) into dist/guardian (ansible/build.yml)
+# Build guardian on the Mac (Steam Runtime SDK, docker) into dist/guardian
 build:
-	cd ansible && ansible-playbook build.yml
+	guardian/build.sh
 
 # Everything: pair the ssh key, then mirror/deploy.yml and guardian/deploy.yml (installs dist/guardian; make build first)
 deploy:

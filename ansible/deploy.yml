@@ -1,6 +1,6 @@
 # Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy[-mirror|-guardian])
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
-# guardian installs what build.yml (make build) left in dist/guardian.
+# guardian installs what build.sh (make build) left in dist/guardian.
 - import_playbook: pair.yml
 - import_playbook: ../mirror/deploy.yml
 - import_playbook: ../guardian/deploy.yml

@@ -1,6 +1,6 @@
 #!/bin/sh
-# guardian's build, the way a Store depot is built: in the Steam Runtime 4 arm64 SDK. Run by ansible/build.yml
-# (make build), or directly; deploy.yml installs the result.
+# guardian's build, the way a Store depot is built: in the Steam Runtime 4 arm64 SDK. Run by make build, or
+# directly; deploy.yml installs the result.
 # All on the Mac (arm64, so the SDK image runs natively in Docker Desktop's VM): the inputs (ncnn submodule, models,
 # OpenVR SDK pieces, font), then ncnn (into third_party/ncnn-install, where clangd finds it) and guardian built with
 # docker in the SDK image (build-sdk/, incremental) and `cmake --install`ed into dist/guardian.
