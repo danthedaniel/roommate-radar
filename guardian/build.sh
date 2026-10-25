@@ -39,10 +39,13 @@ for f in headers/openvr.h headers/openvr_driver.h bin/linuxarm64/libopenvr_api.s
 done
 
 # Label font, shipped with the app (OFL)
-get https://raw.githubusercontent.com/notofonts/notofonts.github.io/d3abdda968b38bb6eb0ec59f6f9f58b8c2139bca/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf \
-	third_party/fonts/NotoSans-Medium.ttf
-echo "635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb  third_party/fonts/NotoSans-Medium.ttf" |
-	shasum -a 256 -c --status
+font=third_party/fonts/NotoSans-Medium.ttf
+sum="635d93d1131d791f2576de90b3bb0f7cdf61929906e8420a61b5f7f8e76420bb  $font"
+echo "$sum" | shasum -a 256 -c --status 2>/dev/null || {
+	rm -f "$font"
+	get https://raw.githubusercontent.com/notofonts/notofonts.github.io/d3abdda968b38bb6eb0ec59f6f9f58b8c2139bca/fonts/NotoSans/hinted/ttf/NotoSans-Medium.ttf "$font"
+	echo "$sum" | shasum -a 256 -c --status
+}
 
 # ncnn links the SDK's glslang (static); SIMPLEVK=OFF: its stub Vulkan types clash with vulkan.h.
 # dist/guardian is rebuilt from scratch so it holds exactly what's installed.
