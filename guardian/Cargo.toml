@@ -1,0 +1,22 @@
+[package]
+name = "guardian"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The SteamVR driver (src/driver/), loaded into the host's vrserver
+[lib]
+name = "driver_guardian"
+path = "src/driver/lib.rs"
+crate-type = ["cdylib"]
+
+# The overlay app
+[[bin]]
+name = "guardian"
+path = "src/main.rs"
+
+[dependencies]
+ash = "0.38"
+fontdue = "0.9"
+libc = "0.2"
+serde_json = "1"

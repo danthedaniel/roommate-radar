@@ -1,9 +1,9 @@
 # guardian: people, cats and dogs over any VR app
 
-OpenVR overlay app (`guardian/guardian.cpp`, sources below) for playing without
+OpenVR overlay app (Rust, `guardian/src/`, sources below) for playing without
 passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
-Detections are matched into tracks by a ByteTrack-style tracker (`tracker.h`: per-track constant-velocity Kalman
+Detections are matched into tracks by a ByteTrack-style tracker (`tracker.rs`: per-track constant-velocity Kalman
 filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
 and sizes follow a Catmull-Rom spline through each track's last 4 detections (sizes and distance
 alpha-smoothed first, `--size-alpha 0.2`, `--dist-alpha 0.4`), played back one detection period behind (~300-350 ms
@@ -12,12 +12,12 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
 
 - Installed like a Store app (see below): runs in the Steam Linux Runtime 4 container, started by Steam from the
   Library or by SteamVR's auto-launch (through Steam). Log: `/tmp/guardian.log`.
-- No root: the camera frames come from `driver_guardian` (`driver.cpp`), camserver's loop on a thread inside vrserver.
+- No root: the camera frames come from `driver_guardian` (`src/driver/`), camserver's loop on a thread inside vrserver.
   vrserver is XRService's parent, so Yama (`ptrace_scope=1`) lets it `pidfd_getfd` XRService's camera buffers. It
   also copies `/persist`'s calibration to `/dev/shm/steamframe-calib`, as the container can't see `/persist`. Logs
   to `~/.local/share/Steam/logs/vrserver.txt` (`guardian: ...`).
-- First run (Steam has no install scripts on Linux, so `guardian.py` does setup on every start): registers `driver/`
-  with SteamVR (`vrpathreg adddriver`) and writes `guardian.vrmanifest`, then runs `bin/guardian --register` before
+- First run (Steam has no install scripts on Linux, so guardian does setup on every start, `register.rs`): registers
+  `driver/` with SteamVR (`vrpathreg adddriver`) and writes `guardian.vrmanifest`, then runs `bin/guardian --register` before
   the overlay itself. SteamVR knows the running app as `steam.overlay.<SteamAppId>`, the key Steam's own manifest uses
   for a Store overlay; `--register` adds our manifest for it (launching `steam://rungameid/<SteamGameId>`, so
   auto-launch also goes through Steam) and, once that entry is live, turns auto-launch on, once (`autolaunch_set` in
@@ -28,26 +28,36 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
   reported to apps), people, cats and dogs, ignore my hands, range, status. Saved in `~/.config/guardian.conf`
   (auto-launch is SteamVR's setting, in `vrappconfig/`).
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
-  by `guardian.py`) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
+  at start) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
   presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
 
 ```
-driver_guardian (camserver   ──/dev/shm/steamframe-cams──▶  detector thread (detector.h)  ──▶  tracker + OpenVR overlays
-thread in vrserver): newest                                rectify both views to           (measure.h, tracker.h,
-normal-exposure SLAM L/R frames                            head-aligned pinholes, YOLO     boxes.h)
+driver_guardian (camserver   ──/dev/shm/steamframe-cams──▶  detector thread (detector.rs) ──▶  tracker + OpenVR overlays
+thread in vrserver): newest                                rectify both views to           (measure.rs, tracker.rs,
+normal-exposure SLAM L/R frames                            head-aligned pinholes, YOLO     boxes.rs)
 + capture time (CLOCK_MONOTONIC)                           (ncnn Vulkan) on the stacked
                                                            pair, stereo-match, depth=fB/d
 ```
 
-Sources, header-only (one translation unit per binary): `guardian.cpp` (main loop, options), `detector.h` (the
-detector thread; `calib.h` rectification, `stereo.h` matching and depth), `measure.h` (detections to tracker
-measurements, your own arms dropped), `tracker.h`, `boxes.h` (tracks as overlays), `panel.h` (dashboard tab), `draw.h`
-(CPU drawing), `textures.h` (Vulkan overlay textures), `settings.h`, `register.h` (`--register`), `selftest.h`. The
-driver: `driver.cpp` + `camserver.cpp`, and `shm.h` between them and guardian.
+Sources (`src/`, one cargo package): `main.rs` (main loop, options), `detector.rs` (the detector thread; `calib.rs`
+rectification, `stereo.rs` matching and depth), `measure.rs` (detections to tracker measurements, your own arms
+dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
+`textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `v3.rs`; `openvr.rs` and
+`ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs`, and
+`shm.rs` between it and guardian. Tests: `cargo test` (build.sh runs them in the SDK); on the Mac,
+`cargo clippy --target aarch64-unknown-linux-gnu --all-targets` checks everything but the link.
+
+- OpenVR through its C API: `openvr_sys.rs` is bindgen's output for `openvr_capi.h` (how to regenerate is at its top),
+  and `openvr.rs` calls the interfaces' function tables (`VR_GetGenericInterface("FnTable:IVROverlay_028")`). It
+  asserts the struct sizes against `openvr.h`'s, which caught `Compositor_FrameTiming`: `openvr.h` packs it to 4 on
+  Linux (188 bytes), `openvr_capi.h` doesn't.
+- The driver API (`openvr_driver.h`) is C++ only, so `driver/lib.rs` lays out `IServerTrackedDeviceProvider_004` and
+  `IVRDriverLog_001` as the C++ objects (vtable pointer first, Itanium ABI); a versioned interface's layout never
+  changes.
 
 - Calibration: `/persist/xrservice.json` (factory KB4 intrinsics + extrinsics) and
-  `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `calib.py` chains
-  them into `calib.txt` (head_from_cam per SLAM camera). Cam0 = `slam_right`, Cam1 = `slam_left`.
+  `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `calib.rs` chains
+  them into head_from_cam per SLAM camera. Cam0 = `slam_right`, Cam1 = `slam_left`.
 - Camera timestamps are `TIMESTAMP_MONOTONIC`-flagged but run ~210–230 ms ahead of
   `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `--latency-ms` tunes the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
@@ -64,20 +74,21 @@ Then start "Devkit Game: guardian" from the Steam Library once, and restart Stea
 auto-launches with SteamVR.
 
 - Build (`build.sh`, also runnable directly): like a Store depot, in the Steam Runtime 4 arm64 SDK (`registry.gitlab.steamos.cloud/steamrt/
-  steamrt4/sdk/arm64`, natively in the Mac's arm64 Docker Desktop) in `build-sdk/`. `cmake --install`
-  makes the app: `guardian.py`, `calib.py`, the font, `models/`, `bin/guardian` + `bin/libopenvr_api.so` (OpenVR
-  SDK v2.15.6, `$ORIGIN` rpath), `driver/` (manifest + `bin/linuxarm64/driver_guardian.so`, static libstdc++ as it
-  loads into the host's vrserver). Nothing from the host: glslang is the SDK's static one, the font is shipped.
+  steamrt4/sdk/arm64`, natively in the Mac's arm64 Docker Desktop) in `build-sdk/` (rustup and the toolchain in
+  `build-sdk/rust/`, `rust-toolchain.toml` pins it). It lays out the app: the font,
+  `models/`, `bin/guardian` + `bin/libopenvr_api.so` (OpenVR SDK v2.15.6, `$ORIGIN` rpath; `build.rs` links it and
+  ncnn), `driver/` (manifest + `bin/linuxarm64/driver_guardian.so`, which loads into the host's vrserver and needs
+  only libc and libgcc_s). Nothing from the host: glslang is the SDK's static one, the font is shipped.
 - Install (`deploy.yml`): what Valve's SteamOS Devkit Client does for an upload. `dist/guardian` to
-  `~/devkit-game/guardian`, `guardian-argv.json` (`./guardian.py`) and `guardian-settings.json` (`compat_tool`
+  `~/devkit-game/guardian`, `guardian-argv.json` (`./bin/guardian`) and `guardian-settings.json` (`compat_tool`
   `steamrt4-any`, the tool Steam maps Store apps native to Linux to), then `create-shortcut` sent to Steam over
   `~/.steam/steam.pipe` (`devkit-1 steam://devkit-1/<steam.token>/create-shortcut?response=...&gameid=guardian`).
 - What differs from a Store install: a shortcut, not an app id (its `SteamAppId` is made up by Steam), so Steam doesn't
   generate the overlay's manifest entry and guardian adds its own. With a real app id and the "Launch SteamVR
-  Overlay" launch option, Steam provides it (`register.h` `register_app` then only finds it).
+  Overlay" launch option, Steam provides it (`register.rs` then only finds it).
 
 ncnn is the submodule `third_party/ncnn`: branch `ncnn` of this repo, a history-less snapshot of upstream c15904b plus
-our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see guardian). Its URL is `./`, so check it out with
+our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see guardian; C API calls for the GPU instance and winograd63). Its URL is `./`, so check it out with
 `git -c protocol.file.allow=always submodule update --init`. `SIMPLEVK=OFF` because its stub Vulkan types clash with
 `vulkan.h`.
 Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 1-channel input;

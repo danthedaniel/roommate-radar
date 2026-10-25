@@ -50,10 +50,9 @@ Root: `steamos` has passwordless sudo via `/etc/sudoers.d/zz-steamos-nopasswd`.
 
 Each has its own `deploy.yml` (guardian also a `build.sh`); `ansible/` holds the inventory, the key pairing and the
 playbooks that run them. Shared at the top: `scripts/` (raw camera tools), `third_party/` (ncnn, used by guardian, plus
-its downloads), `models/` and `dist/` (guardian's build), lint/format config (`.clang-format` for the C++, ruff and basedpyright, Python 3.12 (the Frame's),
-in `pyproject.toml`) and the `Makefile`: `make build | deploy | deploy-mirror | deploy-guardian | logs | stream | cams | ssh |
-sysroot`. `make sysroot` copies the Frame's headers into `.sysroot/` so clangd on the Mac
-(`guardian/compile_flags.txt`, aarch64 target) resolves every include.
+its downloads), `models/` and `dist/` (guardian's build), lint/format config (ruff and basedpyright, Python 3.12 (the
+Frame's), in `pyproject.toml`; guardian's Rust has `guardian/rustfmt.toml`) and the `Makefile`: `make build | deploy |
+deploy-mirror | deploy-guardian | logs | stream | cams | ssh`.
 
 ## Cameras
 
@@ -91,8 +90,8 @@ switched on by hand. Every first-time step is skipped once its output exists.
 - Always (deploy): pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
 - `mirror` (deploy): ships `mirrorserver.py` and enables the `mirrorserver` user service.
 - `guardian` build (`guardian/build.sh`): on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
-  models into `models/` (`uvx`, needs uv), downloads the OpenVR SDK pieces and the font, then builds ncnn and
-  guardian in the Steam Runtime SDK (Docker Desktop; needs a few GB of memory, ncnn's arm
+  models into `models/` (`uvx`, needs uv), downloads `libopenvr_api.so`, the font and rustup, then builds ncnn and
+  guardian (cargo, tests included) in the Steam Runtime SDK (Docker Desktop; needs a few GB of memory, ncnn's arm
   gemm kernels take ~2 GB to compile) into `dist/guardian`.
 - `guardian` deploy: installs `dist/guardian` as a Steam app (devkit shortcut, Steam Linux Runtime 4), as from the
   Store; see [guardian](guardian/README.md).

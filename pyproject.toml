@@ -1,5 +1,5 @@
 [tool.ruff]
-line-length = 120  # same as .clang-format
+line-length = 120  # same as guardian/rustfmt.toml
 
 [tool.basedpyright]
 include = ["scripts", "mirror", "guardian"]

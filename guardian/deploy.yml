@@ -2,7 +2,7 @@
 # through ansible/deploy.yml (make deploy-guardian), which pairs the ssh key first.
 # Valve's devkit install: dist/guardian synced to ~/devkit-game/guardian and added to Steam as a shortcut that runs in
 # Steam Linux Runtime 4 (steamrt4-any, the tool Store apps native to Linux get). The app's own setup (driver, overlay
-# manifest) happens on its first run: Steam has no install scripts on Linux (guardian.py).
+# manifest) happens on its first run: Steam has no install scripts on Linux (src/register.rs).
 - hosts: frame
   tags: guardian
   vars:
@@ -15,14 +15,14 @@
         src: "{{ playbook_dir }}/../dist/guardian/"
         dest: "{{ dir }}/"
         delete: true
-        rsync_opts: [--exclude=/calib.txt, --exclude=/guardian.vrmanifest]
+        rsync_opts: [--exclude=/guardian.vrmanifest]
 
     # What the devkit client's upload writes: the command line, and the runtime Steam should run it in
     - name: Set the launch command and runtime
       copy:
         dest: ~/devkit-game/{{ gameid }}-{{ item.key }}.json
         content: "{{ item.value | to_json }}"
-      loop: "{{ {'argv': ['./guardian.py'], 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
+      loop: "{{ {'argv': ['./bin/guardian'], 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
 
     # devkit-utils/steam-client-create-shortcut: a devkit-1 command on Steam's pipe; Steam answers in a file
     - name: Add it to Steam (devkit shortcut)

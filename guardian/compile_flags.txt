@@ -1,8 +1,0 @@
--xc++
--std=c++17
---target=aarch64-unknown-linux-gnu
---sysroot=../.sysroot
--isystem=/usr/include/freetype2
--isystem../third_party/ncnn-install/include/ncnn
--isystem../third_party/openvr/headers
--I.
