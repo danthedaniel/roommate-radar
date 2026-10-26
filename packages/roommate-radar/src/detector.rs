@@ -180,10 +180,8 @@ fn stretch(input: &mut [u8]) {
 fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
     let t_load = now_ns();
-    let vulkan = ncnn::gpu_count() > 0;
     let model = format!("models/yolo11n-grayscale_{s}_gray.ncnn");
-    let net = ncnn::Net::load(&model, vulkan)?;
-    println!("detector: ncnn {}", if vulkan { "Vulkan GPU" } else { "CPU" });
+    let net = ncnn::Net::load(&model)?;
 
     let Some(hdr) = open_frames()? else {
         return Ok(());

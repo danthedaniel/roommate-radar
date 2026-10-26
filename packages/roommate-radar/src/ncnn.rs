@@ -39,10 +39,6 @@ unsafe extern "C" {
     fn ncnn_mat_get_data(mat: ncnn_mat_t) -> *mut c_void;
 }
 
-pub fn gpu_count() -> i32 {
-    unsafe { ncnn_get_gpu_count() }
-}
-
 /// Before exit, after every Net is gone.
 pub fn destroy_gpu_instance() {
     unsafe { ncnn_destroy_gpu_instance() }
@@ -51,12 +47,15 @@ pub fn destroy_gpu_instance() {
 pub struct Net(ncnn_net_t);
 
 impl Net {
-    /// `model`.param and `model`.bin, on the GPU if `vulkan`.
-    pub fn load(model: &str, vulkan: bool) -> Result<Net, String> {
+    /// `model`.param and `model`.bin, on the GPU; no GPU is an error, as the CPU is far too slow.
+    pub fn load(model: &str) -> Result<Net, String> {
+        if unsafe { ncnn_get_gpu_count() } == 0 {
+            return Err("ncnn: no Vulkan GPU".into());
+        }
         let net = Net(unsafe { ncnn_net_create() });
         unsafe {
             let opt = ncnn_net_get_option(net.0);
-            ncnn_option_set_use_vulkan_compute(opt, vulkan as c_int);
+            ncnn_option_set_use_vulkan_compute(opt, 1);
             ncnn_option_set_num_threads(opt, 2);
             // ~1 ms faster on the Adreno 750 (Turnip) at every size; ncnn's other Vulkan defaults measured best.
             ncnn_option_set_use_sgemm_convolution(opt, 0);
