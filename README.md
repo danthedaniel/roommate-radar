@@ -56,6 +56,8 @@ the measurements behind the defaults and what didn't work are in
   and recording what's on screen.
 - [`docs/steam-frame.md`](docs/steam-frame.md): notes on the Frame itself: access, devkit key pairing, the cameras,
   dead ends.
+- [`docs/arcturus-av1.md`](docs/arcturus-av1.md): the Arcturus Vision color passthrough add-on: modes, frame formats,
+  XRService's settings for it, the Arcturus app.
 - `scripts/`: raw camera tools (live mosaic of all four tracking cameras).
 - `third_party/ncnn`: submodule, [danthedaniel/ncnn](https://github.com/danthedaniel/ncnn) (upstream ncnn plus a GPU
   queue priority option and a few C API calls).

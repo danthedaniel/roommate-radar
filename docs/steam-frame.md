@@ -50,8 +50,15 @@ Root: `steamos` has passwordless sudo via `/etc/sudoers.d/zz-steamos-nopasswd`.
 | `/dev/video3` | og01a1b `4-0060` | `slam_left` | 1056×1024 Y8 | |
 | `/dev/video9` | og0ve10 `5-003e` | upper (L or R) | 640×480 Y8 | outward fisheye |
 | `/dev/video13` | og0ve10 `5-0060` | upper (L or R) | 640×480 Y8 | |
-| — | arcimx616 ×2 (`0-0010`, `0-001a`) | ? ("passthrough cameras") | UYVY 1920×1080 | not streaming |
+| — | arcimx616 ×2 (`0-0010`, `0-001a`) | `passthrough_right`, `passthrough_left` | Y10 2464×2464 | the color passthrough add-on; streams only when it's attached |
 | `/dev/video99` | v4l2loopback | — | 1920×1080 RGB | compositor mirror (`steamvr-v4l2cam`) |
+
+With the color passthrough add-on attached (hot-plug: XRService logs "Received passthrough camera connection event" and
+sets its cameras up again), the add-on takes VFE0/1 and the ISP: `/dev/video0`/`video3` become the arcimx616s (NV12
+2464×2464), the SLAM cameras move to `/dev/video9` (`slam_right`) and `/dev/video13` (`slam_left`) as raw GREY
+1056×1024 (packed, no UV, black level ~4 instead of ~16), and the upper cameras to `/dev/video6`/`video7`. XRService
+logs the mapping (`TrackingCameraInit: index: N. video device: ...`). `rawcam.py` assumes the layout without it.
+More on the add-on (modes, formats, XRService settings, the Arcturus app) in [arcturus-av1.md](arcturus-av1.md).
 
 XRService alternates exposures: ~8.4 ms (tracking/passthrough) and ~0.037 ms (controller LEDs).
 
