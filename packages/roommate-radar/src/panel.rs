@@ -7,10 +7,12 @@ use crate::settings::{RATES, SIZES, Settings};
 use crate::textures::Textures;
 
 pub const W: usize = 1000;
-pub const H: usize = 1140;
+pub const H: usize = 1140 + 2 * GAP as usize;
 const PAD: f32 = 48.0;
 const TOP: f32 = 190.0;
 const ROW_H: f32 = 92.0;
+const GAP: f32 = 36.0; // extra space above each section after the first
+const SECTIONS: [usize; 2] = [3, 8]; // their first rows: Detect People, Detection Resolution
 
 /// The tab's controls, one per row, top to bottom: what each shows and changes, and when it's greyed out.
 static CONTROLS: [Control; 10] = [
@@ -111,7 +113,8 @@ const TRACK_OFF: Rgb = [68, 68, 76];
 const BTN: Rgb = [52, 52, 60];
 
 fn row_cy(row: usize) -> f32 {
-    TOP + (row as f32 + 0.5) * ROW_H
+    let sections = SECTIONS.iter().filter(|&&s| row >= s).count();
+    TOP + (row as f32 + 0.5) * ROW_H + sections as f32 * GAP
 }
 
 impl Control {
@@ -153,8 +156,10 @@ impl Control {
         if hovered {
             fill_rrect(img, PAD - 20.0, cy - ROW_H / 2.0 + 4.0, wf - 2.0 * PAD + 40.0, ROW_H - 8.0, 18.0, WHITE, 0.05);
         }
+        // a line above each row but the first, stronger mid-gap between sections
         if row > 0 {
-            fill_rrect(img, PAD, cy - ROW_H / 2.0, wf - 2.0 * PAD, 1.5, 0.0, WHITE, 0.08);
+            let (h, a, y) = if SECTIONS.contains(&row) { (3.0, 0.25, GAP / 2.0) } else { (1.5, 0.08, 0.0) };
+            fill_rrect(img, PAD, cy - ROW_H / 2.0 - y - h / 2.0, wf - 2.0 * PAD, h, 0.0, WHITE, a);
         }
         let dim = (self.dimmed)(set);
         let (fg, fade) = if dim { (GREY, 0.5) } else { (WHITE, 1.0) };
@@ -284,8 +289,8 @@ impl Panel {
         if let Some(row) = self.popup {
             return CONTROLS[row].hit_popup(row, x, y, set);
         }
-        let row = ((y - TOP) / ROW_H).floor() as usize; // negative: 0, ruled out by y < TOP
-        let c = CONTROLS.get(row).filter(|c| x >= PAD && x <= W as f32 - PAD && y >= TOP && !(c.dimmed)(set))?;
+        let row = (0..CONTROLS.len()).find(|&r| (y - row_cy(r)).abs() < ROW_H / 2.0)?; // none in the gaps
+        let c = Some(&CONTROLS[row]).filter(|c| x >= PAD && x <= W as f32 - PAD && !(c.dimmed)(set))?;
         c.hit(row, x, y)
     }
 
@@ -354,6 +359,17 @@ mod tests {
 
     fn row(title: &str) -> usize {
         CONTROLS.iter().position(|r| r.title == title).unwrap()
+    }
+
+    #[test]
+    fn sections() {
+        assert!(
+            CONTROLS[SECTIONS[0]].title == "Detect People" && CONTROLS[SECTIONS[1]].title == "Detection Resolution"
+        );
+        assert_eq!(
+            Panel::default().hit(500.0, row_cy(SECTIONS[0]) - ROW_H / 2.0 - GAP / 2.0, &Settings::default()),
+            None
+        );
     }
 
     #[test]
