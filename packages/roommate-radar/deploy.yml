@@ -10,12 +10,19 @@
     dir: ~/devkit-game/{{ gameid }}
   tasks:
     # The "depot". Kept: what the app writes into its install directory (Steam leaves those alone on updates too).
+    # checksum: build.sh makes dist/ afresh, so only the contents tell what changed (driver_changed, below).
     - name: Install dist/roommate-radar to ~/devkit-game/roommate_radar
       synchronize:
         src: "{{ playbook_dir }}/../../dist/roommate-radar/"
         dest: "{{ dir }}/"
         delete: true
+        checksum: true
         rsync_opts: [--exclude=/roommate-radar.vrmanifest]
+      register: sync
+
+    # From rsync's itemized changes: a file under driver/ sent (>f...) or deleted
+    - set_fact:
+        driver_changed: "{{ sync.stdout_lines | select('search', '^<<CHANGED>>(>f\\S*|\\*deleting) +driver/') | list | length > 0 }}"
 
     # What the devkit client's upload writes: the command line, and the runtime Steam should run it in
     - name: Set the launch command and runtime
@@ -37,3 +44,30 @@
         done
         echo "Steam didn't answer (is it running?)"; exit 1
       changed_when: false
+
+    # vrserver loads the driver only when it starts. The app quits with SteamVR, and the new driver's autostart starts it
+    # again (if "Start with SteamVR" is on).
+    - name: Restart SteamVR if the driver changed
+      shell: |
+        systemctl --user is-active -q steamvr.service || { echo "not running"; exit 0; }
+        systemctl --user restart steamvr.service
+        echo restarted
+      register: steamvr
+      changed_when: steamvr.stdout == "restarted"
+      when: driver_changed
+
+    # Otherwise a running roommate-radar is still the old build: stop it (SIGTERM, it quits cleanly) and have Steam start
+    # it again, by the game id it recorded, as the driver's autostart does.
+    - name: Restart roommate-radar if it's running
+      when: not driver_changed
+      shell: |
+        pgrep -x roommate-radar >/dev/null || { echo "not running"; exit 0; }
+        pkill -x roommate-radar
+        for i in $(seq 20); do pgrep -x roommate-radar >/dev/null || break; sleep 0.5; done
+        pgrep -x roommate-radar >/dev/null && { echo "didn't quit"; exit 1; }
+        sleep 2 # for Steam to see the game exit
+        g=$(sed -n 's/^gameid=//p' ~/.config/roommate-radar.conf)
+        printf 'steam://rungameid/%s\n' "$g" > ~/.steam/steam.pipe
+        echo restarted
+      register: restart
+      changed_when: restart.stdout == "restarted"

@@ -80,7 +80,10 @@ dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard t
   `~/devkit-game/roommate_radar` (no `-` in a devkit game id), `roommate_radar-argv.json` (`./bin/roommate-radar`) and
   `roommate_radar-settings.json` (`compat_tool`
   `steamrt4-any`, the tool Steam maps Store apps native to Linux to), then `create-shortcut` sent to Steam over
-  `~/.steam/steam.pipe` (`devkit-1 steam://devkit-1/<steam.token>/create-shortcut?response=...&gameid=roommate_radar`).
+  `~/.steam/steam.pipe` (`devkit-1 steam://devkit-1/<steam.token>/create-shortcut?response=...&gameid=roommate_radar`). Then, if
+  rsync (`checksum`) changed anything under `driver/`, SteamVR is restarted (vrserver loads drivers at start; the new
+  driver's autostart brings the app back); otherwise a running roommate-radar is stopped and started again through Steam
+  (`steam://rungameid/<gameid>`).
 - What differs from a Store install: a shortcut, not an app id (its `SteamAppId` is made up by Steam), so Steam doesn't
   generate the overlay's manifest entry and roommate-radar adds its own. With a real app id and the "Launch SteamVR
   Overlay" launch option, Steam provides it (`register.rs` then only finds it).
