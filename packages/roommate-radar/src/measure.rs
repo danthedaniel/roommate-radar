@@ -55,9 +55,37 @@ fn own_arm(o: &Obj, hfov_deg: f32) -> bool {
     z > 0.0 && z < 1.2 && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
 }
 
+/// How far outside the play area's boundary detections are still kept (m).
+const PLAY_AREA_MARGIN: f32 = 1.5;
+
+/// [x, z] inside the boundary (`walls`, Vr::play_area_walls) or within PLAY_AREA_MARGIN of it; no walls: anywhere.
+fn near_play_area(walls: &[[[f32; 2]; 2]], x: f32, z: f32) -> bool {
+    let mut inside = walls.is_empty();
+    for &[[x0, z0], [x1, z1]] in walls {
+        // even-odd: walls crossing the +x ray from the point
+        if (z0 > z) != (z1 > z) && x < x0 + (z - z0) / (z1 - z0) * (x1 - x0) {
+            inside = !inside;
+        }
+        let (dx, dz) = (x1 - x0, z1 - z0);
+        let s = (((x - x0) * dx + (z - z0) * dz) / (dx * dx + dz * dz).max(1e-9)).clamp(0.0, 1.0);
+        if (x - x0 - s * dx).hypot(z - z0 - s * dz) < PLAY_AREA_MARGIN {
+            return true;
+        }
+    }
+    inside
+}
+
 /// Detections this frame that roommate-radar cares about, in the standing universe (head pose at capture): stereo (has
-/// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range.
-pub fn measurements(objs: &[Obj], head: &HmdMatrix34_t, ctrl: &[V3], set: &Settings, opts: &Options) -> Vec<Meas> {
+/// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range and near the
+/// play area (`walls`: its boundary when that setting is on, else empty).
+pub fn measurements(
+    objs: &[Obj],
+    head: &HmdMatrix34_t,
+    ctrl: &[V3],
+    walls: &[[[f32; 2]; 2]],
+    set: &Settings,
+    opts: &Options,
+) -> Vec<Meas> {
     let h = position(head);
     let m = &head.m;
     // head_from_world = R^T (p - t)
@@ -80,7 +108,7 @@ pub fn measurements(objs: &[Obj], head: &HmdMatrix34_t, ctrl: &[V3], set: &Setti
             let w = o.corners.map(|c| apply(head, c));
             let c = (w[0] + w[1] + w[2] + w[3]) * 0.25;
             let dist = (c.x - h.x).hypot(c.z - h.z);
-            if dist > set.max_dist || (o.cls == 0 && dist < 0.5) {
+            if dist > set.max_dist || (o.cls == 0 && dist < 0.5) || !near_play_area(walls, c.x, c.z) {
                 return None; // a "person" closer than 50 cm is you
             }
             // ponytail: isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
@@ -124,7 +152,7 @@ mod tests {
     }
 
     fn meas(objs: &[Obj], ctrl: &[V3], set: &Settings) -> Vec<Meas> {
-        measurements(objs, &HEAD, ctrl, set, &Options::default())
+        measurements(objs, &HEAD, ctrl, &[], set, &Options::default())
     }
 
     #[test]
@@ -158,6 +186,26 @@ mod tests {
         assert!(meas(&[low(0.8, -0.3)], &[], &set).is_empty());
         assert!(meas(&[low(0.8, 0.1)], &[], &set).len() == 1 && meas(&[low(2.0, -0.3)], &[], &set).len() == 1);
         assert!(meas(&[person(0, 0.4, 0.0)], &[], &set).is_empty(), "person closer than 50 cm dropped");
+    }
+
+    #[test]
+    fn play_area() {
+        // 2 x 2 m square around the origin; the margin reaches 1.5 m past it
+        let walls = [
+            [[-1.0, -1.0], [1.0, -1.0]],
+            [[1.0, -1.0], [1.0, 1.0]],
+            [[1.0, 1.0], [-1.0, 1.0]],
+            [[-1.0, 1.0], [-1.0, -1.0]],
+        ];
+        assert!(
+            near_play_area(&walls, 0.0, 0.0) && near_play_area(&walls, 2.4, 0.0) && near_play_area(&walls, 0.0, -2.4)
+        );
+        assert!(
+            !near_play_area(&walls, 2.6, 0.0) && !near_play_area(&walls, 2.1, 2.1) && near_play_area(&[], 9.0, 9.0)
+        );
+        let set = Settings::default();
+        let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, &[], &walls, &set, &Options::default()).len();
+        assert!(ms(2.0) == 1 && ms(2.9) == 0, "person 2 m ahead kept, 2.9 m dropped (center 1.9 m past the wall)");
     }
 
     #[test]

@@ -2,7 +2,7 @@
 
 // openvr_capi.h (OpenVR SDK v2.15.6) through bindgen 0.73, for openvr.rs: the FnTables of the interfaces roommate-radar
 // uses and the types they take. Regenerate with:
-//   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
+//   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications|ChaperoneSetup)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
 //     --default-enum-style consts --no-layout-tests --no-doc-comments --no-prepend-enum-name (and these --raw-lines) \
 //     -- -x c -target aarch64-unknown-linux-gnu -ffreestanding
 // then make Compositor_FrameTiming repr(C, packed(4)): openvr.h packs it on Linux, openvr_capi.h forgets to (openvr.rs
@@ -922,6 +922,9 @@ pub const EVRSceneApplicationState_Quitting: EVRSceneApplicationState = 2;
 pub const EVRSceneApplicationState_Running: EVRSceneApplicationState = 3;
 pub const EVRSceneApplicationState_Waiting: EVRSceneApplicationState = 4;
 pub type EVRSceneApplicationState = ::std::os::raw::c_uint;
+pub const EChaperoneConfigFile_Live: EChaperoneConfigFile = 1;
+pub const EChaperoneConfigFile_Temp: EChaperoneConfigFile = 2;
+pub type EChaperoneConfigFile = ::std::os::raw::c_uint;
 pub const EVRCompositorError_VRCompositorError_None: EVRCompositorError = 0;
 pub const EVRCompositorError_VRCompositorError_RequestFailed: EVRCompositorError = 1;
 pub const EVRCompositorError_VRCompositorError_IncompatibleVersion: EVRCompositorError = 100;
@@ -1039,6 +1042,11 @@ pub struct HmdColor_t {
     pub g: f32,
     pub b: f32,
     pub a: f32,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct HmdQuad_t {
+    pub vCorners: [HmdVector3_t; 4usize],
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
@@ -1824,6 +1832,42 @@ pub struct VR_IVRApplications_FnTable {
     >,
     pub RegisterSubprocess: ::std::option::Option<unsafe extern "C" fn(nPid: u32) -> EVRApplicationError>,
     pub GetCurrentSceneProcessId: ::std::option::Option<unsafe extern "C" fn() -> u32>,
+}
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VR_IVRChaperoneSetup_FnTable {
+    pub CommitWorkingCopy: ::std::option::Option<unsafe extern "C" fn(configFile: EChaperoneConfigFile) -> bool>,
+    pub RevertWorkingCopy: ::std::option::Option<unsafe extern "C" fn()>,
+    pub GetWorkingPlayAreaSize: ::std::option::Option<unsafe extern "C" fn(pSizeX: *mut f32, pSizeZ: *mut f32) -> bool>,
+    pub GetWorkingPlayAreaRect: ::std::option::Option<unsafe extern "C" fn(rect: *mut HmdQuad_t) -> bool>,
+    pub GetWorkingCollisionBoundsInfo:
+        ::std::option::Option<unsafe extern "C" fn(pQuadsBuffer: *mut HmdQuad_t, punQuadsCount: *mut u32) -> bool>,
+    pub GetLiveCollisionBoundsInfo:
+        ::std::option::Option<unsafe extern "C" fn(pQuadsBuffer: *mut HmdQuad_t, punQuadsCount: *mut u32) -> bool>,
+    pub GetWorkingSeatedZeroPoseToRawTrackingPose:
+        ::std::option::Option<unsafe extern "C" fn(pmatSeatedZeroPoseToRawTrackingPose: *mut HmdMatrix34_t) -> bool>,
+    pub GetWorkingStandingZeroPoseToRawTrackingPose:
+        ::std::option::Option<unsafe extern "C" fn(pmatStandingZeroPoseToRawTrackingPose: *mut HmdMatrix34_t) -> bool>,
+    pub SetWorkingPlayAreaSize: ::std::option::Option<unsafe extern "C" fn(sizeX: f32, sizeZ: f32)>,
+    pub SetWorkingCollisionBoundsInfo:
+        ::std::option::Option<unsafe extern "C" fn(pQuadsBuffer: *mut HmdQuad_t, unQuadsCount: u32)>,
+    pub SetWorkingPerimeter:
+        ::std::option::Option<unsafe extern "C" fn(pPointBuffer: *mut HmdVector2_t, unPointCount: u32)>,
+    pub SetWorkingSeatedZeroPoseToRawTrackingPose:
+        ::std::option::Option<unsafe extern "C" fn(pMatSeatedZeroPoseToRawTrackingPose: *mut HmdMatrix34_t)>,
+    pub SetWorkingStandingZeroPoseToRawTrackingPose:
+        ::std::option::Option<unsafe extern "C" fn(pMatStandingZeroPoseToRawTrackingPose: *mut HmdMatrix34_t)>,
+    pub ReloadFromDisk: ::std::option::Option<unsafe extern "C" fn(configFile: EChaperoneConfigFile)>,
+    pub GetLiveSeatedZeroPoseToRawTrackingPose:
+        ::std::option::Option<unsafe extern "C" fn(pmatSeatedZeroPoseToRawTrackingPose: *mut HmdMatrix34_t) -> bool>,
+    pub ExportLiveToBuffer: ::std::option::Option<
+        unsafe extern "C" fn(pBuffer: *mut ::std::os::raw::c_char, pnBufferLength: *mut u32) -> bool,
+    >,
+    pub ImportFromBufferToWorking:
+        ::std::option::Option<unsafe extern "C" fn(pBuffer: *mut ::std::os::raw::c_char, nImportFlags: u32) -> bool>,
+    pub ShowWorkingSetPreview: ::std::option::Option<unsafe extern "C" fn()>,
+    pub HideWorkingSetPreview: ::std::option::Option<unsafe extern "C" fn()>,
+    pub RoomSetupStarting: ::std::option::Option<unsafe extern "C" fn()>,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]

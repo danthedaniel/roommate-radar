@@ -11,6 +11,7 @@ pub struct Settings {
     pub pets: bool,            // cats and dogs
     pub hands: bool,           // ignore boxes around a controller: your hands (measure.rs)
     pub games_only: bool,      // pause while no game is running (SteamVR home, dashboard)
+    pub play_area: bool,       // ignore detections outside the play area's boundary (measure.rs)
     pub max_dist: f32,         // ignore detections farther than this (m, horizontal)
     pub size: i32,             // YOLO per-view size, one of SIZES
     pub hz: f32,               // YOLO runs per second, one of RATES
@@ -27,6 +28,7 @@ impl Default for Settings {
             pets: true,
             hands: true,
             games_only: false,
+            play_area: false,
             max_dist: 3.0,
             size: 320,
             hz: 4.0,
@@ -53,6 +55,7 @@ impl Settings {
                 "pets" => s.pets = f != 0.0,
                 "hands" => s.hands = f != 0.0,
                 "games_only" => s.games_only = f != 0.0,
+                "play_area" => s.play_area = f != 0.0,
                 "autostart" => s.autostart = f != 0.0,
                 "gameid" => s.gameid = v.parse().ok(),
                 "max_dist" => s.max_dist = f,
@@ -72,12 +75,13 @@ impl Settings {
         let _ = std::fs::write(
             path,
             format!(
-                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nmax_dist={:.1}\nsize={}\nhz={}\nautostart={}\n{}",
+                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nplay_area={}\nmax_dist={:.1}\nsize={}\nhz={}\nautostart={}\n{}",
                 b(self.enabled),
                 b(self.people),
                 b(self.pets),
                 b(self.hands),
                 b(self.games_only),
+                b(self.play_area),
                 self.max_dist,
                 self.size,
                 self.hz,
@@ -97,6 +101,7 @@ mod tests {
         let path = std::env::temp_dir().join(format!("roommate-radar-test-{}.conf", std::process::id()));
         let s = Settings {
             people: false,
+            play_area: true,
             max_dist: 4.5,
             size: 640,
             hz: 16.0,
@@ -108,7 +113,7 @@ mod tests {
         s.save();
         let l = Settings::load(path.clone());
         std::fs::remove_file(path).unwrap();
-        assert!(!l.people && l.pets && l.max_dist == 4.5 && l.size == 640 && l.hz == 16.0);
+        assert!(!l.people && l.pets && l.play_area && l.max_dist == 4.5 && l.size == 640 && l.hz == 16.0);
         assert!(!l.autostart && l.gameid == Some(16375998297183092736), "a game id doesn't fit in an f32");
     }
 }

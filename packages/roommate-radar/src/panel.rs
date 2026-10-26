@@ -7,36 +7,38 @@ use crate::settings::{RATES, SIZES, Settings};
 use crate::textures::Textures;
 
 pub const W: usize = 1000;
-pub const H: usize = 1048;
+pub const H: usize = 1140;
 const PAD: f32 = 48.0;
 const TOP: f32 = 190.0;
 const ROW_H: f32 = 92.0;
 
-// Controls: one row per switch, then the dropdown rows and the range row
+// Controls: one row per switch, then the range row and the dropdown rows
 const ENABLED: usize = 0;
 const AUTO_LAUNCH: usize = 1; // Settings::autostart
 const GAMES_ONLY: usize = 2;
 const PEOPLE: usize = 3;
 const PETS: usize = 4;
 const HANDS: usize = 5;
-const SIZE: usize = 6; // dropdowns: open their popup
-const RATE: usize = 7;
-const RANGE_MINUS: usize = 8;
-const RANGE_PLUS: usize = 9;
-const ITEM: usize = 10; // the open popup's items: ITEM + choice index
-const TOGGLES: usize = SIZE;
-const RANGE_ROW: usize = RATE + 1;
+const PLAY_AREA: usize = 6;
+const RANGE_ROW: usize = 7;
+const SIZE: usize = 8; // dropdowns: open their popup
+const RATE: usize = 9;
+const RANGE_MINUS: usize = 10;
+const RANGE_PLUS: usize = 11;
+const ITEM: usize = 12; // the open popup's items: ITEM + choice index
+const TOGGLES: usize = RANGE_ROW;
 
-const ROWS: [&str; 9] = [
+const ROWS: [&str; 10] = [
     "Enabled",
     "Start with SteamVR",
     "Only in Games",
     "Detect People",
     "Detect Cats and Dogs",
     "Ignore My Hands",
+    "Only Near Play Area",
+    "Range",
     "Detection Resolution",
     "Detection Rate",
-    "Range",
 ];
 const SIZE_LABELS: [&str; 3] = ["Low (320px)", "Medium (480px)", "High (640px)"];
 const RATE_LABELS: [&str; 4] = ["2Hz", "4Hz", "8Hz", "16Hz"];
@@ -135,11 +137,11 @@ impl Panel {
             return inside.then(|| ITEM + i as usize);
         }
         let row = ((y - TOP) / ROW_H).floor();
-        if x < PAD || x > W as f32 - PAD || row < 0.0 || row as usize > RANGE_ROW || self.dimmed(row as usize, set) {
+        if x < PAD || x > W as f32 - PAD || row < 0.0 || row as usize > RATE || self.dimmed(row as usize, set) {
             return None; // greyed-out rows don't hover or press
         }
         let row = row as usize;
-        if row < RANGE_ROW {
+        if row != RANGE_ROW {
             return Some(row);
         }
         let near = |cx: f32| (x - cx).hypot(y - row_cy(RANGE_ROW)) < BTN_R + 12.0;
@@ -174,6 +176,7 @@ impl Panel {
             Some(PEOPLE) => set.people = !set.people,
             Some(PETS) => set.pets = !set.pets,
             Some(HANDS) => set.hands = !set.hands,
+            Some(PLAY_AREA) => set.play_area = !set.play_area,
             Some(GAMES_ONLY) => set.games_only = !set.games_only,
             Some(RANGE_MINUS) => set.max_dist = (set.max_dist - 0.5).max(1.0),
             Some(RANGE_PLUS) => set.max_dist = (set.max_dist + 0.5).min(8.0),
@@ -226,8 +229,8 @@ impl Panel {
         fill_rrect(&mut img, 0.0, 0.0, wf, hf, 32.0, BG, 0.94);
         img.text(PAD as i32, 100, "Roommate Radar", WHITE, 56.0);
         img.text(PAD as i32, 150, status, GREY, 30.0);
-        let on = [set.enabled, set.autostart, set.games_only, set.people, set.pets, set.hands];
-        for row in 0..=RANGE_ROW {
+        let on = [set.enabled, set.autostart, set.games_only, set.people, set.pets, set.hands, set.play_area];
+        for row in 0..=RATE {
             let cy = row_cy(row);
             if hover == Some(row) {
                 fill_rrect(
@@ -246,10 +249,15 @@ impl Panel {
             }
             let dim = self.dimmed(row, set);
             let (fg, fade) = if dim { (GREY, 0.5) } else { (WHITE, 1.0) };
-            if row == HANDS {
+            let detail = match row {
+                HANDS => Some("Works best when holding controllers"),
+                PLAY_AREA => Some("Inside your boundary or within 1.5 m of it"),
+                _ => None,
+            };
+            if let Some(detail) = detail {
                 // title nudged up, detail line below it
                 img.text(PAD as i32, (cy + 1.0) as i32, ROWS[row], fg, 36.0);
-                img.text(PAD as i32, (cy + 33.0) as i32, "Works best when holding controllers", GREY, 24.0);
+                img.text(PAD as i32, (cy + 33.0) as i32, detail, GREY, 24.0);
             } else {
                 img.text(PAD as i32, (cy + 13.0) as i32, ROWS[row], fg, 36.0);
             }
@@ -260,7 +268,7 @@ impl Panel {
                 fill_rrect(&mut img, x0, y0, TOGGLE_W, TOGGLE_H, TOGGLE_H / 2.0, track, fade);
                 let knob = if on[row] { x0 + TOGGLE_W - TOGGLE_H / 2.0 } else { x0 + TOGGLE_H / 2.0 };
                 fill_circle(&mut img, knob, cy, TOGGLE_H / 2.0 - 5.0, WHITE, if dim { 0.6 } else { 1.0 });
-            } else if row < RANGE_ROW {
+            } else if row > RANGE_ROW {
                 // dropdown: current choice and a chevron
                 let a = if hover == Some(row) { 1.0 } else { 0.8 } * fade;
                 fill_rrect(&mut img, DROP_X0, cy - DROP_H / 2.0, DROP_W, DROP_H, 14.0, BTN, a);

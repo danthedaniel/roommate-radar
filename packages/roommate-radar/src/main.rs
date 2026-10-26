@@ -247,7 +247,9 @@ fn run() -> i32 {
             let ago = -seconds(now, d.t_capture_ns);
             lag_s += (-ago + period_s() - lag_s) * 0.1;
             if let (head, true) = head_pose(ago) {
-                let ms = measure::measurements(&d.objs, &head, &controllers(ago), &set, &opts);
+                // ponytail: boundary fetched per detection (cheap IPC at <= 16 Hz); cache it on ChaperoneDataHasChanged if not
+                let walls = if set.play_area { vr().play_area_walls() } else { vec![] };
+                let ms = measure::measurements(&d.objs, &head, &controllers(ago), &walls, &set, &opts);
                 tracker.update(&ms, d.t_capture_ns as f64 / 1e9);
             }
         }

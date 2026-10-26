@@ -20,6 +20,7 @@ const _: () = assert!(size_of::<Compositor_CumulativeStats>() == 112);
 const _: () = assert!(size_of::<Compositor_FrameTiming>() == 188);
 const _: () = assert!(size_of::<VRVulkanTextureData_t>() == 64);
 const _: () = assert!(size_of::<Texture_t>() == 16);
+const _: () = assert!(size_of::<HmdQuad_t>() == 48);
 
 pub const MAX_TRACKED_DEVICES: usize = 64; // k_unMaxTrackedDeviceCount
 const STANDING: ETrackingUniverseOrigin = ETrackingUniverseOrigin_TrackingUniverseStanding;
@@ -29,6 +30,7 @@ pub struct Vr {
     apps: &'static VR_IVRApplications_FnTable,
     overlay: Option<&'static VR_IVROverlay_FnTable>, // not for utility apps (--register)
     compositor: Option<&'static VR_IVRCompositor_FnTable>,
+    chaperone: Option<&'static VR_IVRChaperoneSetup_FnTable>,
 }
 
 static VR: OnceLock<Vr> = OnceLock::new();
@@ -55,6 +57,7 @@ pub fn init(ty: EVRApplicationType) -> Result<(), String> {
         apps: table("IVRApplications_008").ok_or("no IVRApplications_008")?,
         overlay: table("IVROverlay_028"),
         compositor: table("IVRCompositor_029"),
+        chaperone: table("IVRChaperoneSetup_006"),
     };
     let _ = VR.set(vr);
     Ok(())
@@ -115,6 +118,25 @@ impl Vr {
         let mut dev = 0;
         call!(self.system, GetOutputDevice, &mut dev, ETextureType_TextureType_Vulkan, instance as *mut VkInstance_T);
         dev
+    }
+
+    // IVRChaperoneSetup
+
+    /// The play area's boundary (standing universe) as its walls' ends on the floor, [x, z]; empty if there's none.
+    pub fn play_area_walls(&self) -> Vec<[[f32; 2]; 2]> {
+        let Some(t) = self.chaperone else {
+            return vec![];
+        };
+        let mut n = 0;
+        call!(t, GetLiveCollisionBoundsInfo, std::ptr::null_mut(), &mut n); // just the count
+        let mut quads: Vec<HmdQuad_t> = vec![unsafe { std::mem::zeroed() }; n as usize];
+        if !call!(t, GetLiveCollisionBoundsInfo, quads.as_mut_ptr(), &mut n) {
+            return vec![];
+        }
+        quads.truncate(n as usize);
+        // a wall is an upright quad: opposite corners 0 and 2 are its two ends, whichever way it's wound
+        let xz = |p: &HmdVector3_t| [p.v[0], p.v[2]];
+        quads.iter().map(|q| [xz(&q.vCorners[0]), xz(&q.vCorners[2])]).collect()
     }
 
     // IVRApplications
