@@ -50,11 +50,11 @@ pub struct Textures(Option<Vulkan>);
 
 impl Textures {
     pub fn new() -> Textures {
-        Textures(unsafe { Vulkan::new() }.ok())
-    }
-
-    pub fn vulkan(&self) -> bool {
-        self.0.is_some()
+        let v = unsafe { Vulkan::new() };
+        if let Err(e) = &v {
+            eprintln!("roommate-radar: Vulkan textures: {e}; using SetOverlayRaw");
+        }
+        Textures(v.ok())
     }
 
     /// Shows the pixels on overlay `ov`.

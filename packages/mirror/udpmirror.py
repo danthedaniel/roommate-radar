@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Watch the headset view streamed by mirrorserver.py (a user service on the Frame, see deploy.yml) over UDP.
-Usage: packages/mirror/udpmirror.py [host] [port]             -> plays in ffplay
-       packages/mirror/udpmirror.py [host] [port] > out.ts    -> saves the H.264 MPEG-TS stream
-       packages/mirror/udpmirror.py --record out.mp4          -> plays and also saves the stream (no re-encode) to an MP4
+Usage: packages/mirror/udpmirror.py [host]                 -> plays in ffplay
+       packages/mirror/udpmirror.py [host] > out.ts        -> saves the H.264 MPEG-TS stream
+       packages/mirror/udpmirror.py --record out.mp4       -> plays and also saves the stream (no re-encode) to an MP4
 """
 
 import argparse
@@ -17,16 +17,14 @@ from collections.abc import Callable
 
 class Args(argparse.Namespace):
     host: str = ""
-    port: int = 0
     record: str | None = None
 
 
 ap = argparse.ArgumentParser()
 ap.add_argument("host", nargs="?", default=os.environ.get("FRAME_HOST", "frame.local"))
-ap.add_argument("port", nargs="?", type=int, default=5600)
 ap.add_argument("--record", metavar="MP4", help="also copy the H.264 stream into this MP4 file")
 args = ap.parse_args(namespace=Args())
-host, port = args.host, args.port
+host, port = args.host, 5600  # mirrorserver.py's
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 8 << 20)  # an 8 Mbit/s keyframe arrives as one burst
 

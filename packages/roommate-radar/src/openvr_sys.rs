@@ -5,8 +5,6 @@
 //   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications|ChaperoneSetup)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
 //     --default-enum-style consts --no-layout-tests --no-doc-comments --no-prepend-enum-name (and these --raw-lines) \
 //     -- -x c -target aarch64-unknown-linux-gnu -ffreestanding
-// then make Compositor_FrameTiming repr(C, packed(4)): openvr.h packs it on Linux, openvr_capi.h forgets to (openvr.rs
-// checks the sizes).
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code)]
 
 pub type PropertyContainerHandle_t = u64;
@@ -1321,7 +1319,7 @@ pub struct VRControllerState_t {
     pub ulButtonTouched: u64,
     pub rAxis: [VRControllerAxis_t; 5usize],
 }
-#[repr(C, packed(4))]
+#[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct Compositor_FrameTiming {
     pub m_nSize: u32,

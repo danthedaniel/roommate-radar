@@ -4,13 +4,13 @@
 //! there is always a segment to be in.
 use std::collections::VecDeque;
 
-use crate::detector::{COCO, Options};
+use crate::detector::duplicate;
 use crate::draw;
-use crate::measure::position;
+use crate::measure::{name, position};
 use crate::openvr::{HmdMatrix34_t, VROverlayHandle_t, vr};
 use crate::stereo::Det;
 use crate::textures::Textures;
-use crate::tracker::{Sample, Tracker};
+use crate::tracker::{MAX_AGE, MIN_HITS, Sample, Tracker};
 use crate::v3::{V3, v3};
 
 const MAX: usize = 8; // overlays of each kind
@@ -99,7 +99,6 @@ impl Boxes {
         now: u64,
         t_play: f64,
         textures: &mut Textures,
-        opts: &Options,
     ) -> usize {
         let h = position(head);
         let mut log = String::new(); // each shown box relative to the head
@@ -111,13 +110,13 @@ impl Boxes {
         let mut n = 0;
         for t in order {
             // Confirmed and matched recently (the tracker drops stale tracks only when the next detections come).
-            if !t.confirmed || now as f64 / 1e9 - t.last_seen > tracker.prm.max_age as f64 || n == MAX {
+            if t.hits < MIN_HITS || now as f64 / 1e9 - t.last_seen > MAX_AGE || n == MAX {
                 continue;
             }
             let p = spline_at(&t.history, t_play).v;
             let (c, w, ht) = (v3(p[0], p[1], p[2]), p[3].max(0.05), p[4].max(0.05));
             let a = angular_box(c, w, ht, h);
-            if drawn.iter().any(|b| opts.duplicate(&a, b)) {
+            if drawn.iter().any(|b| duplicate(&a, b)) {
                 continue;
             }
             drawn.push(a);
@@ -125,7 +124,7 @@ impl Boxes {
             let (vx, vz, fx, fz) = (c.x - h.x, c.z - h.z, -head.m[0][2], -head.m[2][2]);
             log += &format!(
                 " | {} {:.0}% {:.1}m {:+.0}deg {:+.1}m",
-                COCO[t.cls],
+                name(t.cls),
                 t.score * 100.0,
                 vx.hypot(vz),
                 (fx * vz - fz * vx).atan2(fx * vx + fz * vz).to_degrees(),
@@ -144,9 +143,9 @@ impl Boxes {
             vr().set_transform(self.outlines[n], &m);
 
             let pct = (t.score * 100.0).round() as i32;
-            let text = format!("{} {pct}", COCO[t.cls]);
+            let text = format!("{} {pct}", name(t.cls));
             if self.label_text[n] != text {
-                let img = draw::label(COCO[t.cls], pct, t.cls);
+                let img = draw::label(name(t.cls), pct, t.cls);
                 textures.set(self.labels[n], &img);
                 vr().set_width(self.labels[n], LABEL_H * img.w as f32 / img.h as f32);
                 self.label_text[n] = text;
@@ -199,9 +198,9 @@ mod tests {
 
     #[test]
     fn one_person_at_two_depths_is_a_duplicate() {
-        let (opts, head) = (Options::default(), v3(0.0, 1.6, 0.0));
+        let head = v3(0.0, 1.6, 0.0);
         let a = angular_box(v3(0.0, 1.2, -2.0), 0.5, 1.6, head);
-        assert!(opts.duplicate(&a, &angular_box(v3(0.0, 1.2, -2.5), 0.5, 1.6, head)));
-        assert!(!opts.duplicate(&a, &angular_box(v3(0.8, 1.2, -2.0), 0.5, 1.6, head)), "two side by side aren't");
+        assert!(duplicate(&a, &angular_box(v3(0.0, 1.2, -2.5), 0.5, 1.6, head)));
+        assert!(!duplicate(&a, &angular_box(v3(0.8, 1.2, -2.0), 0.5, 1.6, head)), "two side by side aren't");
     }
 }

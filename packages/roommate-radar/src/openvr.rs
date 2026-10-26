@@ -16,8 +16,6 @@ unsafe extern "C" {
 // The structs passed below, against openvr.h's layout (the SDK's g++, aarch64).
 const _: () = assert!(size_of::<VREvent_t>() == 60);
 const _: () = assert!(size_of::<TrackedDevicePose_t>() == 80);
-const _: () = assert!(size_of::<Compositor_CumulativeStats>() == 112);
-const _: () = assert!(size_of::<Compositor_FrameTiming>() == 188);
 const _: () = assert!(size_of::<VRVulkanTextureData_t>() == 64);
 const _: () = assert!(size_of::<Texture_t>() == 16);
 const _: () = assert!(size_of::<HmdQuad_t>() == 48);
@@ -261,17 +259,5 @@ impl Vr {
         }
         let s = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
         s.split(' ').filter(|e| !e.is_empty()).map(c).collect()
-    }
-
-    /// The running VR app's stats, and its last frames' timings into `ft` (the count filled).
-    pub fn frame_stats(&self, ft: &mut [Compositor_FrameTiming]) -> Option<(Compositor_CumulativeStats, usize)> {
-        let cm = self.compositor?;
-        let mut st: Compositor_CumulativeStats = unsafe { std::mem::zeroed() };
-        call!(cm, GetCumulativeStats, &mut st, size_of::<Compositor_CumulativeStats>() as u32);
-        for f in ft.iter_mut() {
-            f.m_nSize = size_of::<Compositor_FrameTiming>() as u32;
-        }
-        let n = call!(cm, GetFrameTimings, ft.as_mut_ptr(), ft.len() as u32);
-        Some((st, n as usize))
     }
 }

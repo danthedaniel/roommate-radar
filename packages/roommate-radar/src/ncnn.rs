@@ -1,13 +1,10 @@
 //! ncnn through its C API (c_api.h; third_party/ncnn adds the gpu calls and the winograd63 option).
+#![allow(non_camel_case_types)]
 use std::ffi::{CString, c_char, c_int, c_void};
 
-#[allow(non_camel_case_types)]
 type ncnn_net_t = *mut c_void;
-#[allow(non_camel_case_types)]
 type ncnn_option_t = *mut c_void;
-#[allow(non_camel_case_types)]
 type ncnn_extractor_t = *mut c_void;
-#[allow(non_camel_case_types)]
 type ncnn_mat_t = *mut c_void;
 
 const PIXEL_GRAY: c_int = 3; // ncnn::Mat::PIXEL_GRAY

@@ -5,7 +5,7 @@
 //!   2. match tracks to confident detections (Hungarian, cost = 3D center distance, gated),
 //!   3. match the tracks left over to low-confidence detections (keeps a track through a weak frame),
 //!   4. unmatched confident detections start tentative tracks; tentative tracks that miss are dropped, confirmed
-//!      ones after max_age without a match.
+//!      ones after MAX_AGE without a match.
 //!
 //! Each track also keeps its last few matched detections (history) for drawing, with w, h and the distance from the
 //! eye alpha-smoothed; the filter's predictions are only used for matching.
@@ -20,36 +20,16 @@ pub struct Meas {
     pub eye: [f32; 3], // head position at capture: distance is smoothed along the ray from it
 }
 
-#[derive(Clone, Debug)]
-pub struct Params {
-    pub high: f32,     // detections at least this confident can start tracks (step 2); the rest only extend (3)
-    pub gate: f32,     // max 3D distance (m) between a track's prediction and a detection to match them
-    pub max_age: f32,  // drop a track this long (s) after its last match
-    pub min_hits: u32, // matches before a track is confirmed (shown)
-    pub accel: f32,    // process noise: std dev of a person's acceleration (m/s^2)
-    pub size_rate: f32, // process noise for box size (m/s^2 equivalent)
-    pub size_sigma: f32, // box size measurement std dev (m)
-    pub history: usize, // matched detections kept per track
-    pub size_alpha: f32, // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
-    pub dist_alpha: f32, // same for the distance from the eye (stereo depth); the bearing stays raw
-}
-
-impl Default for Params {
-    fn default() -> Params {
-        Params {
-            high: 0.5,
-            gate: 0.7,
-            max_age: 1.0,
-            min_hits: 2,
-            accel: 2.0,
-            size_rate: 0.3,
-            size_sigma: 0.1,
-            history: 4,
-            size_alpha: 0.2,
-            dist_alpha: 0.4,
-        }
-    }
-}
+const HIGH: f32 = 0.5; // detections at least this confident can start tracks (step 2); the rest only extend (3)
+const GATE: f32 = 0.7; // max 3D distance (m) between a track's prediction and a detection to match them
+pub const MAX_AGE: f64 = 1.0; // drop a track this long (s) after its last match
+pub const MIN_HITS: u32 = 2; // matches before a track is confirmed (shown)
+const ACCEL: f32 = 2.0; // process noise: std dev of a person's acceleration (m/s^2)
+const SIZE_RATE: f32 = 0.3; // process noise for box size (m/s^2 equivalent)
+const SIZE_SIGMA: f32 = 0.1; // box size measurement std dev (m)
+const HISTORY: usize = 4; // matched detections kept per track
+const SIZE_ALPHA: f32 = 0.2; // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
+const DIST_ALPHA: f32 = 0.4; // same for the distance from the eye (stereo depth); the bearing stays raw
 
 /// One axis: position p, velocity v, covariance pc.
 #[derive(Clone, Copy, Debug, Default)]
@@ -103,8 +83,7 @@ pub struct Track {
     pub hits: u32,
     pub cls: usize,
     pub score: f32,
-    pub confirmed: bool,           // reached min_hits; stays set while the track lives
-    pub history: VecDeque<Sample>, // last prm.history matched detections, oldest first
+    pub history: VecDeque<Sample>, // last HISTORY matched detections, oldest first
 }
 
 /// Minimum-cost assignment of rows to columns (Hungarian, O(n^2 m)); match[row] = column. Pairs costing more than
@@ -183,7 +162,6 @@ pub fn assign(cost: &[Vec<f32>], gate: f32) -> Vec<Option<usize>> {
 
 #[derive(Default)]
 pub struct Tracker {
-    pub prm: Params,
     pub tracks: Vec<Track>,
 }
 
@@ -193,11 +171,11 @@ impl Tracker {
         for tr in &mut self.tracks {
             let dt = (t - tr.t).max(0.0) as f32;
             for (k, ax) in tr.axis.iter_mut().enumerate() {
-                ax.predict(dt, if k < 3 { self.prm.accel } else { self.prm.size_rate });
+                ax.predict(dt, if k < 3 { ACCEL } else { SIZE_RATE });
             }
             tr.t = tr.t.max(t);
         }
-        let (high, low): (Vec<usize>, Vec<usize>) = (0..dets.len()).partition(|&i| dets[i].score >= self.prm.high);
+        let (high, low): (Vec<usize>, Vec<usize>) = (0..dets.len()).partition(|&i| dets[i].score >= HIGH);
 
         let mut matched = vec![false; self.tracks.len()];
         let unused_high = self.match_dets(dets, &high, &mut matched, t);
@@ -206,24 +184,22 @@ impl Tracker {
             let d = &dets[i];
             let mut tr = Track {
                 axis: std::array::from_fn(|k| {
-                    Axis::new(d.v[k], if k < 3 { d.sigma } else { self.prm.size_sigma }, if k < 3 { 1.0 } else { 0.1 })
+                    Axis::new(d.v[k], if k < 3 { d.sigma } else { SIZE_SIGMA }, if k < 3 { 1.0 } else { 0.1 })
                 }),
                 t,
                 last_seen: t,
                 hits: 1,
                 cls: d.cls,
                 score: d.score,
-                confirmed: self.prm.min_hits <= 1,
                 history: VecDeque::new(),
             };
-            remember(&self.prm, &mut tr, d, t);
+            remember(&mut tr, d, t);
             self.tracks.push(tr);
             matched.push(true);
         }
-        let max_age = self.prm.max_age as f64;
         let mut i = 0;
         self.tracks.retain(|tr| {
-            let keep = (tr.confirmed || matched[i]) && t - tr.last_seen <= max_age;
+            let keep = (tr.hits >= MIN_HITS || matched[i]) && t - tr.last_seen <= MAX_AGE;
             i += 1;
             keep
         });
@@ -239,7 +215,7 @@ impl Tracker {
                 which.iter().map(|&c| (0..3).map(|k| (a[k].p - dets[c].v[k]).powi(2)).sum::<f32>().sqrt()).collect()
             })
             .collect();
-        let m = assign(&cost, self.prm.gate);
+        let m = assign(&cost, GATE);
         let mut used = vec![false; which.len()];
         for (r, col) in m.into_iter().enumerate() {
             let Some(col) = col else {
@@ -248,14 +224,11 @@ impl Tracker {
             let d = &dets[which[col]];
             let tr = &mut self.tracks[rows[r]];
             for k in 0..5 {
-                tr.axis[k].update(d.v[k], if k < 3 { d.sigma } else { self.prm.size_sigma });
+                tr.axis[k].update(d.v[k], if k < 3 { d.sigma } else { SIZE_SIGMA });
             }
             (tr.last_seen, tr.cls, tr.score) = (t, d.cls, d.score);
-            remember(&self.prm, tr, d, t);
+            remember(tr, d, t);
             tr.hits += 1;
-            if tr.hits >= self.prm.min_hits {
-                tr.confirmed = true;
-            }
             matched[rows[r]] = true;
             used[col] = true;
         }
@@ -264,17 +237,17 @@ impl Tracker {
 }
 
 /// Adds detection d (time t) to the track's history.
-fn remember(prm: &Params, tr: &mut Track, d: &Meas, t: f64) {
+fn remember(tr: &mut Track, d: &Meas, t: f64) {
     let mut s = Sample { t, v: d.v };
     if let Some(prev) = tr.history.back() {
         for c in 3..5 {
-            s.v[c] = prev.v[c] + prm.size_alpha * (s.v[c] - prev.v[c]);
+            s.v[c] = prev.v[c] + SIZE_ALPHA * (s.v[c] - prev.v[c]);
         }
         // Previous distance measured from this eye, so the head moving isn't smoothed away.
         let dist = |v: &[f32; 5]| (0..3).map(|c| (v[c] - d.eye[c]).powi(2)).sum::<f32>().sqrt();
         let (r, rp) = (dist(&s.v), dist(&prev.v));
         if r > 0.0 {
-            let k = (rp + prm.dist_alpha * (r - rp)) / r;
+            let k = (rp + DIST_ALPHA * (r - rp)) / r;
             for c in 0..3 {
                 s.v[c] = d.eye[c] + k * (s.v[c] - d.eye[c]);
             }
@@ -283,7 +256,7 @@ fn remember(prm: &Params, tr: &mut Track, d: &Meas, t: f64) {
     if tr.history.back().is_none_or(|b| t > b.t) {
         tr.history.push_back(s);
     }
-    while tr.history.len() > prm.history {
+    while tr.history.len() > HISTORY {
         tr.history.pop_front();
     }
 }
@@ -327,10 +300,10 @@ mod tests {
             let t = i as f64 * 0.25;
             trk.update(&[meas([t as f32 + noise(), 1.0, -2.0 + noise(), 0.5, 1.7], 0.8)], t);
             if i == 0 {
-                assert!(trk.tracks.len() == 1 && !trk.tracks[0].confirmed, "new track is tentative");
+                assert!(trk.tracks.len() == 1 && trk.tracks[0].hits < MIN_HITS, "new track is tentative");
             }
             if i == 1 {
-                assert!(trk.tracks.len() == 1 && trk.tracks[0].confirmed, "second hit confirms it");
+                assert!(trk.tracks.len() == 1 && trk.tracks[0].hits >= MIN_HITS, "second hit confirms it");
             }
         }
         let tr = &trk.tracks[0];
@@ -343,16 +316,16 @@ mod tests {
 
     #[test]
     fn size_and_distance_alpha_smoothed() {
-        // A 20 cm jump in height moves the stored height by size_alpha of it.
+        // A 20 cm jump in height moves the stored height by SIZE_ALPHA of it.
         let mut sz = Tracker::default();
         sz.update(&[meas([0.0, 1.0, -2.0, 0.5, 1.7], 0.8)], 0.0);
         sz.update(&[meas([0.0, 1.0, -2.0, 0.5, 1.9], 0.8)], 0.25);
         let last = *sz.tracks[0].history.back().unwrap();
-        assert!((last.v[4] - (1.7 + sz.prm.size_alpha * 0.2)).abs() < 1e-5 && last.v[3] == 0.5);
-        // Distance too, along the ray from the eye: 2 m then 2.5 m straight ahead stores 2 + dist_alpha * 0.5.
+        assert!((last.v[4] - (1.7 + SIZE_ALPHA * 0.2)).abs() < 1e-5 && last.v[3] == 0.5);
+        // Distance too, along the ray from the eye: 2 m then 2.5 m straight ahead stores 2 + DIST_ALPHA * 0.5.
         sz.update(&[Meas { eye: [0.0, 1.0, 0.0], ..meas([0.0, 1.0, -2.5, 0.5, 1.7], 0.8) }], 0.5);
         let last = *sz.tracks[0].history.back().unwrap();
-        assert!((last.v[2] + 2.0 + sz.prm.dist_alpha * 0.5).abs() < 1e-5 && (last.v[1] - 1.0).abs() < 1e-5);
+        assert!((last.v[2] + 2.0 + DIST_ALPHA * 0.5).abs() < 1e-5 && (last.v[1] - 1.0).abs() < 1e-5);
     }
 
     #[test]

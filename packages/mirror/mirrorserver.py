@@ -1,7 +1,7 @@
-"""Serve the headset view (SteamVR's /dev/video99 compositor mirror) as H.264 in MPEG-TS over UDP.
+"""Serve the headset view (SteamVR's /dev/video99 compositor mirror) as H.264 in MPEG-TS over UDP 5600.
 
 Clients send any datagram to the port at least every few seconds (see udpmirror.py) and get the stream back
-from it. ffmpeg only runs while someone is watching. Runs as the mirrorserver user service (deploy.yml). Usage: mirrorserver.py [port]
+from it. ffmpeg only runs while someone is watching. Runs as the mirrorserver user service (deploy.yml).
 """
 
 import os
@@ -12,7 +12,7 @@ import subprocess
 import sys
 import time
 
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 5600
+PORT = 5600
 TIMEOUT = 3  # s without a keepalive before a client is dropped
 STALL = 5  # s without output before ffmpeg is restarted: it hangs, not exits, when v4l2cam stops (~1 fps when idle)
 PKT = 7 * 188  # 7 TS packets per datagram, the usual MPEG-TS-over-UDP size

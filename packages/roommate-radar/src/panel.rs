@@ -49,7 +49,7 @@ static CONTROLS: [Control; 10] = [
         dimmed: NEEDS_ENABLED,
         kind: Kind::Choice {
             labels: &["Low (320px)", "Medium (480px)", "High (640px)"],
-            get: |s| SIZES.iter().position(|&x| x == s.size).unwrap_or(0), // 0 for a --size that isn't a choice
+            get: |s| SIZES.iter().position(|&x| x == s.size).unwrap_or(0),
             pick: |s, i| {
                 s.size = SIZES[i];
                 detector::SIZE.store(s.size, std::sync::atomic::Ordering::Relaxed); // the detector reloads
@@ -257,6 +257,7 @@ fn icon() -> Image {
     Image { w: 128, h: 128, px: include_bytes!("../assets/icon-128.rgba").to_vec() }
 }
 
+#[derive(Default)]
 pub struct Panel {
     popup: Option<usize>, // the dropdown row whose popup is showing
     hover: Option<Ctl>,
@@ -265,10 +266,6 @@ pub struct Panel {
 }
 
 impl Panel {
-    pub fn new() -> Panel {
-        Panel { popup: None, hover: None, drawn: String::new(), dash: 0 }
-    }
-
     /// Creates the dashboard overlay (the tab) and its icon.
     pub fn create(&mut self, textures: &mut Textures, set: &Settings) -> Result<(), String> {
         let (dash, icon_ov) = vr()
@@ -362,7 +359,7 @@ mod tests {
     #[test]
     fn hit_test() {
         // Rows and buttons hit-test to their controls; greyed-out ones don't.
-        let (p, mut set) = (Panel::new(), Settings::default());
+        let (p, mut set) = (Panel::default(), Settings::default());
         let (people, range, hands) = (row("Detect People"), row("Range"), row("Ignore My Hands"));
         assert_eq!(p.hit(500.0, row_cy(people), &set), Some(Ctl::Row(people)));
         assert_eq!(p.hit(PLUS_CX, row_cy(range), &set), Some(Ctl::Step(range, 1)));
@@ -376,7 +373,7 @@ mod tests {
 
     #[test]
     fn press_and_render() {
-        let (mut p, mut set) = (Panel::new(), Settings::default());
+        let (mut p, mut set) = (Panel::default(), Settings::default());
         p.press(Some(Ctl::Row(row("Detect People"))), &mut set);
         for _ in 0..20 {
             p.press(Some(Ctl::Step(row("Range"), 1)), &mut set);
@@ -397,7 +394,7 @@ mod tests {
     #[test]
     fn dropdowns() {
         // Pick, a press outside closes, the rate popup fits the panel.
-        let (mut p, mut set) = (Panel::new(), Settings::default());
+        let (mut p, mut set) = (Panel::default(), Settings::default());
         let (size, rate) = (row("Detection Resolution"), row("Detection Rate"));
         p.press(Some(Ctl::Row(size)), &mut set);
         let iy = CONTROLS[size].popup_top(size, &set) + 2.5 * ITEM_H; // the third choice

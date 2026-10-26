@@ -12,93 +12,10 @@ use crate::shm::{self, now_ns};
 use crate::stereo::{self, Det, Obj};
 use crate::v3::v3;
 
-pub const COCO: [&str; 80] = [
-    "person",
-    "bicycle",
-    "car",
-    "motorcycle",
-    "airplane",
-    "bus",
-    "train",
-    "truck",
-    "boat",
-    "traffic light",
-    "fire hydrant",
-    "stop sign",
-    "parking meter",
-    "bench",
-    "bird",
-    "cat",
-    "dog",
-    "horse",
-    "sheep",
-    "cow",
-    "elephant",
-    "bear",
-    "zebra",
-    "giraffe",
-    "backpack",
-    "umbrella",
-    "handbag",
-    "tie",
-    "suitcase",
-    "frisbee",
-    "skis",
-    "snowboard",
-    "sports ball",
-    "kite",
-    "baseball bat",
-    "baseball glove",
-    "skateboard",
-    "surfboard",
-    "tennis racket",
-    "bottle",
-    "wine glass",
-    "cup",
-    "fork",
-    "knife",
-    "spoon",
-    "bowl",
-    "banana",
-    "apple",
-    "sandwich",
-    "orange",
-    "broccoli",
-    "carrot",
-    "hot dog",
-    "pizza",
-    "donut",
-    "cake",
-    "chair",
-    "couch",
-    "potted plant",
-    "bed",
-    "dining table",
-    "toilet",
-    "tv",
-    "laptop",
-    "mouse",
-    "remote",
-    "keyboard",
-    "cell phone",
-    "microwave",
-    "oven",
-    "toaster",
-    "sink",
-    "refrigerator",
-    "book",
-    "clock",
-    "vase",
-    "scissors",
-    "teddy bear",
-    "hair drier",
-    "toothbrush",
-];
-
 pub static QUIT: AtomicBool = AtomicBool::new(false);
 pub static PAUSED: AtomicBool = AtomicBool::new(false); // skip frames (no GPU work) while set
 pub static SIZE: AtomicI32 = AtomicI32::new(0); // per-view size to run at; a change reloads
-pub static HZ: AtomicF32 = AtomicF32::new(0.0); // max_hz, changeable while running
+pub static HZ: AtomicF32 = AtomicF32::new(0.0); // runs per second, changeable while running
 pub static LOADING: AtomicI32 = AtomicI32::new(0); // size being loaded (model, then its first run compiles shaders); 0 = done
 pub static YOLO_MS: AtomicF32 = AtomicF32::new(0.0); // mean YOLO time over the last stats period
 pub static DETS: Mutex<DetectionSet> = Mutex::new(DetectionSet { id: 0, t_capture_ns: 0, objs: Vec::new() });
@@ -124,151 +41,68 @@ pub struct DetectionSet {
     pub objs: Vec<Obj>,
 }
 
-#[derive(Clone, Debug)]
-pub struct Options {
-    pub dump: String, // directory for debug PGMs (empty = off)
-    // default models/yolo11n-grayscale_<size>_gray.ncnn (exported at exactly size x 2*size, then prep_model.py)
-    pub model: String,
-    pub calib: String, // directory of the factory calibration files (calib.rs)
-    pub size: i32,     // per-view rectified size (YOLO input is size x 2*size)
-    pub hfov_deg: f32, // virtual camera field of view
-    pub conf: f32,
-    pub iou: f32,        // overlapping detections/tracks above this IoU keep only the most confident
-    pub contain: f32,    // ...same if this fraction of the smaller box lies inside the larger one
-    pub min_box: f32,    // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
-    pub latency_ms: f32, // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
-    pub max_hz: f32,     // run YOLO at most this often (0 = every camera frame pair)
+pub const HFOV_DEG: f32 = 100.0; // the rectified views' field of view
+const CONF: f32 = 0.1; // ByteTrack wants the weak detections too
+const IOU: f32 = 0.5; // overlapping detections/tracks above this IoU keep only the most confident
+const CONTAIN: f32 = 0.8; // ...same if this fraction of the smaller box lies inside the larger one
+const MIN_BOX: f32 = 0.05; // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
+const LATENCY_MS: f32 = 8.0; // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
+
+/// Duplicate if they overlap a lot (IoU) or one is mostly inside the other (intersection over the
+/// smaller area): a half-size box nested in a bigger one is only ~25% IoU but clearly the same object.
+pub fn duplicate(a: &Det, b: &Det) -> bool {
+    let ix = (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0);
+    let iy = (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
+    let inter = ix * iy;
+    let (aa, ab) = ((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
+    inter / (aa + ab - inter + 1e-6) > IOU || inter > CONTAIN * aa.min(ab)
 }
 
-impl Default for Options {
-    fn default() -> Options {
-        Options {
-            dump: String::new(),
-            model: String::new(),
-            calib: shm::CALIB_DIR.into(),
-            size: 576,
-            hfov_deg: 100.0,
-            conf: 0.25,
-            iou: 0.5,
-            contain: 0.8,
-            min_box: 0.05,
-            latency_ms: 8.0,
-            max_hz: 0.0,
+/// Class-agnostic: overlapping boxes of different classes (laptop/tv/keyboard on one object) keep only the best.
+fn nms(d: &mut Vec<Det>) {
+    d.sort_by(|a, b| b.score.total_cmp(&a.score));
+    let mut keep: Vec<Det> = Vec::new();
+    for x in d.drain(..) {
+        if !keep.iter().any(|k| duplicate(k, &x)) {
+            keep.push(x);
         }
     }
+    *d = keep;
 }
 
-impl Options {
-    /// Takes one detector flag (its value from `next`); false if it isn't one.
-    pub fn parse(&mut self, a: &str, next: &mut dyn FnMut() -> Result<String, String>) -> Result<bool, String> {
-        match a {
-            "--dump" => self.dump = next()?,
-            "--model" => self.model = next()?,
-            "--calib" => self.calib = next()?,
-            "--size" => {
-                self.size = num(a, next)? as i32;
-                if self.size <= 0 || self.size % 32 != 0 {
-                    return Err("--size must be a multiple of 32".into());
-                }
-            }
-            "--hfov" => self.hfov_deg = num(a, next)?,
-            "--conf" => self.conf = num(a, next)?,
-            "--iou" => self.iou = num(a, next)?,
-            "--contain" => self.contain = num(a, next)?,
-            "--min-box" => self.min_box = num(a, next)?,
-            "--latency-ms" => self.latency_ms = num(a, next)?,
-            "--max-hz" => self.max_hz = num(a, next)?,
-            _ => return Ok(false),
-        }
-        Ok(true)
-    }
-
-    /// Duplicate if they overlap a lot (IoU) or one is mostly inside the other (intersection over the
-    /// smaller area): a half-size box nested in a bigger one is only ~25% IoU but clearly the same object.
-    pub fn duplicate(&self, a: &Det, b: &Det) -> bool {
-        let ix = (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0);
-        let iy = (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
-        let inter = ix * iy;
-        let (aa, ab) = ((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
-        inter / (aa + ab - inter + 1e-6) > self.iou || inter > self.contain * aa.min(ab)
-    }
-
-    /// Class-agnostic: overlapping boxes of different classes (laptop/tv/keyboard on one object) keep only the best.
-    fn nms(&self, d: &mut Vec<Det>) {
-        d.sort_by(|a, b| b.score.total_cmp(&a.score));
-        let mut keep: Vec<Det> = Vec::new();
-        for x in d.drain(..) {
-            if !keep.iter().any(|k| self.duplicate(k, &x)) {
-                keep.push(x);
+/// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then per-class sigmoid scores) as boxes in each S x S
+/// view.
+fn decode(out: &ncnn::Mat, s: usize) -> [Vec<Det>; 2] {
+    let mut views = [Vec::new(), Vec::new()];
+    let rows: Vec<&[f32]> = (0..4 + 80).map(|r| out.row(r)).collect();
+    let s = s as f32;
+    for i in 0..out.w() {
+        let (mut best, mut bs) = (0, 0.0);
+        for k in 0..80 {
+            if rows[4 + k][i] > bs {
+                (best, bs) = (k, rows[4 + k][i]);
             }
         }
-        *d = keep;
-    }
-
-    /// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then per-class sigmoid scores) as boxes in each S x S
-    /// view.
-    fn decode(&self, out: &ncnn::Mat, s: usize) -> [Vec<Det>; 2] {
-        let mut views = [Vec::new(), Vec::new()];
-        let rows: Vec<&[f32]> = (0..4 + 80).map(|r| out.row(r)).collect();
-        let s = s as f32;
-        for i in 0..out.w() {
-            let (mut best, mut bs) = (0, 0.0);
-            for k in 0..80 {
-                if rows[4 + k][i] > bs {
-                    (best, bs) = (k, rows[4 + k][i]);
-                }
-            }
-            if bs < self.conf {
-                continue;
-            }
-            let (cx, cy, w, h) = (rows[0][i], rows[1][i], rows[2][i], rows[3][i]);
-            let v = (cy >= s) as usize; // top half = left view, bottom half = right view
-            let oy = v as f32 * s;
-            let d = Det {
-                x0: cx - w / 2.0,
-                y0: (cy - h / 2.0).max(oy) - oy,
-                x1: cx + w / 2.0,
-                y1: (cy + h / 2.0).min(oy + s) - oy,
-                score: bs,
-                cls: best,
-            };
-            // > 4 px tall: not a sliver clipped at the seam between the views
-            if d.y1 - d.y0 > 4.0 && (d.x1 - d.x0).max(d.y1 - d.y0) >= self.min_box * s {
-                views[v].push(d);
-            }
+        if bs < CONF {
+            continue;
         }
-        views
-    }
-
-    /// --dump: the stacked input with each view's boxes as a PGM, and the stereo objects to stdout.
-    fn dump(&self, input: &[u8], views: &[Vec<Det>; 2], objs: &[Obj], s: usize, n: u64) {
-        let mut img = input.to_vec();
-        for (v, dets) in views.iter().enumerate() {
-            for d in dets {
-                let c = |x: f32| (x as i32).clamp(0, s as i32 - 1) as usize;
-                let (x0, x1, y0, y1) = (c(d.x0), c(d.x1), c(d.y0) + v * s, c(d.y1) + v * s);
-                for x in x0..=x1 {
-                    img[y0 * s + x] = 255;
-                    img[y1 * s + x] = 255;
-                }
-                for y in y0..=y1 {
-                    img[y * s + x0] = 255;
-                    img[y * s + x1] = 255;
-                }
-            }
-        }
-        let mut pgm = format!("P5\n{s} {}\n255\n", 2 * s).into_bytes();
-        pgm.extend_from_slice(&img);
-        let _ = std::fs::write(format!("{}/det_{n:04}.pgm", self.dump), pgm);
-        for o in objs.iter().filter(|o| o.stereo) {
-            println!("  {} {:.2} at {:.2}m", COCO[o.cls], o.score, o.dist);
+        let (cx, cy, w, h) = (rows[0][i], rows[1][i], rows[2][i], rows[3][i]);
+        let v = (cy >= s) as usize; // top half = left view, bottom half = right view
+        let oy = v as f32 * s;
+        let d = Det {
+            x0: cx - w / 2.0,
+            y0: (cy - h / 2.0).max(oy) - oy,
+            x1: cx + w / 2.0,
+            y1: (cy + h / 2.0).min(oy + s) - oy,
+            score: bs,
+            cls: best,
+        };
+        // > 4 px tall: not a sliver clipped at the seam between the views
+        if d.y1 - d.y0 > 4.0 && (d.x1 - d.x0).max(d.y1 - d.y0) >= MIN_BOX * s {
+            views[v].push(d);
         }
     }
-}
-
-/// Flag a's value, a number.
-pub fn num(a: &str, next: &mut dyn FnMut() -> Result<String, String>) -> Result<f32, String> {
-    next()?.parse().map_err(|_| format!("bad value for {a}"))
+    views
 }
 
 /// The frames driver_roommate_radar publishes (mapped read-only).
@@ -343,12 +177,11 @@ fn stretch(input: &mut [u8]) {
 }
 
 /// One run at size S, until SIZE changes or quit.
-fn run(opts: &Options, s: usize) -> Result<(), String> {
+fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
     let t_load = now_ns();
     let vulkan = ncnn::gpu_count() > 0;
-    let model =
-        if opts.model.is_empty() { format!("models/yolo11n-grayscale_{s}_gray.ncnn") } else { opts.model.clone() };
+    let model = format!("models/yolo11n-grayscale_{s}_gray.ncnn");
     let net = ncnn::Net::load(&model, vulkan)?;
     println!("detector: ncnn {}", if vulkan { "Vulkan GPU" } else { "CPU" });
 
@@ -356,8 +189,8 @@ fn run(opts: &Options, s: usize) -> Result<(), String> {
         return Ok(());
     };
     // After the frames: the calibration is the driver's copy of the factory one
-    let cal = [calib::load(&opts.calib, shm::CAM_NAMES[0])?, calib::load(&opts.calib, shm::CAM_NAMES[1])?];
-    let rect = [Rectifier::new(&cal[0], s, opts.hfov_deg), Rectifier::new(&cal[1], s, opts.hfov_deg)];
+    let cal = [calib::load(shm::CALIB_DIR, shm::CAM_NAMES[0])?, calib::load(shm::CALIB_DIR, shm::CAM_NAMES[1])?];
+    let rect = [Rectifier::new(&cal[0], s, HFOV_DEG), Rectifier::new(&cal[1], s, HFOV_DEG)];
     let f = rect[0].f;
     let baseline = cal[1].t[0] - cal[0].t[0]; // right cam is at +x in the head frame
     println!("detector: {s}x{s} views, f={f:.1} px, baseline {:.1} mm", baseline * 1000.0);
@@ -367,22 +200,18 @@ fn run(opts: &Options, s: usize) -> Result<(), String> {
     let mut scratch = vec![0u8; shm::FRAME];
     let mut input = vec![0u8; s * s * 2];
     let (mut last_seq, mut t_ns, mut last_pair) = ([0u64; 2], [0u64; 2], 0u64);
-    let (mut frames, mut stat_t, mut dump_n, mut last_run) = (0u64, now_ns(), 0u64, 0u64);
+    let (mut frames, mut stat_t, mut last_run) = (0u64, now_ns(), 0u64);
     let (mut t_rect, mut t_net, mut t_post) = (0f64, 0f64, 0f64);
-    let mut printed_shape = false;
 
     while !QUIT.load(Ordering::Relaxed) && SIZE.load(Ordering::Relaxed) == s as i32 {
         if PAUSED.load(Ordering::Relaxed) {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         }
-        let hz = HZ.load();
-        if hz > 0.0 {
-            let (t, due) = (now_ns(), last_run + (1e9 / hz) as u64);
-            if t < due {
-                std::thread::sleep(Duration::from_nanos((due - t).min(100_000_000)));
-                continue;
-            }
+        let (t, due) = (now_ns(), last_run + (1e9 / HZ.load()) as u64);
+        if t < due {
+            std::thread::sleep(Duration::from_nanos((due - t).min(100_000_000)));
+            continue;
         }
         for i in 0..2 {
             if let Some(t) = shm::read(&hdr.slots[i], &mut last_seq[i], &mut scratch) {
@@ -415,29 +244,20 @@ fn run(opts: &Options, s: usize) -> Result<(), String> {
         let Some(out) = out else {
             continue;
         };
-        if !printed_shape {
-            println!("detector: out0 w={} h={}", out.w(), out.h());
-            printed_shape = true;
-        }
         if out.h() < 4 + 80 {
-            continue; // not a COCO head
+            return Err(format!("{model}: {} output rows, not YOLO's 4 + 80", out.h()));
         }
-        let mut views = opts.decode(&out, s);
-        opts.nms(&mut views[0]);
-        opts.nms(&mut views[1]);
+        let mut views = decode(&out, s);
+        nms(&mut views[0]);
+        nms(&mut views[1]);
         let origin = v3(cal[0].t[0], cal[0].t[1], cal[0].t[2]);
         let objs = stereo::match_views(&views, &input[..s * s], &input[s * s..], s, f, baseline, origin);
         let e = now_ns();
         let stereo_n = objs.iter().filter(|o| o.stereo).count();
-
-        if !opts.dump.is_empty() && frames % 30 == 0 {
-            opts.dump(&input, &views, &objs, s, dump_n);
-            dump_n += 1;
-        }
         {
             let mut d = DETS.lock().unwrap();
             d.id += 1;
-            d.t_capture_ns = t_ns[0] - (opts.latency_ms * 1e6) as u64;
+            d.t_capture_ns = t_ns[0] - (LATENCY_MS * 1e6) as u64;
             d.objs = objs;
         }
 
@@ -467,9 +287,9 @@ fn run(opts: &Options, s: usize) -> Result<(), String> {
 }
 
 /// The detector thread: runs at SIZE, reloading when it changes, until quit.
-pub fn run_loop(opts: Options) -> Result<(), String> {
+pub fn run_loop() -> Result<(), String> {
     while !QUIT.load(Ordering::Relaxed) {
-        run(&opts, SIZE.load(Ordering::Relaxed) as usize)?;
+        run(SIZE.load(Ordering::Relaxed) as usize)?;
     }
     Ok(())
 }

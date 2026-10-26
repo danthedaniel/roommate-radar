@@ -1,6 +1,6 @@
 //! The detector's objects (head frame at capture) as the tracker's measurements (standing universe), keeping only what
 //! roommate-radar shows: stereo, a wanted class, in range, not your own arms or hands.
-use crate::detector::Options;
+use crate::detector::HFOV_DEG;
 use crate::openvr::HmdMatrix34_t;
 use crate::settings::Settings;
 use crate::stereo::Obj;
@@ -10,6 +10,15 @@ use crate::v3::{V3, v3};
 /// person, cat, dog
 pub fn wanted(cls: usize, set: &Settings) -> bool {
     if cls == 0 { set.people } else { (cls == 15 || cls == 16) && set.pets }
+}
+
+/// A wanted class's name.
+pub fn name(cls: usize) -> &'static str {
+    match cls {
+        0 => "person",
+        15 => "cat",
+        _ => "dog",
+    }
 }
 
 pub fn apply(m: &HmdMatrix34_t, p: V3) -> V3 {
@@ -48,10 +57,10 @@ fn holds_controller(o: &Obj, controllers: &[V3]) -> bool {
 
 /// Your own arm or lap, controller or not: the box reaches the bottom 10% of the view, is within 1.2 m, and its top is
 /// below eye level (anyone else that close shows their head). Head frame, like holds_controller.
-fn own_arm(o: &Obj, hfov_deg: f32) -> bool {
+fn own_arm(o: &Obj) -> bool {
     let b = &o.corners;
     let z = o.origin.z - b[3].z;
-    let edge = (hfov_deg.to_radians() / 2.0).tan();
+    let edge = (HFOV_DEG.to_radians() / 2.0).tan();
     z > 0.0 && z < 1.2 && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
 }
 
@@ -84,7 +93,6 @@ pub fn measurements(
     ctrl: &[V3],
     walls: &[[[f32; 2]; 2]],
     set: &Settings,
-    opts: &Options,
 ) -> Vec<Meas> {
     let h = position(head);
     let m = &head.m;
@@ -98,12 +106,7 @@ pub fn measurements(
         })
         .collect();
     objs.iter()
-        .filter(|o| {
-            o.stereo
-                && wanted(o.cls, set)
-                && !holds_controller(o, &ctrl_head)
-                && !(set.hands && own_arm(o, opts.hfov_deg))
-        })
+        .filter(|o| o.stereo && wanted(o.cls, set) && !holds_controller(o, &ctrl_head) && !(set.hands && own_arm(o)))
         .filter_map(|o| {
             let w = o.corners.map(|c| apply(head, c));
             let c = (w[0] + w[1] + w[2] + w[3]) * 0.25;
@@ -152,7 +155,7 @@ mod tests {
     }
 
     fn meas(objs: &[Obj], ctrl: &[V3], set: &Settings) -> Vec<Meas> {
-        measurements(objs, &HEAD, ctrl, &[], set, &Options::default())
+        measurements(objs, &HEAD, ctrl, &[], set)
     }
 
     #[test]
@@ -204,7 +207,7 @@ mod tests {
             !near_play_area(&walls, 2.6, 0.0) && !near_play_area(&walls, 2.1, 2.1) && near_play_area(&[], 9.0, 9.0)
         );
         let set = Settings::default();
-        let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, &[], &walls, &set, &Options::default()).len();
+        let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, &[], &walls, &set).len();
         assert!(ms(2.0) == 1 && ms(2.9) == 0, "person 2 m ahead kept, 2.9 m dropped (center 1.9 m past the wall)");
     }
 

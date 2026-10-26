@@ -51,9 +51,9 @@ impl Image {
         &mut self.px[i..i + 4]
     }
 
-    /// Draws UTF-8 text `size` px tall with its baseline at y; returns the pen x after it.
-    pub fn text(&mut self, x: i32, y: i32, s: &str, rgb: Rgb, size: f32) -> i32 {
-        draw_text(Some(self), x, y, s, rgb, size)
+    /// Draws UTF-8 text `size` px tall with its baseline at y.
+    pub fn text(&mut self, x: i32, y: i32, s: &str, rgb: Rgb, size: f32) {
+        draw_text(Some(self), x, y, s, rgb, size);
     }
 }
 
@@ -68,12 +68,6 @@ fn font() -> &'static fontdue::Font {
 /// The pen x after `s` drawn from x, `size` px tall.
 pub fn text_width(x: i32, s: &str, size: f32) -> i32 {
     draw_text(None, x, 0, s, WHITE, size)
-}
-
-/// Baseline that centers text `size` px tall vertically on y.
-pub fn centered_baseline(y: i32, size: f32) -> i32 {
-    let m = font().horizontal_line_metrics(size).unwrap();
-    y + ((m.ascent + m.descent) / 2.0).round() as i32
 }
 
 fn draw_text(mut img: Option<&mut Image>, mut x: i32, y: i32, s: &str, rgb: Rgb, size: f32) -> i32 {
@@ -136,7 +130,8 @@ pub fn label(name: &str, pct: i32, cls: usize) -> Image {
             over(p, rgb, (dot / 2.0 + 0.5 - d).clamp(0.0, 1.0));
         }
     }
-    let base = centered_baseline(h / 2, 40.0);
+    let m = font().horizontal_line_metrics(40.0).unwrap();
+    let base = h / 2 + ((m.ascent + m.descent) / 2.0).round() as i32; // text centered vertically
     img.text(x_name, base, name, WHITE, 40.0);
     img.text(x_num, base, &num, rgb, 40.0);
     img
