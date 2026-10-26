@@ -59,7 +59,8 @@ the measurements behind the defaults and what didn't work are in
   `make build | deploy | deploy-mirror | deploy-roommate-radar | logs | stream | cams | ssh`. `make deploy` sets up a
   fresh Frame and redeploys an existing one; every first-time step is skipped once its output exists.
 - Lint/format: ruff and basedpyright for the Python (3.12, the Frame's) in `pyproject.toml`; `cargo fmt` and
-  `cargo clippy` for the Rust (`packages/roommate-radar/rustfmt.toml`).
+  `cargo clippy` for the Rust (`packages/roommate-radar/rustfmt.toml`). CI (`.github/workflows/ci.yml`) type-checks
+  the Python and builds and tests Roommate Radar (`build.sh --check`, in the SDK image on an arm64 runner).
 
 ## License
 

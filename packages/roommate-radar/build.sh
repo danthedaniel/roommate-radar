@@ -7,8 +7,11 @@
 # (build-sdk/, incremental), and laid out in dist/roommate-radar as Steam installs it:
 #   NotoSans-Medium.ttf models/  bin/{roommate-radar,libopenvr_api.so}
 #   driver/{driver.vrdrivermanifest,bin/linuxarm64/driver_roommate_radar.so}
+# build.sh --check (CI): build and test only, without the models and dist/.
 set -e
 cd "$(dirname "$0")/../.."
+check=
+[ "$1" = --check ] && check=1
 
 # get URL FILE SHA256: download unless FILE is already there with that hash; fails if the download doesn't match
 get() {
@@ -26,10 +29,14 @@ get() {
 # ncnn is a submodule: github.com/danthedaniel/ncnn (upstream snapshot + our patches)
 [ -f third_party/ncnn/CMakeLists.txt ] || git submodule update --init third_party/ncnn
 
+# ncnn's build is skipped when third_party/ncnn-install was built from this commit of it, without local changes
+ncnn=$(git -C third_party/ncnn describe --always --dirty --abbrev=40)
+case $ncnn in *-dirty) ncnn= ;; esac
+
 # Exported on the Mac (ultralytics + torch don't run on the Frame), S x 2S input, adapted with prep_model.py
-get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt models/yolo11n-grayscale.pt \
-	b81f01d60918e3194df21c305d9bd2275ab33cfddc79b26ca145a9190d1932f5
-for s in 320 480 640; do
+[ "$check" ] || get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt \
+	models/yolo11n-grayscale.pt b81f01d60918e3194df21c305d9bd2275ab33cfddc79b26ca145a9190d1932f5
+[ "$check" ] || for s in 320 480 640; do
 	[ -f "models/yolo11n-grayscale_${s}_gray.ncnn.param" ] && continue
 	(
 		cd models
@@ -58,12 +65,18 @@ get https://static.rust-lang.org/rustup/archive/1.29.2/aarch64-unknown-linux-gnu
 # libopenvr_api.so (roommate-radar links it) from the SDK pieces. dist/roommate-radar is rebuilt from scratch so it holds exactly
 # what's installed.
 docker run --rm -v "$PWD:/src" -w /src -e RUSTUP_HOME=/src/build-sdk/rust/rustup -e CARGO_HOME=/src/build-sdk/rust/cargo \
-	-e CARGO_TARGET_DIR=/src/build-sdk/roommate-radar registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:latest sh -ec '
-cmake -S third_party/ncnn -B build-sdk/ncnn -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON \
-	-DGLSLANG_TARGET_DIR=/usr/lib/aarch64-linux-gnu/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF \
-	-DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/src/third_party/ncnn-install >/dev/null
-cmake --build build-sdk/ncnn
-cmake --install build-sdk/ncnn >/dev/null
+	-e CARGO_TARGET_DIR=/src/build-sdk/roommate-radar -e "ncnn=$ncnn" -e "check=$check" \
+	registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:latest sh -ec '
+built=third_party/ncnn-install/commit
+if [ -z "$ncnn" ] || [ "$(cat $built 2>/dev/null)" != "$ncnn" ]; then
+	rm -f $built
+	cmake -S third_party/ncnn -B build-sdk/ncnn -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON \
+		-DGLSLANG_TARGET_DIR=/usr/lib/aarch64-linux-gnu/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF \
+		-DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/src/third_party/ncnn-install >/dev/null
+	cmake --build build-sdk/ncnn
+	cmake --install build-sdk/ncnn >/dev/null
+	[ -z "$ncnn" ] || echo "$ncnn" > $built
+fi
 [ -x "$CARGO_HOME/bin/cargo" ] || { chmod +x build-sdk/rust/rustup-init
 	build-sdk/rust/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain none; }
 export PATH="$CARGO_HOME/bin:$PATH"
@@ -71,6 +84,7 @@ cd packages/roommate-radar
 rustup -q toolchain install
 cargo build --release
 LD_LIBRARY_PATH=/src/third_party/openvr/bin/linuxarm64 cargo test --release -q
+[ -z "$check" ] || exit 0
 d=/src/dist/roommate-radar
 rm -rf $d
 mkdir -p $d/bin $d/driver/bin/linuxarm64 $d/models

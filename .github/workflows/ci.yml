@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  python:
+    name: Python types (basedpyright)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - uses: astral-sh/setup-uv@v10
+      # Its config is in pyproject.toml
+      - run: uvx basedpyright@1.40.2
+
+  rust:
+    name: Roommate Radar build and tests (Steam Runtime 4 SDK)
+    # The build is the one make build runs (build.sh --check: without the models and dist/), in the arm64 SDK image
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: true
+      - id: ncnn
+        run: echo "commit=$(git rev-parse HEAD:third_party/ncnn)" >> "$GITHUB_OUTPUT"
+      # build.sh skips building ncnn when third_party/ncnn-install came from the submodule's commit
+      - uses: actions/cache@v6
+        with:
+          path: third_party/ncnn-install
+          key: ncnn-install-${{ steps.ncnn.outputs.commit }}
+      - uses: actions/cache@v6
+        with:
+          path: |
+            build-sdk/rust
+            build-sdk/roommate-radar
+          key: cargo-${{ hashFiles('packages/roommate-radar/rust-toolchain.toml', 'packages/roommate-radar/Cargo.lock') }}
+          restore-keys: cargo-
+      - run: packages/roommate-radar/build.sh --check
