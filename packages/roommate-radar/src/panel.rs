@@ -53,7 +53,7 @@ static SECTIONS: [&[Control]; 3] = [
             kind: Kind::Switch(|s| &mut s.play_area),
         },
         Control {
-            title: "Range",
+            title: "Max Range",
             detail: "",
             dimmed: NEEDS_ENABLED,
             kind: Kind::Stepper { val: |s| &mut s.max_dist, step: 0.5, min: MIN_DIST, max: MAX_DIST },
@@ -490,7 +490,7 @@ mod tests {
     fn hit_test() {
         // Rows and buttons hit-test to their controls; greyed-out ones don't.
         let (p, mut set) = (Panel::default(), warned());
-        let (people, range, hands) = (row("Detect People"), row("Range"), row("Ignore My Hands"));
+        let (people, range, hands) = (row("Detect People"), row("Max Range"), row("Ignore My Hands"));
         assert_eq!(p.hit(500.0, row_cy(people), &set), Some(Ctl::Row(people)));
         assert_eq!(p.hit(PLUS_CX, row_cy(range), &set), Some(Ctl::Step(range, 1)));
         assert_eq!(p.hit(500.0, row_cy(hands), &set), Some(Ctl::Row(hands)));
@@ -506,7 +506,7 @@ mod tests {
         let (mut p, mut set) = (Panel::default(), Settings::default());
         p.press(Some(Ctl::Row(row("Detect People"))), &mut set);
         for _ in 0..20 {
-            p.press(Some(Ctl::Step(row("Range"), 1)), &mut set);
+            p.press(Some(Ctl::Step(row("Max Range"), 1)), &mut set);
         }
         assert!(!set.people && set.max_dist == 8.0);
         let mut img = p.render(Some(Ctl::Row(row("Detect Cats and Dogs"))), "Watching", &set);
