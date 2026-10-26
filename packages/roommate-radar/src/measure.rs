@@ -1,5 +1,5 @@
 //! The detector's objects (head frame at capture) as the tracker's measurements (standing universe), keeping only what
-//! guardian shows: stereo, a wanted class, in range, not your own arms or hands.
+//! roommate-radar shows: stereo, a wanted class, in range, not your own arms or hands.
 use crate::detector::Options;
 use crate::openvr::HmdMatrix34_t;
 use crate::settings::Settings;
@@ -55,7 +55,7 @@ fn own_arm(o: &Obj, hfov_deg: f32) -> bool {
     z > 0.0 && z < 1.2 && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
 }
 
-/// Detections this frame that guardian cares about, in the standing universe (head pose at capture): stereo (has
+/// Detections this frame that roommate-radar cares about, in the standing universe (head pose at capture): stereo (has
 /// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range.
 pub fn measurements(objs: &[Obj], head: &HmdMatrix34_t, ctrl: &[V3], set: &Settings, opts: &Options) -> Vec<Meas> {
     let h = position(head);

@@ -142,7 +142,7 @@ mod tests {
     fn chains_head_cad_and_camera_frames() {
         // Head turned 90 deg about z in CAD; the camera 10 mm along CAD x, axes as CAD's: in the head frame it's at
         // -10 mm y, and its x axis is the head's -y.
-        let dir = std::env::temp_dir().join(format!("guardian-calib-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("roommate-radar-calib-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let ident = r#"{"plus_x": [1, 0, 0], "plus_z": [0, 0, 1], "position": [0, 0, 0]}"#;
         let head = r#"{"plus_x": [0, 1, 0], "plus_z": [0, 0, 1], "position": [0, 0, 0]}"#;

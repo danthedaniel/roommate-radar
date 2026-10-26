@@ -1,6 +1,7 @@
-//! driver_guardian: SteamVR driver that runs camserver's loop (camserver.rs) on a thread inside vrserver. vrserver is
-//! XRService's parent, so Yama (ptrace_scope=1) lets it pidfd_getfd XRService's camera fds without root or
-//! CAP_SYS_PTRACE. Adds no devices. Log: vrserver.txt. guardian registers it with vrpathreg on its first run (register.rs).
+//! driver_roommate_radar: SteamVR driver that runs camserver's loop (camserver.rs) on a thread inside vrserver.
+//! vrserver is XRService's parent, so Yama (ptrace_scope=1) lets it pidfd_getfd XRService's camera fds without root or
+//! CAP_SYS_PTRACE. Adds no devices. Log: vrserver.txt. roommate-radar registers it with vrpathreg on its first run
+//! (register.rs).
 //!
 //! openvr_driver.h is C++ only: vrserver calls the virtual methods of the IServerTrackedDeviceProvider that
 //! HmdDriverFactory returns, and the driver logs through an IVRDriverLog the same way. So these are laid out like those
@@ -17,7 +18,7 @@ macro_rules! log {
 }
 
 mod camserver;
-#[allow(dead_code)] // the reader's half is guardian's
+#[allow(dead_code)] // the reader's half is roommate-radar's
 #[path = "../shm.rs"]
 mod shm;
 
@@ -105,12 +106,12 @@ unsafe extern "C" fn init(_: *mut Provider, ctx: *mut DriverContext) -> i32 {
         return INIT_ERROR_INTERFACE_NOT_FOUND;
     }
     DRIVER_LOG.store(log.cast(), Ordering::Release);
-    // guardian runs in the Steam Runtime container, which doesn't see /persist: copy the factory calibration next to the
-    // frames (calib.rs reads it).
+    // roommate-radar runs in the Steam Runtime container, which doesn't see /persist: copy the factory calibration next
+    // to the frames (calib.rs reads it).
     let _ = std::fs::create_dir_all(shm::CALIB_DIR);
     for f in ["xrservice.json", "device_config.json"] {
         if let Err(e) = std::fs::copy(format!("/persist/{f}"), format!("{}/{f}", shm::CALIB_DIR)) {
-            log!("guardian: copy /persist/{f}: {e}");
+            log!("roommate-radar: copy /persist/{f}: {e}");
         }
     }
     *CAMSERVER.lock().unwrap() = Some(std::thread::spawn(|| camserver::run(["/dev/video3", "/dev/video0"])));

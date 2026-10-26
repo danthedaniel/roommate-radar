@@ -1,16 +1,16 @@
-//! guardian: outlines people, cats and dogs over whatever VR app is running (OpenVR overlays), so you see them
+//! roommate-radar: outlines people, cats and dogs over whatever VR app is running (OpenVR overlays), so you see them
 //! without passthrough. Stereo YOLO detector in detector.rs, at a low size and rate to leave the GPU to the game.
 //!
 //! Per compositor frame: detections (detector.rs) -> measurements (measure.rs) -> tracks (tracker.rs) -> box and label
-//! overlays (boxes.rs). A "Guardian" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows; settings
-//! persist in ~/.config/guardian.conf (settings.rs).
-//! Steam runs bin/guardian (guardian-argv.json) in the Steam Linux Runtime container; it works from the install
-//! directory (models/, NotoSans-Medium.ttf, guardian.vrmanifest), logs to /tmp/guardian.log, and first does the setup
-//! an installer would (register.rs).
+//! overlays (boxes.rs). A "Roommate Radar" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows;
+//! settings persist in ~/.config/roommate-radar.conf (settings.rs).
+//! Steam runs bin/roommate-radar (roommate-radar-argv.json) in the Steam Linux Runtime container; it works from the
+//! install directory (models/, NotoSans-Medium.ttf, roommate-radar.vrmanifest), logs to /tmp/roommate-radar.log, and
+//! first does the setup an installer would (register.rs).
 //!
-//! Usage: guardian [--max-dist 3] [--size 320] [--max-hz 4] [detector options, detector.rs] [tracker options, below]
-//!        guardian --no-detector   (only log the VR app's frame stats, as a baseline)
-//!        guardian --register   (add the overlay's manifest to SteamVR, auto-launch; run by the setup first)
+//! Usage: roommate-radar [--max-dist 3] [--size 320] [--max-hz 4] [detector options, detector.rs] [tracker options]
+//!        roommate-radar --no-detector   (only log the VR app's frame stats, as a baseline)
+//!        roommate-radar --register   (add the overlay's manifest to SteamVR, auto-launch; run by the setup first)
 mod boxes;
 mod calib;
 mod detector;
@@ -100,12 +100,12 @@ fn start() {
     }
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new().append(true).create(true).mode(0o644).open("/tmp/guardian.log") {
+    match std::fs::OpenOptions::new().append(true).create(true).mode(0o644).open("/tmp/roommate-radar.log") {
         Ok(log) => unsafe {
             libc::dup2(log.as_raw_fd(), 1);
             libc::dup2(log.as_raw_fd(), 2);
         },
-        Err(e) => eprintln!("/tmp/guardian.log: {e}"),
+        Err(e) => eprintln!("/tmp/roommate-radar.log: {e}"),
     }
     // Low GPU priority: the game preempts the detector (patched ncnn, the third_party/ncnn submodule)
     if std::env::var_os("NCNN_QUEUE_GLOBAL_PRIORITY").is_none() {
@@ -122,7 +122,7 @@ fn run() -> i32 {
     let mut tracker = tracker::Tracker::default();
     let mut detect = true; // --no-detector: just log frame stats (baseline for the detector's cost)
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut set = settings::Settings::load(format!("{home}/.config/guardian.conf").into());
+    let mut set = settings::Settings::load(format!("{home}/.config/roommate-radar.conf").into());
     let app_key = std::env::var("SteamAppId").ok().map(|id| format!("steam.overlay.{id}"));
     (opts.size, opts.max_hz) = (set.size, set.hz); // --size and --max-hz override them for this run
 
@@ -172,7 +172,7 @@ fn run() -> i32 {
     }
     let mut textures = textures::Textures::new();
     let via = if textures.vulkan() { "Vulkan" } else { "SetOverlayRaw (Vulkan setup failed)" };
-    println!("guardian: overlay textures via {via}");
+    println!("roommate-radar: overlay textures via {via}");
     let mut panel = panel::Panel::new(app_key);
     let mut boxes = match boxes::Boxes::create().and_then(|b| panel.create(&mut textures, &set).map(|_| b)) {
         Ok(b) => b,
@@ -183,11 +183,11 @@ fn run() -> i32 {
     };
     let mut in_game = vr().game_running();
 
-    // The driver copies the factory calibration when it loads: none means driver_guardian wasn't loaded when this
+    // The driver copies the factory calibration when it loads: none means driver_roommate_radar wasn't loaded when this
     // SteamVR started (the first run registers it).
     let setup_pending = !std::path::Path::new(&opts.calib).join("xrservice.json").exists();
     if setup_pending {
-        println!("guardian: no calibration in {}: restart SteamVR to load driver_guardian", opts.calib);
+        println!("roommate-radar: no calibration in {}: restart SteamVR to load driver_roommate_radar", opts.calib);
     }
     let det = (detect && !setup_pending).then(|| {
         let opts = opts.clone();

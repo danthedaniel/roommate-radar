@@ -1,28 +1,28 @@
-# guardian, installed as it would be from the Steam store: what build.sh (make build) left in dist/guardian. Run
-# through ansible/deploy.yml (make deploy-guardian), which pairs the ssh key first.
-# Valve's devkit install: dist/guardian synced to ~/devkit-game/guardian and added to Steam as a shortcut that runs in
+# roommate-radar, installed as it would be from the Steam store: what build.sh (make build) left in dist/roommate-radar. Run
+# through ansible/deploy.yml (make deploy-roommate-radar), which pairs the ssh key first.
+# Valve's devkit install: dist/roommate-radar synced to ~/devkit-game/roommate_radar and added to Steam as a shortcut that runs in
 # Steam Linux Runtime 4 (steamrt4-any, the tool Store apps native to Linux get). The app's own setup (driver, overlay
 # manifest) happens on its first run: Steam has no install scripts on Linux (src/register.rs).
 - hosts: frame
-  tags: guardian
+  tags: roommate-radar
   vars:
-    gameid: guardian
+    gameid: roommate_radar # create-shortcut refuses a "-" ("missing/invalid arguments")
     dir: ~/devkit-game/{{ gameid }}
   tasks:
     # The "depot". Kept: what the app writes into its install directory (Steam leaves those alone on updates too).
-    - name: Install dist/guardian to ~/devkit-game/guardian
+    - name: Install dist/roommate-radar to ~/devkit-game/roommate_radar
       synchronize:
-        src: "{{ playbook_dir }}/../dist/guardian/"
+        src: "{{ playbook_dir }}/../../dist/roommate-radar/"
         dest: "{{ dir }}/"
         delete: true
-        rsync_opts: [--exclude=/guardian.vrmanifest]
+        rsync_opts: [--exclude=/roommate-radar.vrmanifest]
 
     # What the devkit client's upload writes: the command line, and the runtime Steam should run it in
     - name: Set the launch command and runtime
       copy:
         dest: ~/devkit-game/{{ gameid }}-{{ item.key }}.json
         content: "{{ item.value | to_json }}"
-      loop: "{{ {'argv': ['./bin/guardian'], 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
+      loop: "{{ {'argv': ['./bin/roommate-radar'], 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
 
     # devkit-utils/steam-client-create-shortcut: a devkit-1 command on Steam's pipe; Steam answers in a file
     - name: Add it to Steam (devkit shortcut)

@@ -1,6 +1,6 @@
 {
 	"alwaysActivate": true,
-	"name": "guardian",
+	"name": "roommate_radar",
 	"directory": "",
 	"resourceOnly": false,
 	"hmd_presence": []

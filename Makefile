@@ -1,27 +1,27 @@
 # Run from the Mac. See README for what each piece does.
 FRAME ?= steamos@frame.local
 
-.PHONY: build deploy deploy-mirror deploy-guardian logs stream cams ssh
+.PHONY: build deploy deploy-mirror deploy-roommate-radar logs stream cams ssh
 
-# Build guardian on the Mac (Steam Runtime SDK, docker) into dist/guardian
+# Build roommate-radar on the Mac (Steam Runtime SDK, docker) into dist/roommate-radar
 build:
-	guardian/build.sh
+	packages/roommate-radar/build.sh
 
-# Everything: pair the ssh key, then mirror/deploy.yml and guardian/deploy.yml (installs dist/guardian; make build first)
+# Everything: pair the ssh key, then packages/{mirror,roommate-radar}/deploy.yml (installs dist/roommate-radar; make build first)
 deploy:
 	cd ansible && ansible-playbook deploy.yml
 
-# One project: mirrorserver service / install guardian
-deploy-mirror deploy-guardian: deploy-%:
+# One project: mirrorserver service / install roommate-radar
+deploy-mirror deploy-roommate-radar: deploy-%:
 	cd ansible && ansible-playbook deploy.yml --tags $*
 
-# guardian output (started through Steam)
+# roommate-radar output (started through Steam)
 logs:
-	ssh $(FRAME) 'tail -f /tmp/guardian.log'
+	ssh $(FRAME) 'tail -f /tmp/roommate-radar.log'
 
 # Headset view over UDP (mirrorserver service, always on)
 stream:
-	mirror/udpmirror.py
+	packages/mirror/udpmirror.py
 
 # Raw tracking cameras
 cams:

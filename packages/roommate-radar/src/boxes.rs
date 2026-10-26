@@ -76,8 +76,8 @@ impl Boxes {
         let create = |kind: &str| -> Result<[VROverlayHandle_t; MAX], String> {
             let mut ovs = [0; MAX];
             for (i, ov) in ovs.iter_mut().enumerate() {
-                let key = format!("steamframe.guardian.{kind}{i}");
-                *ov = vr().create_overlay(&key, "guardian").map_err(|e| format!("CreateOverlay {key}: {e}"))?;
+                let key = format!("steamframe.roommate-radar.{kind}{i}");
+                *ov = vr().create_overlay(&key, "roommate-radar").map_err(|e| format!("CreateOverlay {key}: {e}"))?;
             }
             Ok(ovs)
         };
@@ -164,7 +164,7 @@ impl Boxes {
             vr().hide(self.labels[i]);
         }
         if n != self.shown || (n > 0 && now - self.last_log_ns > 2_000_000_000) {
-            println!("guardian: showing {n}{log}");
+            println!("roommate-radar: showing {n}{log}");
             self.last_log_ns = now;
         }
         self.shown = n;

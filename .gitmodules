@@ -1,4 +1,4 @@
 [submodule "third_party/ncnn"]
 	path = third_party/ncnn
-	url = ./
-	branch = ncnn
+	url = https://github.com/danthedaniel/ncnn.git
+	branch = master

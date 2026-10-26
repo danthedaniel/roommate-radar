@@ -1,4 +1,4 @@
-//! guardian's settings: set from the dashboard tab (panel.rs), saved to ~/.config/guardian.conf.
+//! roommate-radar's settings: set from the dashboard tab (panel.rs), saved to ~/.config/roommate-radar.conf.
 use std::path::PathBuf;
 
 pub const SIZES: [i32; 3] = [320, 480, 640];
@@ -89,7 +89,7 @@ mod tests {
 
     #[test]
     fn saved_settings_load_back() {
-        let path = std::env::temp_dir().join(format!("guardian-test-{}.conf", std::process::id()));
+        let path = std::env::temp_dir().join(format!("roommate-radar-test-{}.conf", std::process::id()));
         let s = Settings {
             people: false,
             max_dist: 4.5,

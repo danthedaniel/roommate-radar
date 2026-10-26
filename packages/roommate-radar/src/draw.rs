@@ -5,7 +5,7 @@ use std::sync::OnceLock;
 #[cfg(not(test))]
 const FONT: &str = "NotoSans-Medium.ttf"; // shipped with the app
 #[cfg(test)]
-const FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../third_party/fonts/NotoSans-Medium.ttf");
+const FONT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../../third_party/fonts/NotoSans-Medium.ttf");
 
 pub type Rgb = [u8; 3];
 pub const WHITE: Rgb = [245, 245, 247];

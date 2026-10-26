@@ -1,120 +1,67 @@
-# Steam Frame
+# Roommate Radar
 
-Notes and code for poking at my Steam Frame over the LAN.
+<img src="packages/roommate-radar/assets/icon.svg" width="96" align="right" alt="">
 
-## Device
+See the people, cats and dogs around you while you play in VR, without turning on passthrough. Roommate Radar is a
+SteamVR overlay for the Steam Frame: it watches the headset's tracking cameras, runs a stereo YOLO detector on the GPU
+alongside your game, and outlines whoever is within range, with what they are and how sure it is, on top of whatever
+you're playing.
 
-| | |
-|-|-|
-| Hostname | `frame` (`frame.local` via mDNS) |
-| IP | frame.local (DHCP, may change) |
-| User | `steamos` |
-| OS | SteamOS, aarch64, kernel 6.18 |
+- People, cats and dogs within range (1–8 m) get an outline and a label, world-locked and turned to face you. Your own
+  arms and hands are ignored.
+- Works over any VR app. A **Roommate Radar** tab in the SteamVR dashboard turns it on and off, picks what to detect,
+  the range, the detection resolution and rate, and whether to run only while a game is running.
+- Starts with SteamVR. No root and no system changes: it installs like a Steam app (in the Steam Linux Runtime 4
+  container), plus a SteamVR driver that reads the camera frames.
+- Light on the GPU: YOLO11n at 320 px and 4 Hz, on a low-priority queue the game preempts.
 
-## Connect
+## Requirements
 
-```sh
-ssh steamos@frame.local
-```
+- A Steam Frame with **Settings → System → Developer Mode** on, reachable as `frame.local` (set in `ansible/hosts`).
+- To build: an Apple silicon Mac with Docker Desktop (give it a few GB of memory), [uv](https://docs.astral.sh/uv/)
+  and Ansible. The build runs in Valve's Steam Runtime 4 arm64 SDK image, so an arm64 Linux machine with Docker should
+  work too (untested).
 
-Key auth uses `~/.ssh/id_rsa`. Needs **Settings → System → Developer Mode** on.
-
-## Pairing a key (devkit host pairing)
-
-The Frame runs a devkit service on port 32000 (the thing Valve's SteamOS Devkit
-Client talks to). Pairing is one POST: the public key + a `devkit-client:` comment
-+ the client's magic phrase. Approve on the headset if it prompts.
-
-```sh
-key=$(cut -d' ' -f1-2 ~/.ssh/id_rsa.pub)
-curl -X POST -H 'Content-Type: text/plain' --data-binary \
-  "$key devkit-client:$(whoami)@$(hostname -s) 900b919520e4cf601998a71eec318fec
-" http://frame.local:32000/register
-# -> Registered
-```
-
-Source: `client/devkit_client/__init__.py` `register()` in
-https://gitlab.steamos.cloud/devkit/steamos-devkit
-
-Other endpoints: `GET /login-name` → `steamos`, `GET /properties.json`.
-
-SSH password auth is off (`/etc/ssh/sshd_config.d/10-no-password.conf`: `PasswordAuthentication no`), so
-pairing is the only way to add a key. Developer settings → **Set User Password** still works for local/sudo use.
-
-Root: `steamos` has passwordless sudo via `/etc/sudoers.d/zz-steamos-nopasswd`.
-
-## Projects
-
-- [`mirror/`](mirror/README.md): the headset view (`/dev/video99`) as H.264 over UDP to the Mac.
-- [`guardian/`](guardian/README.md): OpenVR overlay outlining people, cats and dogs over any VR app.
-
-Each has its own `deploy.yml` (guardian also a `build.sh`); `ansible/` holds the inventory, the key pairing and the
-playbooks that run them. Shared at the top: `scripts/` (raw camera tools), `third_party/` (ncnn, used by guardian, plus
-its downloads), `models/` and `dist/` (guardian's build), lint/format config (ruff and basedpyright, Python 3.12 (the
-Frame's), in `pyproject.toml`; guardian's Rust has `guardian/rustfmt.toml`) and the `Makefile`: `make build | deploy |
-deploy-mirror | deploy-guardian | logs | stream | cams | ssh`.
-
-## Cameras
-
-| Node | Sensor | Name (XRService) | Native | Notes |
-|-|-|-|-|-|
-| `/dev/video0` | og01a1b `4-0036` | `slam_right` | 1056×1024 Y8, ~115 fps | outward fisheye |
-| `/dev/video3` | og01a1b `4-0060` | `slam_left` | 1056×1024 Y8 | |
-| `/dev/video9` | og0ve10 `5-003e` | upper (L or R) | 640×480 Y8 | outward fisheye |
-| `/dev/video13` | og0ve10 `5-0060` | upper (L or R) | 640×480 Y8 | |
-| — | arcimx616 ×2 (`0-0010`, `0-001a`) | ? ("passthrough cameras") | UYVY 1920×1080 | not streaming |
-| `/dev/video99` | v4l2loopback | — | 1920×1080 RGB | compositor mirror (`steamvr-v4l2cam`) |
-
-XRService alternates exposures: ~8.4 ms (tracking/passthrough) and ~0.037 ms (controller LEDs).
-
-### Live raw frames without stopping SteamVR
-
-XRService holds the capture queues exclusively, but as root `rawcam.py` duplicates its fds
-(`pidfd_getfd`), asks each queue for its newest completed buffer (`VIDIOC_QUERYBUF`,
-read-only), and mmaps that dmabuf. Buffers are NV12 with Y stride 1152 (SLAM) / 640 (upper).
+## Build and install
 
 ```sh
-scripts/stream.sh                            # live 2x2 mosaic in ffplay
-scripts/stream.sh --exposure controller      # the LED-tracking exposure instead
-ssh steamos@frame.local 'sudo python3 - --frames 1' < scripts/rawcam.py \
-  | ffmpeg -f rawvideo -pix_fmt gray -s 2112x1504 -i - snap.png   # one raw snapshot
+git clone --recursive git@github.com:danthedaniel/roommate-radar.git
+cd roommate-radar
+make build                   # models, ncnn and the app, built in the Steam Runtime SDK into dist/roommate-radar
+make deploy-roommate-radar   # pairs your ssh key with the Frame (approve on the headset), installs it as a Steam app
 ```
 
-## Ansible
+Then start **Devkit Game: roommate_radar** from the Steam Library once and restart SteamVR: the first run registers
+the driver, which SteamVR loads when it starts. From then on Roommate Radar starts with SteamVR. `make logs` follows its
+log.
 
-`make build` builds (`guardian/build.sh`, on the Mac), `ansible/deploy.yml` installs; deploy pairs the key first (`ansible/pair.yml`). Together they
-set up a fresh Frame and redeploy an existing one (`make build`, then `make deploy | deploy-mirror | deploy-guardian`,
-or `cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian]`). Only Developer Mode has to be
-switched on by hand. Every first-time step is skipped once its output exists.
+## How it works
 
-- Always (deploy): pairs `~/.ssh/id_rsa.pub` over the devkit service if ssh with it fails (approve on the headset if asked).
-- `mirror` (deploy): ships `mirrorserver.py` and enables the `mirrorserver` user service.
-- `guardian` build (`guardian/build.sh`): on the Mac, checks out the ncnn submodule, downloads `yolo11n-grayscale.pt` and exports + preps the
-  models into `models/` (`uvx`, needs uv), downloads `libopenvr_api.so`, the font and rustup, then builds ncnn and
-  guardian (cargo, tests included) in the Steam Runtime SDK (Docker Desktop; needs a few GB of memory, ncnn's arm
-  gemm kernels take ~2 GB to compile) into `dist/guardian`.
-- `guardian` deploy: installs `dist/guardian` as a Steam app (devkit shortcut, Steam Linux Runtime 4), as from the
-  Store; see [guardian](guardian/README.md).
+A SteamVR driver, running inside vrserver (which may read XRService's camera buffers), publishes the newest frames
+from the two SLAM cameras to shared memory. The app rectifies them into a stereo pair aligned with your head, runs
+YOLO11n (ncnn on Vulkan) on both views at once, matches the boxes across views for depth, and tracks each person or
+pet in 3D (Kalman filter + Hungarian matching) to draw smooth, world-locked outlines as OpenVR overlays. The details,
+the measurements behind the defaults and what didn't work are in
+[packages/roommate-radar/README.md](packages/roommate-radar/README.md).
 
-## Dead ends (so we don't retry them)
+## Repository
 
-- OpenXR `/interaction_profiles/valve/frame_controller`: SteamVR rejects suggested bindings for it; suggest
-  `valve/index_controller` + `khr/simple_controller` aim poses instead and SteamVR remaps the Frame controllers.
-- `IVRTrackedCamera` (OpenVR): HMD reports a camera but `Prop_CameraFrameLayout=0`, `GetCameraFrameSize` fails.
-- Reading `/dev/videoN` directly: EBUSY while SteamVR runs. With SteamVR stopped it streams,
-  but exposure is ~0 (V4L2 exposes only `analogue_gain`; std OV exposure regs aren't what XRService uses).
-- Stopping SteamVR: `steamvr.service` is `Restart=always` and gets restarted by `steam.service`.
-  `XRService --snapshotCamerasAndExit` works if SteamVR is masked first (`systemctl --user mask --runtime`).
-- `/proc/<pid>/mem` can't read dmabuf mappings (EIO) — hence `pidfd_getfd`.
+- [`packages/roommate-radar/`](packages/roommate-radar/README.md): the app and its SteamVR driver (Rust), its build
+  (`build.sh`) and install (`deploy.yml`).
+- [`packages/mirror/`](packages/mirror/README.md): the headset view streamed to your computer over UDP, for watching
+  and recording what's on screen.
+- [`docs/steam-frame.md`](docs/steam-frame.md): notes on the Frame itself: access, devkit key pairing, the cameras,
+  dead ends.
+- `scripts/`: raw camera tools (live mosaic of all four tracking cameras).
+- `third_party/ncnn`: submodule, [danthedaniel/ncnn](https://github.com/danthedaniel/ncnn) (upstream ncnn plus a GPU
+  queue priority option and a few C API calls).
+- `ansible/` (inventory, key pairing, the playbook that runs each package's `deploy.yml`) and the `Makefile`:
+  `make build | deploy | deploy-mirror | deploy-roommate-radar | logs | stream | cams | ssh`. `make deploy` sets up a
+  fresh Frame and redeploys an existing one; every first-time step is skipped once its output exists.
+- Lint/format: ruff and basedpyright for the Python (3.12, the Frame's) in `pyproject.toml`; `cargo fmt` and
+  `cargo clippy` for the Rust (`packages/roommate-radar/rustfmt.toml`).
 
-## Finding it if the IP changes
+## License
 
-```sh
-dig +short frame.local @224.0.0.251 -p 5353
-nmap -p 22,32000 --open <your LAN>/24
-```
-
-## Refs
-
-- https://partner.steamgames.com/doc/steamhardware/steamframe/setup
-- https://partner.steamgames.com/doc/steamhardware/steamframe/debugging
+[AGPL-3.0](LICENSE). It uses ncnn (BSD-3-Clause), the OpenVR SDK (BSD-3-Clause), Noto Sans (SIL OFL 1.1) and
+Ultralytics' YOLO11n weights (AGPL-3.0), which the build downloads.

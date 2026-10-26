@@ -1,7 +1,7 @@
-// Links the guardian binary (and its tests) against ncnn (third_party/ncnn-install, built by build.sh with the SDK's
-// static glslang) and the OpenVR SDK's libopenvr_api.so, shipped next to the binary. The driver links neither.
+// Links the roommate-radar binary (and its tests) against ncnn (third_party/ncnn-install, built by build.sh with the
+// SDK's static glslang) and the OpenVR SDK's libopenvr_api.so, shipped next to the binary. The driver links neither.
 fn main() {
-    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/..");
+    let root = concat!(env!("CARGO_MANIFEST_DIR"), "/../..");
     for arg in [
         &format!("{root}/third_party/ncnn-install/lib/libncnn.a"),
         "-l:libSPIRV.a",

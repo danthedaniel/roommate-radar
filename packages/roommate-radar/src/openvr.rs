@@ -1,6 +1,6 @@
 //! OpenVR through its C API: VR_InitInternal2, then each interface as a table of function pointers
 //! ("FnTable:IVROverlay_028": openvr_capi.h's FnTables, generated into openvr_sys.rs). Wrapped here for the calls
-//! guardian makes.
+//! roommate-radar makes.
 use std::ffi::{CStr, CString, c_char, c_void};
 use std::sync::OnceLock;
 

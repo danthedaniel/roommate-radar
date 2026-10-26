@@ -1,4 +1,4 @@
-//! Shared-memory frame handoff from camserver (driver_guardian, in vrserver) to guardian.
+//! Shared-memory frame handoff from camserver (driver_roommate_radar, in vrserver) to roommate-radar.
 //! One seqlock-protected slot per SLAM camera holding the newest normal-exposure Y plane.
 use std::cell::UnsafeCell;
 use std::sync::atomic::{AtomicU64, Ordering, fence};

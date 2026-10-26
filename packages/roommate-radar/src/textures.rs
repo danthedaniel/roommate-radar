@@ -71,7 +71,7 @@ impl Vulkan {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| e.to_string())?;
         let iext = vr().vulkan_extensions(None);
         let iptr: Vec<_> = iext.iter().map(|e| e.as_ptr()).collect();
-        let app = vk::ApplicationInfo::default().application_name(c"guardian").api_version(vk::API_VERSION_1_1);
+        let app = vk::ApplicationInfo::default().application_name(c"roommate-radar").api_version(vk::API_VERSION_1_1);
         let ici = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&iptr);
         let instance = unsafe { entry.create_instance(&ici, None) }.map_err(|e| e.to_string())?;
         let phys = vk::PhysicalDevice::from_raw(vr().output_device(instance.handle().as_raw()));

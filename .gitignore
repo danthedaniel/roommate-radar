@@ -1,9 +1,9 @@
 # The installed app and its build trees (make build; cargo on the Mac)
-guardian/target/
+packages/roommate-radar/target/
 build-sdk/
 dist/
 models/
-# From guardian/build.sh: libopenvr_api.so, the label font, ncnn built in the Steam Runtime SDK
+# From packages/roommate-radar/build.sh: libopenvr_api.so, the label font, ncnn built in the Steam Runtime SDK
 third_party/openvr/
 third_party/fonts/
 third_party/ncnn-install/

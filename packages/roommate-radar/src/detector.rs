@@ -1,7 +1,7 @@
-//! guardian's stereo YOLO detector thread. Reads the two SLAM camera frames published by camserver, rectifies each into
-//! a virtual pinhole camera aligned with the head frame (so the pair is a rectified stereo pair, calib.rs), runs YOLO11n
-//! (ncnn, Vulkan) on both views stacked into one image, matches detections across views and triangulates depth from
-//! disparity (stereo.rs). Results (head frame at capture time) go to DETS.
+//! roommate-radar's stereo YOLO detector thread. Reads the two SLAM camera frames published by camserver, rectifies
+//! each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified stereo pair, calib.rs),
+//! runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views and triangulates
+//! depth from disparity (stereo.rs). Results (head frame at capture time) go to DETS.
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::time::Duration;
@@ -271,7 +271,7 @@ pub fn num(a: &str, next: &mut dyn FnMut() -> Result<String, String>) -> Result<
     next()?.parse().map_err(|_| format!("bad value for {a}"))
 }
 
-/// The frames driver_guardian publishes (mapped read-only).
+/// The frames driver_roommate_radar publishes (mapped read-only).
 struct Frames(*const shm::Header);
 
 impl std::ops::Deref for Frames {
@@ -287,9 +287,9 @@ impl Drop for Frames {
     }
 }
 
-/// The frames, once driver_guardian publishes them; None on quit.
+/// The frames, once driver_roommate_radar publishes them; None on quit.
 fn open_frames() -> Result<Option<Frames>, String> {
-    // driver_guardian creates the file before sizing it; touching a mapping past its end is SIGBUS.
+    // driver_roommate_radar creates the file before sizing it; touching a mapping past its end is SIGBUS.
     let mut logged = false;
     let file = loop {
         if QUIT.load(Ordering::Relaxed) {
@@ -301,7 +301,7 @@ fn open_frames() -> Result<Option<Frames>, String> {
             break f;
         }
         if !logged {
-            eprintln!("waiting for driver_guardian ({}; restart SteamVR after the first run)", shm::PATH);
+            eprintln!("waiting for driver_roommate_radar ({}; restart SteamVR after the first run)", shm::PATH);
             logged = true;
         }
         std::thread::sleep(Duration::from_secs(1));

@@ -1,6 +1,6 @@
-# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|guardian] (or make deploy[-mirror|-guardian])
+# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|roommate-radar] (or make deploy[-mirror|-roommate-radar])
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
-# guardian installs what build.sh (make build) left in dist/guardian.
+# roommate-radar installs what build.sh (make build) left in dist/roommate-radar.
 - import_playbook: pair.yml
-- import_playbook: ../mirror/deploy.yml
-- import_playbook: ../guardian/deploy.yml
+- import_playbook: ../packages/mirror/deploy.yml
+- import_playbook: ../packages/roommate-radar/deploy.yml

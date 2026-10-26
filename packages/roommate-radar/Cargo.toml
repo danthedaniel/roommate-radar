@@ -1,18 +1,19 @@
 [package]
-name = "guardian"
+name = "roommate-radar"
 version = "0.1.0"
+license = "AGPL-3.0-only"
 edition = "2024"
 publish = false
 
 # The SteamVR driver (src/driver/), loaded into the host's vrserver
 [lib]
-name = "driver_guardian"
+name = "driver_roommate_radar"
 path = "src/driver/lib.rs"
 crate-type = ["cdylib"]
 
 # The overlay app
 [[bin]]
-name = "guardian"
+name = "roommate-radar"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,5 +1,5 @@
-//! The "Guardian" dashboard tab: header with a status line, then one row per setting. Drawn on the CPU like the labels
-//! (draw.rs); the dashboard's laser pointer arrives as mouse events in texture pixels.
+//! The "Roommate Radar" dashboard tab: header with a status line, then one row per setting. Drawn on the CPU like the
+//! labels (draw.rs); the dashboard's laser pointer arrives as mouse events in texture pixels.
 use crate::detector;
 use crate::draw::{self, Image, Rgb, WHITE, over, rrect_sd};
 use crate::openvr::{self, VROverlayHandle_t, vr};
@@ -90,26 +90,10 @@ fn fill_circle(img: &mut Image, cx: f32, cy: f32, r: f32, rgb: Rgb, a: f32) {
     fill_rrect(img, cx - r, cy - r, 2.0 * r, 2.0 * r, r, rgb, a);
 }
 
-/// Tab icon: the box's corner brackets on a dark tile.
+/// Tab icon: assets/icon.svg, rasterized (straight-alpha RGBA) with
+/// `rsvg-convert -w 128 -h 128 icon.svg | magick - -depth 8 rgba:icon-128.rgba`
 fn icon() -> Image {
-    let size = 128;
-    let mut img = Image::new(size, size);
-    let mut bx = draw::outline(80, 96, 0, 5.0);
-    for y in 0..size {
-        for x in 0..size {
-            let p = img.at(x, y);
-            over(
-                p,
-                BG,
-                (0.5 - rrect_sd(x as f32 + 0.5, y as f32 + 0.5, size as f32, size as f32, 0.0, 24.0)).clamp(0.0, 1.0),
-            );
-            if (24..24 + 80).contains(&x) && (16..16 + 96).contains(&y) {
-                let b = bx.at(x - 24, y - 16);
-                over(p, [b[0], b[1], b[2]], b[3] as f32 / 255.0);
-            }
-        }
-    }
-    img
+    Image { w: 128, h: 128, px: include_bytes!("../assets/icon-128.rgba").to_vec() }
 }
 
 pub struct Panel {
@@ -128,7 +112,7 @@ impl Panel {
     /// Creates the dashboard overlay (the tab) and its icon.
     pub fn create(&mut self, textures: &mut Textures, set: &Settings) -> Result<(), String> {
         let (dash, icon_ov) = vr()
-            .create_dashboard_overlay("steamframe.guardian.dashboard", "Guardian")
+            .create_dashboard_overlay("steamframe.roommate-radar.dashboard", "Roommate Radar")
             .map_err(|e| format!("CreateDashboardOverlay: {e}"))?;
         self.dash = dash;
         textures.set(icon_ov, &icon());
@@ -249,7 +233,7 @@ impl Panel {
         let (wf, hf) = (W as f32, H as f32);
         let mut img = Image::new(W, H);
         fill_rrect(&mut img, 0.0, 0.0, wf, hf, 32.0, BG, 0.94);
-        img.text(PAD as i32, 100, "Guardian", WHITE, 56.0);
+        img.text(PAD as i32, 100, "Roommate Radar", WHITE, 56.0);
         img.text(PAD as i32, 150, status, GREY, 30.0);
         let on = [set.enabled, self.autolaunch(), set.games_only, set.people, set.pets, set.hands];
         for row in 0..=RANGE_ROW {
@@ -356,6 +340,14 @@ mod tests {
         assert!(!set.people && set.max_dist == 8.0);
         let mut img = p.render(Some(PETS), "Watching", &set);
         assert!(img.at(0, 0)[3] == 0 && img.at(500, 5)[3] > 200);
+    }
+
+    #[test]
+    fn icon_raster() {
+        // The size icon() claims; transparent outside the rounded tile, the white "you" dot at the fan's apex.
+        let mut i = icon();
+        assert_eq!(i.px.len(), 128 * 128 * 4);
+        assert!(i.at(0, 0)[3] == 0 && i.at(64, 106) == [245, 245, 247, 255]);
     }
 
     #[test]

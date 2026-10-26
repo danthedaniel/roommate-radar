@@ -1,4 +1,4 @@
-"""Adapt an ultralytics YOLO11 ncnn export for guardian. Usage: prep_model.py models/yolo11n_576.ncnn
+"""Adapt an ultralytics YOLO11 ncnn export for roommate-radar. Usage: prep_model.py models/yolo11n_576.ncnn
 
 Writes <prefix>_gray.ncnn.{param,bin}:
 - The C2PSA attention's MatMul/Softmax/MatMul becomes one SDPA layer. ncnn has no Vulkan MatMul, so it ran on the

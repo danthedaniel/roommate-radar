@@ -11,7 +11,7 @@
       failed_when: false
       tags: always
 
-    # Devkit host pairing (see README); approve on the headset if it asks.
+    # Devkit host pairing (see docs/steam-frame.md); approve on the headset if it asks.
     - name: Pair ~/.ssh/id_rsa.pub
       uri:
         url: http://{{ hostvars.frame.ansible_host }}:32000/register
