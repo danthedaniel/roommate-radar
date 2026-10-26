@@ -16,3 +16,4 @@ captures/
 # Claude Code's local state (worktrees)
 .claude/
 .DS_Store
+.zed/
