@@ -151,7 +151,8 @@ fn run() -> i32 {
             }
         }
         panel.poll(&mut set);
-        let run = set.enabled && (in_game || !set.games_only);
+        let run = set.warned && set.enabled && (in_game || !set.games_only); // the tab's first-run warning first
+
         detector::PAUSED.store(!run, Ordering::Relaxed);
         if !run {
             tracker.tracks.clear();

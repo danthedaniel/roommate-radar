@@ -48,7 +48,7 @@ rectification, `stereo.rs` matching and depth), `measure.rs` (detections to trac
 dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
 `textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `v3.rs`; `openvr.rs` and
 `ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs`, and
-`shm.rs` between it and roommate-radar. `assets/icon.svg` is the tab icon; the app embeds its raster, `icon-128.rgba`
+`shm.rs` between it and roommate-radar. `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)
 (the command is in `panel.rs`). Tests: `cargo test` (build.sh runs them in the SDK); on the Mac,
 `cargo clippy --target aarch64-unknown-linux-gnu --all-targets` checks everything but the link.
 

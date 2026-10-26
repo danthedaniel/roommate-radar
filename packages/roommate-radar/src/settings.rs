@@ -17,6 +17,7 @@ pub struct Settings {
     pub hz: f32,               // YOLO runs per second, one of RATES
     pub autostart: bool,       // start with SteamVR (the driver launches the app, autostart.rs)
     pub gameid: Option<u64>,   // not in the tab: Steam's id for this app (SteamGameId), for the driver to launch it
+    pub warned: bool,          // not in the tab: the first-run warning was acknowledged (main.rs)
     pub path: Option<PathBuf>, // where save() writes; None: nowhere (tests)
 }
 
@@ -34,6 +35,7 @@ impl Default for Settings {
             hz: 4.0,
             autostart: true,
             gameid: None,
+            warned: false,
             path: None,
         }
     }
@@ -57,6 +59,7 @@ impl Settings {
                 "games_only" => s.games_only = f != 0.0,
                 "play_area" => s.play_area = f != 0.0,
                 "autostart" => s.autostart = f != 0.0,
+                "warned" => s.warned = f != 0.0,
                 "gameid" => s.gameid = v.parse().ok(),
                 "max_dist" => s.max_dist = f,
                 "size" if SIZES.contains(&(f as i32)) => s.size = f as i32,
@@ -75,7 +78,7 @@ impl Settings {
         let _ = std::fs::write(
             path,
             format!(
-                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nplay_area={}\nmax_dist={:.1}\nsize={}\nhz={}\nautostart={}\n{}",
+                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nplay_area={}\nmax_dist={:.1}\nsize={}\nhz={}\nautostart={}\nwarned={}\n{}",
                 b(self.enabled),
                 b(self.people),
                 b(self.pets),
@@ -86,6 +89,7 @@ impl Settings {
                 self.size,
                 self.hz,
                 b(self.autostart),
+                b(self.warned),
                 self.gameid.map(|g| format!("gameid={g}\n")).unwrap_or_default()
             ),
         );
@@ -106,6 +110,7 @@ mod tests {
             size: 640,
             hz: 16.0,
             autostart: false,
+            warned: true,
             gameid: Some(16375998297183092736),
             path: Some(path.clone()),
             ..Settings::default()
@@ -114,6 +119,6 @@ mod tests {
         let l = Settings::load(path.clone());
         std::fs::remove_file(path).unwrap();
         assert!(!l.people && l.pets && l.play_area && l.max_dist == 4.5 && l.size == 640 && l.hz == 16.0);
-        assert!(!l.autostart && l.gameid == Some(16375998297183092736), "a game id doesn't fit in an f32");
+        assert!(!l.autostart && l.warned && l.gameid == Some(16375998297183092736), "a game id doesn't fit in an f32");
     }
 }

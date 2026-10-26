@@ -120,6 +120,34 @@ enum Ctl {
     Row(usize),       // a switch's or dropdown's row
     Step(usize, i32), // a stepper's (-) (-1) or (+) (1)
     Item(usize),      // the open popup's choice
+    Ack,              // the first-run warning's button
+}
+
+/// Shown in the tab, instead of the settings, until its button is pressed (the dashboard opens on it at first start).
+/// Broken by hand, each sentence on its own lines.
+const WARNING: [&str; 4] = [
+    "Roommate Radar won't always",
+    "see people and pets.",
+    "Don't rely on it to avoid collisions:",
+    "keep your play area clear.",
+];
+// Centered, top to bottom: the icon, a heading, the warning, the button.
+const ICON_Y0: f32 = 72.0;
+const HEAD_Y: f32 = 360.0; // baselines
+const HEAD_SIZE: f32 = 72.0;
+const WARN_Y: f32 = 475.0;
+const WARN_SIZE: f32 = 50.0;
+const WARN_LINE: f32 = 70.0;
+const ACK_W: f32 = 560.0;
+const ACK_H: f32 = 120.0;
+const ACK_Y0: f32 = 780.0;
+const ACK_X0: f32 = (W as f32 - ACK_W) / 2.0;
+const ACK_SIZE: f32 = 52.0;
+const WARN_H: usize = (ACK_Y0 + ACK_H) as usize + 72; // shorter than the settings
+
+/// The tab's height in texture pixels: the warning's until it's acknowledged.
+fn height(set: &Settings) -> usize {
+    if set.warned { H } else { WARN_H }
 }
 
 const TOGGLE_W: f32 = 104.0;
@@ -134,6 +162,7 @@ const PLUS_CX: f32 = W as f32 - PAD - BTN_R;
 const HOVER_TICK_US: u16 = 1500; // hover haptic
 const BG: Rgb = [20, 20, 24];
 const GREY: Rgb = [150, 150, 160];
+const LIGHT: Rgb = [205, 205, 212]; // body text: between WHITE and GREY
 const TRACK_OFF: Rgb = [68, 68, 76];
 const BTN: Rgb = [52, 52, 60];
 
@@ -273,8 +302,8 @@ impl Control {
 
 #[allow(clippy::too_many_arguments)]
 fn fill_rrect(img: &mut Image, x0: f32, y0: f32, w: f32, h: f32, r: f32, rgb: Rgb, a: f32) {
-    for y in (y0 as i32 - 1).max(0)..((y0 + h) as i32 + 2).min(H as i32) {
-        for x in (x0 as i32 - 1).max(0)..((x0 + w) as i32 + 2).min(W as i32) {
+    for y in (y0 as i32 - 1).max(0)..((y0 + h) as i32 + 2).min(img.h as i32) {
+        for x in (x0 as i32 - 1).max(0)..((x0 + w) as i32 + 2).min(img.w as i32) {
             let sd = rrect_sd(x as f32 + 0.5 - x0, y as f32 + 0.5 - y0, w, h, 0.0, r);
             over(img.at(x as usize, y as usize), rgb, a * (0.5 - sd).clamp(0.0, 1.0));
         }
@@ -286,7 +315,7 @@ fn fill_circle(img: &mut Image, cx: f32, cy: f32, r: f32, rgb: Rgb, a: f32) {
 }
 
 /// Tab icon: assets/icon.svg, rasterized (straight-alpha RGBA) with
-/// `rsvg-convert -w 128 -h 128 icon.svg | magick - -depth 8 rgba:icon-128.rgba`
+/// `rsvg-convert -w 128 -h 128 icon.svg | magick - -depth 8 rgba:icon-128.rgba` (and 176 for the warning's)
 fn icon() -> Image {
     Image { w: 128, h: 128, px: include_bytes!("../assets/icon-128.rgba").to_vec() }
 }
@@ -308,13 +337,20 @@ impl Panel {
         self.dash = dash;
         textures.set(icon_ov, &icon());
         vr().set_width(dash, 1.5);
-        vr().set_mouse_input(dash, W as f32, H as f32);
+        vr().set_mouse_input(dash, W as f32, height(set) as f32);
         textures.set(dash, &self.render(None, "Starting", set));
+        if !set.warned {
+            vr().show_dashboard("steamframe.roommate-radar.dashboard");
+        }
         Ok(())
     }
 
     /// Which control (texture pixel, y down) is under the pointer; greyed-out rows don't hover or press.
     fn hit(&self, x: f32, y: f32, set: &Settings) -> Option<Ctl> {
+        if !set.warned {
+            let on = (ACK_X0..=ACK_X0 + ACK_W).contains(&x) && (ACK_Y0..=ACK_Y0 + ACK_H).contains(&y);
+            return on.then_some(Ctl::Ack);
+        }
         if let Some(row) = self.popup {
             return at(row).1.hit_popup(row, x, y, set);
         }
@@ -325,7 +361,10 @@ impl Panel {
 
     /// While a popup is open any press closes it (None: outside it); an item also picks that choice.
     fn press(&mut self, ctl: Option<Ctl>, set: &mut Settings) {
-        if let Some(row) = self.popup.take() {
+        if ctl == Some(Ctl::Ack) {
+            set.warned = true;
+            set.save();
+        } else if let Some(row) = self.popup.take() {
             if let Some(c @ Ctl::Item(_)) = ctl {
                 at(row).1.press(c, set);
             }
@@ -341,7 +380,7 @@ impl Panel {
         while let Some(ev) = vr().poll_overlay_event(self.dash) {
             let mouse = unsafe { ev.data.mouse };
             // Mouse y is up from the bottom of the texture.
-            let c = self.hit(mouse.x, H as f32 - mouse.y, set);
+            let c = self.hit(mouse.x, height(set) as f32 - mouse.y, set);
             if ev.eventType == openvr::EVREventType_VREvent_MouseMove && c != self.hover {
                 self.hover = c;
                 self.drawn.clear();
@@ -354,6 +393,9 @@ impl Panel {
             if ev.eventType == openvr::EVREventType_VREvent_MouseButtonDown && (c.is_some() || self.popup.is_some()) {
                 self.press(c, set);
                 self.drawn.clear();
+                if c == Some(Ctl::Ack) {
+                    vr().set_mouse_input(self.dash, W as f32, H as f32); // the settings' height from now on
+                }
             }
         }
     }
@@ -367,8 +409,28 @@ impl Panel {
     }
 
     fn render(&self, hover: Option<Ctl>, status: &str, set: &Settings) -> Image {
-        let mut img = Image::new(W, H);
-        fill_rrect(&mut img, 0.0, 0.0, W as f32, H as f32, 32.0, BG, 0.94);
+        let mut img = Image::new(W, height(set));
+        fill_rrect(&mut img, 0.0, 0.0, W as f32, height(set) as f32, 32.0, BG, 0.94);
+        if !set.warned {
+            let mut centered = |y: f32, s: &str, rgb: Rgb, size: f32| {
+                img.text((W as f32 - draw::text_width(0, s, size) as f32) as i32 / 2, y as i32, s, rgb, size)
+            };
+            centered(HEAD_Y, "Before You Play", WHITE, HEAD_SIZE);
+            for (i, line) in WARNING.iter().enumerate() {
+                centered(WARN_Y + i as f32 * WARN_LINE, line, LIGHT, WARN_SIZE);
+            }
+            let ic = Image { w: 176, h: 176, px: include_bytes!("../assets/icon-176.rgba").to_vec() }; // icon()'s, bigger
+            let x0 = (W - ic.w) / 2;
+            for (i, p) in ic.px.chunks(4).enumerate() {
+                over(img.at(x0 + i % ic.w, ICON_Y0 as usize + i / ic.w), [p[0], p[1], p[2]], p[3] as f32 / 255.0);
+            }
+            let a = if hover == Some(Ctl::Ack) { 1.0 } else { 0.85 };
+            fill_rrect(&mut img, ACK_X0, ACK_Y0, ACK_W, ACK_H, ACK_H / 2.0, draw::class_rgb(0), a);
+            let label = "I Understand";
+            let x = (W as f32 - draw::text_width(0, label, ACK_SIZE) as f32) / 2.0;
+            img.text(x as i32, (ACK_Y0 + ACK_H / 2.0 + ACK_SIZE * 0.36) as i32, label, WHITE, ACK_SIZE);
+            return img;
+        }
         img.text(PAD as i32, 100, "Roommate Radar", WHITE, 56.0);
         img.text(PAD as i32, 150, status, GREY, 30.0);
         for row in 0..ROWS {
@@ -390,6 +452,26 @@ mod tests {
         (0..ROWS).find(|&r| at(r).1.title == title).unwrap()
     }
 
+    /// Past the first-run warning.
+    fn warned() -> Settings {
+        Settings { warned: true, ..Settings::default() }
+    }
+
+    #[test]
+    fn first_run_warning() {
+        // Only the button hits until it's pressed; the text ends above it.
+        let (mut p, mut set) = (Panel::default(), Settings::default());
+        assert_eq!(p.hit(500.0, row_cy(row("Detect People")), &set), None);
+        let ack = p.hit(W as f32 / 2.0, ACK_Y0 + ACK_H / 2.0, &set);
+        assert_eq!(ack, Some(Ctl::Ack));
+        assert!(WARNING.iter().all(|l| draw::text_width(0, l, WARN_SIZE) as f32 <= W as f32 - 2.0 * PAD));
+        assert!(WARN_Y + (WARNING.len() - 1) as f32 * WARN_LINE + 40.0 < ACK_Y0);
+        let mut img = p.render(None, "", &set);
+        assert!(img.at(W / 2, (ACK_Y0 + 4.0) as usize)[0] > 200, "the button");
+        p.press(ack, &mut set);
+        assert!(set.warned && p.hit(500.0, row_cy(row("Detect People")), &set).is_some());
+    }
+
     #[test]
     fn sections() {
         // A gap (that hits nothing) above each section after the first; the last row ends 30 px above the bottom.
@@ -402,7 +484,7 @@ mod tests {
     #[test]
     fn hit_test() {
         // Rows and buttons hit-test to their controls; greyed-out ones don't.
-        let (p, mut set) = (Panel::default(), Settings::default());
+        let (p, mut set) = (Panel::default(), warned());
         let (people, range, hands) = (row("Detect People"), row("Range"), row("Ignore My Hands"));
         assert_eq!(p.hit(500.0, row_cy(people), &set), Some(Ctl::Row(people)));
         assert_eq!(p.hit(PLUS_CX, row_cy(range), &set), Some(Ctl::Step(range, 1)));
@@ -437,7 +519,7 @@ mod tests {
     #[test]
     fn dropdowns() {
         // Pick, a press outside closes, the rate popup fits the panel.
-        let (mut p, mut set) = (Panel::default(), Settings::default());
+        let (mut p, mut set) = (Panel::default(), warned());
         let (size, rate) = (row("Detection Resolution"), row("Detection Rate"));
         p.press(Some(Ctl::Row(size)), &mut set);
         let iy = at(size).1.popup_top(size, &set) + 2.5 * ITEM_H; // the third choice

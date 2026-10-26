@@ -236,6 +236,11 @@ impl Vr {
         call!(self.overlay(), PollNextOverlayEvent, h, &mut ev, size_of::<VREvent_t>() as u32).then_some(ev)
     }
 
+    /// Opens the dashboard on the dashboard overlay `key`.
+    pub fn show_dashboard(&self, key: &str) {
+        call!(self.overlay(), ShowDashboard, c(key).as_ptr() as *mut _);
+    }
+
     /// Blocks until the compositor's next frame; false if there is none to sync to within timeout_ms.
     pub fn wait_frame_sync(&self, timeout_ms: u32) -> bool {
         call!(self.overlay(), WaitFrameSync, timeout_ms) == 0
