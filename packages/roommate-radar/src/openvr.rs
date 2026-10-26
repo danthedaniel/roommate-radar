@@ -221,6 +221,7 @@ impl Vr {
 
     /// RGBA pixels, copied.
     pub fn set_raw(&self, h: VROverlayHandle_t, px: &[u8], w: u32, ht: u32) {
+        assert!(px.len() >= w as usize * ht as usize * 4);
         call!(self.overlay(), SetOverlayRaw, h, px.as_ptr() as *mut c_void, w, ht, 4);
     }
 

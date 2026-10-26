@@ -217,7 +217,9 @@ fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
 fn map_buf<'a>(c: &'a mut Camera, pidfd: &OwnedFd, remote_fd: RawFd) -> Option<&'a Mapping> {
     let fd = pidfd_getfd(pidfd, remote_fd)?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } < 0 {
+    // The fd number may have been reused for something smaller (a dmabuf's st_size is its size): reading past its end
+    // would SIGBUS vrserver.
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } < 0 || (st.st_size as usize) < shm::FRAME {
         return None;
     }
     let ino = st.st_ino;
@@ -333,6 +335,10 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
             }
             let arrival = shm::now_ns();
             bufs.sort_by(|a, b| b.seq.cmp(&a.seq));
+            // XRService restarted streaming on the same fd: its sequence counts from 0 again
+            if c.last_published.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
+                c.last_published = None;
+            }
             if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
                 continue;
             }

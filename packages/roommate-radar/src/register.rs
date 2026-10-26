@@ -39,7 +39,10 @@ fn register_driver() {
     let Some(runtime) = paths["runtime"][0].as_str() else {
         return eprintln!("roommate-radar: no runtime in {path}; driver not registered");
     };
-    let _ = Command::new(format!("{runtime}/bin/vrpathreg.sh")).args(["adddriver", &driver]).status();
+    match Command::new(format!("{runtime}/bin/vrpathreg.sh")).args(["adddriver", &driver]).status() {
+        Ok(s) if s.success() => {}
+        r => return eprintln!("roommate-radar: vrpathreg.sh adddriver {driver}: {r:?}; driver not registered"),
+    }
     println!("roommate-radar: registered {driver} with SteamVR; it loads when SteamVR next starts");
 }
 
