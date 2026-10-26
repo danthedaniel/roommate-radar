@@ -13,7 +13,8 @@ you're playing.
   the range, the detection resolution and rate, and whether to run only while a game is running.
 - Starts with SteamVR. No root and no system changes: it installs like a Steam app (in the Steam Linux Runtime 4
   container), plus a SteamVR driver that reads the camera frames.
-- Light on the GPU: YOLO11n at 320 px and 4 Hz, on a low-priority queue the game preempts.
+- Light on the GPU: YOLO11n at 320 px and 4 Hz (default, adjustable up to 640px and 16Hz), on a low-priority queue the
+  game preempts.
 
 ## Requirements
 
