@@ -47,7 +47,7 @@ static SECTIONS: [&[Control]; 3] = [
             kind: Kind::Switch(|s| &mut s.hands),
         },
         Control {
-            title: "Only Near Play Area",
+            title: "Only Detect Near Play Area",
             detail: "Inside your boundary or within 1.5 m of it",
             dimmed: NEEDS_ENABLED,
             kind: Kind::Switch(|s| &mut s.play_area),
