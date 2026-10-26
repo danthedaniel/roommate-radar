@@ -116,8 +116,7 @@ unsafe extern "C" fn init(_: *mut Provider, ctx: *mut DriverContext) -> i32 {
             log!("copy /persist/{f}: {e}");
         }
     }
-    *THREADS.lock().unwrap() =
-        vec![std::thread::spawn(|| camserver::run(["/dev/video3", "/dev/video0"])), std::thread::spawn(autostart::run)];
+    *THREADS.lock().unwrap() = vec![std::thread::spawn(camserver::run), std::thread::spawn(autostart::run)];
     INIT_ERROR_NONE
 }
 

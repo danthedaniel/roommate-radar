@@ -20,9 +20,10 @@
         rsync_opts: [--exclude=/roommate-radar.vrmanifest]
       register: sync
 
-    # From rsync's itemized changes: a file under driver/ sent (>f...) or deleted
+    # From rsync's itemized changes (synchronize drops the <<CHANGED>> marker from stdout_lines): a file under driver/
+    # sent (<f..., a push) or deleted
     - set_fact:
-        driver_changed: "{{ sync.stdout_lines | select('search', '^<<CHANGED>>(>f\\S*|\\*deleting) +driver/') | list | length > 0 }}"
+        driver_changed: "{{ sync.stdout_lines | select('search', '^(<f\\S*|\\*deleting) +driver/') | list | length > 0 }}"
 
     # What the devkit client's upload writes: the command line, and the runtime Steam should run it in
     - name: Set the launch command and runtime
