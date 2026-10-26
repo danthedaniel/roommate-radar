@@ -65,7 +65,7 @@ fn own_arm(o: &Obj) -> bool {
 }
 
 /// Boxes entirely higher than this above the floor (standing universe y = 0) are dropped: nobody's up there (m).
-const MAX_BOTTOM: f32 = 2.5;
+const MAX_BOTTOM: f32 = 2.0;
 
 /// How far outside the play area's boundary detections are still kept (m).
 const PLAY_AREA_MARGIN: f32 = 1.5;
@@ -197,8 +197,8 @@ mod tests {
         assert!(meas(&[person(0, 0.4, 0.0)], &[], &set).is_empty(), "person closer than 50 cm dropped");
         let high =
             |y0: f32| obj(0, 2.0, [[-0.3, y0 + 0.5, -2.0], [0.3, y0 + 0.5, -2.0], [0.3, y0, -2.0], [-0.3, y0, -2.0]]);
-        assert!(meas(&[high(1.0)], &[], &set).is_empty(), "box entirely above 2.5 m dropped");
-        assert_eq!(meas(&[high(0.8)], &[], &set).len(), 1, "box reaching below 2.5 m kept");
+        assert!(meas(&[high(0.5)], &[], &set).is_empty(), "box entirely above 2 m dropped");
+        assert_eq!(meas(&[high(0.3)], &[], &set).len(), 1, "box reaching below 2 m kept");
     }
 
     #[test]
