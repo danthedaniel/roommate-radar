@@ -40,7 +40,7 @@ fn holds_controller(o: &Obj, controllers: &[V3]) -> bool {
     let m = 0.15;
     let (c, b) = (o.origin, &o.corners);
     controllers.iter().any(|&hand| {
-        let shoulder = v3(0.18f32.copysign(hand.x), -0.25, 0.0); // ponytail: one body size for everyone
+        let shoulder = v3(0.18f32.copysign(hand.x), -0.25, 0.0); // one body size for everyone
         (4..=10).any(|k| {
             let p = shoulder + (hand - shoulder) * (k as f32 / 10.0);
             let s = (p.z - c.z) / (b[0].z - c.z);
@@ -123,7 +123,7 @@ pub fn measurements(
             if w.iter().all(|p| p.y > MAX_BOTTOM) {
                 return None;
             }
-            // ponytail: isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
+            // isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
             // ray would track lateral motion tighter
             let sigma = 0.05 + 0.02 * o.dist * o.dist;
             Some(Meas {

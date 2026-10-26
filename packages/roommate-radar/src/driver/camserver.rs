@@ -370,7 +370,7 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
                 frame.copy_from_slice(unsafe { std::slice::from_raw_parts(mb.p, shm::FRAME) });
                 dma_buf_sync(&mb.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
                 let m = sample_mean(&frame);
-                // ponytail: brightness heuristic; black level ~16, controller frames sit right on it
+                // brightness heuristic; black level ~16, controller frames sit right on it
                 let normal = if c.normal_mean == 0.0 { m > 20.0 } else { m > 16.0 + 0.3 * (c.normal_mean - 16.0) };
                 if !normal {
                     continue;
