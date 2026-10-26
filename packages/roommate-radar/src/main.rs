@@ -190,8 +190,10 @@ fn run() -> i32 {
         } else if now - last_det_ns > 2_000_000_000 {
             let p = detector::PROBLEM.lock().unwrap();
             if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
-        } else {
+        } else if cfg!(feature = "developer") {
             format!("Watching  ·  YOLO {:.0} ms  ·  {n} in view", YOLO_MS.load())
+        } else {
+            format!("Watching  ·  {n} in view")
         };
         panel.update(&mut textures, &status, &set);
     }

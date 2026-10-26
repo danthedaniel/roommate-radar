@@ -8,10 +8,12 @@
 #   NotoSans-Medium.ttf models/  bin/{roommate-radar,libopenvr_api.so}
 #   driver/{driver.vrdrivermanifest,bin/linuxarm64/driver_roommate_radar.so}
 # build.sh --check (CI): build and test only, without the models and dist/.
+# build.sh --developer (make deploy): with the developer feature (YOLO time in the tab's status, confidence on the labels).
 set -e
 cd "$(dirname "$0")/../.."
-check=
+check= features=
 [ "$1" = --check ] && check=1
+[ "$1" = --developer ] && features=developer
 
 # get URL FILE SHA256: download unless FILE is already there with that hash; fails if the download doesn't match
 get() {
@@ -65,7 +67,7 @@ get https://static.rust-lang.org/rustup/archive/1.29.2/aarch64-unknown-linux-gnu
 # libopenvr_api.so (roommate-radar links it) from the SDK pieces. dist/roommate-radar is rebuilt from scratch so it holds exactly
 # what's installed.
 docker run --rm -v "$PWD:/src" -w /src -e RUSTUP_HOME=/src/build-sdk/rust/rustup -e CARGO_HOME=/src/build-sdk/rust/cargo \
-	-e CARGO_TARGET_DIR=/src/build-sdk/roommate-radar -e "ncnn=$ncnn" -e "check=$check" \
+	-e CARGO_TARGET_DIR=/src/build-sdk/roommate-radar -e "ncnn=$ncnn" -e "check=$check" -e "features=$features" \
 	registry.gitlab.steamos.cloud/steamrt/steamrt4/sdk/arm64:latest sh -ec '
 built=third_party/ncnn-install/commit
 if [ -z "$ncnn" ] || [ "$(cat $built 2>/dev/null)" != "$ncnn" ]; then
@@ -82,8 +84,8 @@ fi
 export PATH="$CARGO_HOME/bin:$PATH"
 cd packages/roommate-radar
 rustup -q toolchain install
-cargo build --release
-LD_LIBRARY_PATH=/src/third_party/openvr/bin/linuxarm64 cargo test --release -q
+cargo build --release --features "$features"
+LD_LIBRARY_PATH=/src/third_party/openvr/bin/linuxarm64 cargo test --release -q --features "$features"
 [ -z "$check" ] || exit 0
 d=/src/dist/roommate-radar
 rm -rf $d

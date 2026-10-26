@@ -1,7 +1,7 @@
 # Roommate Radar: the app
 
 OpenVR overlay app (Rust, `src/`, sources below) for playing without
-passthrough: outlines people, cats and dogs within range, with class and confidence, on top of whatever game is
+passthrough: outlines people, cats and dogs within range, with their class, on top of whatever game is
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
 Detections are matched into tracks by a ByteTrack-style tracker (`tracker.rs`: per-track constant-velocity Kalman
 filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
@@ -32,6 +32,8 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
 - "Roommate Radar" tab in the SteamVR dashboard: on/off, start with SteamVR (on by default), only in games (runs from a game's launch, intro included, until it quits; passthrough itself isn't
   reported to apps), people, cats and dogs, ignore my hands, only near the play area (inside the SteamVR boundary or
   within 1 m of it, `IVRChaperoneSetup` live collision bounds; no boundary: everywhere), range, status. Saved in `~/.config/roommate-radar.conf`.
+- Developer builds (`build.sh --developer`, the `developer` cargo feature; what `make deploy` installs) add the YOLO time to the
+  tab's status and the confidence to each label. `make build` is the release build, without them.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
   at start) so the game preempts it (msm has preemption on: 4 rings).
 

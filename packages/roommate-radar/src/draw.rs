@@ -111,14 +111,14 @@ pub fn outline(w: usize, h: usize, cls: usize, line: f32) -> Image {
     img
 }
 
-/// Dark translucent pill: class-colored dot, class name in white, confidence in the class color.
-pub fn label(name: &str, pct: i32, cls: usize) -> Image {
+/// Dark translucent pill: class-colored dot, class name in white, confidence (if given) in the class color.
+pub fn label(name: &str, pct: Option<i32>, cls: usize) -> Image {
     let (rgb, bg) = (class_rgb(cls), [16, 16, 20]);
-    let num = format!("{pct}%");
+    let num = pct.map(|p| format!("{p}%")).unwrap_or_default();
     let h = 64;
     let (dot, gap, space, pad) = (14.0, 12, 12, h / 2 - 6);
     let x_name = pad + dot as i32 + gap;
-    let x_num = text_width(x_name, name, 40.0) + space;
+    let x_num = text_width(x_name, name, 40.0) + if num.is_empty() { 0 } else { space };
     let w = (text_width(x_num, &num, 40.0) + pad) as usize;
     let mut img = Image::new(w, h as usize);
     for y in 0..h as usize {
@@ -144,7 +144,7 @@ mod tests {
     #[test]
     fn label_texture() {
         // Pill sized to the text (transparent outside its rounded ends), white text, colored dot.
-        let mut l = label("person", 87, 0);
+        let mut l = label("person", Some(87), 0);
         let white = l.px.chunks(4).filter(|p| p[0] > 230 && p[1] > 230 && p[3] > 230).count();
         assert!(l.h == 64 && l.w > 3 * l.h && white > 200);
         assert!(l.at(0, 0)[3] == 0 && l.at(l.w / 2, 1)[3] > 150 && l.at(64 / 2 - 6 + 7, 64 / 2)[1] == 69);

@@ -6,7 +6,7 @@ https://github.com/user-attachments/assets/209e909d-0cea-47e2-8dc6-f2a63bc855a5
 
 See the people, cats and dogs around you while you play in VR, without turning on passthrough. Roommate Radar is a
 SteamVR overlay for the Steam Frame: it watches the headset's tracking cameras, runs a stereo YOLO detector on the GPU
-alongside your game, and outlines whoever is within range, with what they are and how sure it is, on top of whatever
+alongside your game, and outlines whoever is within range, with what they are, on top of whatever
 you're playing.
 
 - People, cats and dogs within range (1.5–8 m) get an outline and a label, world-locked and turned to face you. Your own
@@ -31,7 +31,8 @@ you're playing.
 git clone --recursive git@github.com:danthedaniel/roommate-radar.git
 cd roommate-radar
 make build                   # models, ncnn and the app, built in the Steam Runtime SDK into dist/roommate-radar
-make deploy                  # pairs your ssh key with the Frame (approve on the headset), installs it as a Steam app
+make deploy                  # developer build (YOLO time in the status, confidence on the labels), then pairs your ssh
+                             # key with the Frame (approve on the headset) and installs it as a Steam app
 ```
 
 Then start **Devkit Game: roommate_radar** from the Steam Library once and restart SteamVR: the first run registers

@@ -16,6 +16,10 @@ crate-type = ["cdylib"]
 name = "roommate-radar"
 path = "src/main.rs"
 
+# Developer builds (make deploy): YOLO time in the tab's status, confidence on the labels
+[features]
+developer = []
+
 [dependencies]
 ash = "0.38"
 fontdue = "0.9"

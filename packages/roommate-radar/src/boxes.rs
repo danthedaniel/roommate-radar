@@ -142,8 +142,8 @@ impl Boxes {
             let mut m = facing(c, h);
             vr().set_transform(self.outlines[n], &m);
 
-            let pct = (t.score * 100.0).round() as i32;
-            let text = format!("{} {pct}", name(t.cls));
+            let pct = cfg!(feature = "developer").then(|| (t.score * 100.0).round() as i32); // developer builds only
+            let text = format!("{} {pct:?}", name(t.cls));
             if self.label_text[n] != text {
                 let img = draw::label(name(t.cls), pct, t.cls);
                 textures.set(self.labels[n], &img);
