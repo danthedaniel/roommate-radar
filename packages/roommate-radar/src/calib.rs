@@ -63,6 +63,10 @@ pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
     let cad_from_cal = frame(&dev["cv"]["cad_from_cal"], 1.0).ok_or_else(|| bad("cv/cad_from_cal"))?;
     let cal_from_cam = frame(&cam["extrinsics"], 1e-3).ok_or_else(|| bad(&format!("extrinsics for {name}")))?;
     let (r, t) = compose(&compose(&head_from_cad, &cad_from_cal), &cal_from_cam);
+    let dot = |i: usize, j: usize| (0..3).map(|k| r[i][k] * r[j][k]).sum::<f64>();
+    if (0..3).any(|i| (0..3).any(|j| (dot(i, j) - if i == j { 1.0 } else { 0.0 }).abs() > 1e-3)) {
+        return Err(format!("calibration: {name} rotation not orthonormal"));
+    }
     let k = |n: &str| kb[n].as_f64().map(|v| v as f32).ok_or_else(|| bad(&format!("{n} for {name}")));
     Ok(CamCal {
         fx: k("fx")?,

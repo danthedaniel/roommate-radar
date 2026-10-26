@@ -18,6 +18,7 @@ static QUIT: AtomicBool = AtomicBool::new(false);
 
 // linux/videodev2.h and linux/dma-buf.h on aarch64 (checked against the SDK's headers)
 const VIDIOC_QUERYBUF: libc::c_ulong = 0xc058_5609;
+const VIDIOC_G_FMT: libc::c_ulong = 0xc0d0_5604;
 const DMA_BUF_IOCTL_SYNC: libc::c_ulong = 0x4008_6200;
 const DMA_BUF_SYNC_START: u64 = 0;
 const DMA_BUF_SYNC_END: u64 = 4;
@@ -54,6 +55,47 @@ struct V4l2Buffer {
 }
 const _: () = assert!(size_of::<V4l2Plane>() == 64 && size_of::<V4l2Buffer>() == 88);
 
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct V4l2PlanePixFormat {
+    sizeimage: u32,
+    bytesperline: u32,
+    reserved: [u16; 6],
+}
+
+#[repr(C)]
+struct V4l2Format {
+    type_: u32,
+    _pad: u32, // the fmt union holds a pointer
+    width: u32,
+    height: u32,
+    pixelformat: u32,
+    field: u32,
+    colorspace: u32,
+    plane_fmt: [V4l2PlanePixFormat; VIDEO_MAX_PLANES],
+    rest: [u8; 20],
+}
+const _: () = assert!(size_of::<V4l2Format>() == 208);
+
+// What shm::FRAME assumes: 1056x1024 NV12 with a 1152-byte Y stride. bytesperline says 1056, so the stride is checked
+// through the image size (Y + UV, 1152 x 1536).
+fn check_format(vfd: &OwnedFd) -> Result<(), String> {
+    let mut f: V4l2Format = unsafe { std::mem::zeroed() };
+    f.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
+    if unsafe { libc::ioctl(vfd.as_raw_fd(), VIDIOC_G_FMT, &mut f) } < 0 {
+        return Err(format!("VIDIOC_G_FMT: {}", std::io::Error::last_os_error()));
+    }
+    let want_size = (shm::FRAME * 3 / 2) as u32;
+    let size = f.plane_fmt[0].sizeimage;
+    if (f.width, f.height, f.pixelformat, size)
+        != (shm::W as u32, shm::H as u32, u32::from_le_bytes(*b"NV12"), want_size)
+    {
+        let fourcc = String::from_utf8_lossy(&f.pixelformat.to_le_bytes()).into_owned();
+        return Err(format!("{}x{} {fourcc} {size} B, not 1056x1024 NV12 {want_size} B", f.width, f.height));
+    }
+    Ok(())
+}
+
 fn find_xrservice() -> Option<i32> {
     // Match the executable: the main thread renames itself (comm is "XRServiceLoopTh").
     fs::read_dir("/proc").ok()?.flatten().find_map(|e| {
@@ -72,6 +114,36 @@ fn find_fd(pid: i32, target: &str) -> Option<RawFd> {
 fn pidfd_getfd(pidfd: &OwnedFd, fd: RawFd) -> Option<OwnedFd> {
     let r = unsafe { libc::syscall(libc::SYS_pidfd_getfd, pidfd.as_raw_fd(), fd, 0) };
     (r >= 0).then(|| unsafe { OwnedFd::from_raw_fd(r as RawFd) })
+}
+
+/// XRService's pid and pidfd, with each camera's video fd found and its format checked. Err: why not (short, it's the
+/// tab's status).
+fn attach(cams: &mut [Camera]) -> Result<(i32, OwnedFd), String> {
+    let err = || std::io::Error::last_os_error();
+    let pid = find_xrservice().ok_or("XRService not running")?;
+    let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
+    if r < 0 {
+        return Err(format!("pidfd_open XRService: {}", err()));
+    }
+    let pidfd = unsafe { OwnedFd::from_raw_fd(r as RawFd) };
+    for c in cams {
+        c.remote_vfd = find_fd(pid, c.node).ok_or_else(|| format!("XRService has no {} open", c.node))?;
+        let vfd = pidfd_getfd(&pidfd, c.remote_vfd).ok_or_else(|| format!("pidfd_getfd {}: {}", c.node, err()))?;
+        check_format(&vfd).map_err(|e| format!("{}: {e}", c.node))?;
+    }
+    Ok((pid, pidfd))
+}
+
+/// SteamOS build and SteamVR version, for telling which update changed something.
+fn versions() -> String {
+    let os = fs::read_to_string("/etc/os-release").unwrap_or_default();
+    let build = os.lines().find_map(|l| l.strip_prefix("BUILD_ID=")).unwrap_or("?").to_string();
+    // vrserver is <steamvr>/bin/linuxarm64/vrserver
+    let vr = fs::read_link("/proc/self/exe")
+        .ok()
+        .and_then(|e| fs::read_to_string(e.parent()?.parent()?.join("version.txt")).ok())
+        .unwrap_or("?".into());
+    format!("SteamOS {build}, SteamVR {}", vr.trim())
 }
 
 struct Mapping {
@@ -219,7 +291,8 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
     let mut frame = vec![0u8; shm::FRAME];
     let mut bufs = Vec::new();
     let mut pidfd: Option<OwnedFd> = None;
-    let mut waiting = false;
+    let mut why_last = String::new();
+    let mut clock_warned = false;
     let (mut published, mut last_report) = (0u64, shm::now_ns());
 
     while !QUIT.load(Ordering::Relaxed) {
@@ -227,29 +300,28 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
             for c in &mut cams {
                 c.close_all();
             }
-            let pid = find_xrservice();
-            let fd = pid.and_then(|pid| {
-                let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
-                (r >= 0).then(|| unsafe { OwnedFd::from_raw_fd(r as RawFd) })
-            });
-            let mut ok = fd.is_some();
-            for c in &mut cams {
-                c.remote_vfd = if ok { find_fd(pid.unwrap(), c.node).unwrap_or(-1) } else { -1 };
-                ok = ok && c.remote_vfd >= 0;
-            }
-            if !ok {
-                if !waiting {
-                    let why =
-                        if fd.is_none() { "not running".into() } else { std::io::Error::last_os_error().to_string() };
-                    log!("waiting for XRService ({why})\n");
+            match attach(&mut cams) {
+                Ok((pid, fd)) => {
+                    log!(
+                        "attached to XRService pid {pid} ({}=left, {}=right; {})\n",
+                        cams[0].node,
+                        cams[1].node,
+                        versions()
+                    );
+                    shm::set_problem(hdr, "");
+                    why_last.clear();
+                    pidfd = Some(fd);
                 }
-                waiting = true;
-                std::thread::sleep(Duration::from_secs(1));
-                continue;
+                Err(why) => {
+                    if why != why_last {
+                        log!("waiting for XRService: {why} ({})\n", versions());
+                        shm::set_problem(hdr, &why);
+                        why_last = why;
+                    }
+                    std::thread::sleep(Duration::from_secs(1));
+                    continue;
+                }
             }
-            waiting = false;
-            log!("attached to XRService pid {} ({}=left, {}=right)\n", pid.unwrap(), cams[0].node, cams[1].node);
-            pidfd = fd;
         }
         let pfd = pidfd.as_ref().unwrap();
         let mut lost = false;
@@ -268,6 +340,11 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
             // max of (timestamp - arrival): the least-delayed observation bounds it best.
             let off = bufs[0].ts_ns as i64 - arrival as i64;
             c.clock_offset_ns = Some(c.clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
+            // The estimate adapts to any offset; one far from the usual ~210 ms means the camera clock changed.
+            if off.abs() > 1_000_000_000 && !clock_warned {
+                log!("{}: camera clock {} ms from CLOCK_MONOTONIC (was ~210 ms)\n", c.node, off / 1_000_000);
+                clock_warned = true;
+            }
 
             // Newest completed frame that is a normal exposure (not the ~37us controller-LED one).
             for b in &bufs {

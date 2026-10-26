@@ -1,7 +1,7 @@
 //! Shared-memory frame handoff from camserver (driver_roommate_radar, in vrserver) to roommate-radar.
 //! One seqlock-protected slot per SLAM camera holding the newest normal-exposure Y plane.
 use std::cell::UnsafeCell;
-use std::sync::atomic::{AtomicU64, Ordering, fence};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering, fence};
 
 pub const PATH: &str = "/dev/shm/steamframe-cams";
 pub const CALIB_DIR: &str = "/dev/shm/steamframe-calib"; // the driver's copy of /persist's calibration
@@ -25,6 +25,7 @@ pub struct Slot {
 #[repr(C)]
 pub struct Header {
     pub slots: [Slot; NUM_CAMS],
+    problem: [AtomicU8; 64], // why camserver isn't publishing, for the tab's status ("" = none); 0-terminated
 }
 
 // The writer and the reader are in different processes; the seqlock is what keeps a reader off a torn plane.
@@ -55,6 +56,19 @@ pub fn read(s: &Slot, last_seq: &mut u64, y: &mut [u8]) -> Option<u64> {
     }
     *last_seq = q;
     Some(t)
+}
+
+pub fn set_problem(h: &Header, why: &str) {
+    let b = why.as_bytes();
+    for (i, c) in h.problem.iter().enumerate() {
+        c.store(if i + 1 < h.problem.len() { b.get(i).copied().unwrap_or(0) } else { 0 }, Ordering::Relaxed);
+    }
+}
+
+/// May be torn while camserver is changing it, which only garbles a status line for one frame.
+pub fn problem(h: &Header) -> String {
+    let b: Vec<u8> = h.problem.iter().map(|c| c.load(Ordering::Relaxed)).take_while(|&c| c != 0).collect();
+    String::from_utf8_lossy(&b).into_owned()
 }
 
 /// CLOCK_MONOTONIC (ns), the slots' clock.

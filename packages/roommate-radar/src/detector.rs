@@ -17,6 +17,7 @@ pub static PAUSED: AtomicBool = AtomicBool::new(false); // skip frames (no GPU w
 pub static SIZE: AtomicI32 = AtomicI32::new(0); // per-view size to run at; a change reloads
 pub static HZ: AtomicF32 = AtomicF32::new(0.0); // runs per second, changeable while running
 pub static LOADING: AtomicI32 = AtomicI32::new(0); // size being loaded (model, then its first run compiles shaders); 0 = done
+pub static PROBLEM: Mutex<String> = Mutex::new(String::new()); // why there are no detections, for the tab ("" = none)
 pub static YOLO_MS: AtomicF32 = AtomicF32::new(0.0); // mean YOLO time over the last stats period
 pub static DETS: Mutex<DetectionSet> = Mutex::new(DetectionSet { id: 0, t_capture_ns: 0, objs: Vec::new() });
 
@@ -136,6 +137,9 @@ fn open_frames() -> Result<Option<Frames>, String> {
         }
         if !logged {
             eprintln!("waiting for driver_roommate_radar ({}; restart SteamVR after the first run)", shm::PATH);
+            // Missing or too small: no driver, or an older one still loaded after an update
+            LOADING.store(0, Ordering::Relaxed);
+            *PROBLEM.lock().unwrap() = "Restart SteamVR to load the updated driver".into();
             logged = true;
         }
         std::thread::sleep(Duration::from_secs(1));
@@ -186,12 +190,17 @@ fn run(s: usize) -> Result<(), String> {
     let Some(hdr) = open_frames()? else {
         return Ok(());
     };
+    LOADING.store(s as i32, Ordering::Relaxed);
     // After the frames: the calibration is the driver's copy of the factory one
     let cal = [calib::load(shm::CALIB_DIR, shm::CAM_NAMES[0])?, calib::load(shm::CALIB_DIR, shm::CAM_NAMES[1])?];
     let rect = [Rectifier::new(&cal[0], s, HFOV_DEG), Rectifier::new(&cal[1], s, HFOV_DEG)];
     let f = rect[0].f;
     let baseline = cal[1].t[0] - cal[0].t[0]; // right cam is at +x in the head frame
     println!("detector: {s}x{s} views, f={f:.1} px, baseline {:.1} mm", baseline * 1000.0);
+    // 105.6 mm on the Frame: anything else is swapped cameras or a changed calibration format
+    if !(0.095..0.116).contains(&baseline) {
+        return Err(format!("calibration: baseline {:.1} mm, not ~105.6", baseline * 1000.0));
+    }
 
     // A torn read leaves garbage in its buffer, so frames are read into `scratch` and swapped in only when intact.
     let mut raw = [vec![0u8; shm::FRAME], vec![0u8; shm::FRAME]];
@@ -219,6 +228,7 @@ fn run(s: usize) -> Result<(), String> {
         }
         // Both cameras are hardware-synchronized: wait for a pair with the same capture time.
         if t_ns[0] == 0 || t_ns[0] == last_pair || (t_ns[0] as i64 - t_ns[1] as i64).abs() > 2_000_000 {
+            *PROBLEM.lock().unwrap() = shm::problem(&hdr);
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }

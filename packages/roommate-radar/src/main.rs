@@ -124,9 +124,11 @@ fn run() -> i32 {
     }
     let det = (!setup_pending).then(|| {
         std::thread::spawn(|| {
+            // Stays up to show the error in the tab
             if let Err(e) = detector::run_loop() {
                 eprintln!("detector: {e}");
-                QUIT.store(true, Ordering::Relaxed);
+                detector::LOADING.store(0, Ordering::Relaxed);
+                *detector::PROBLEM.lock().unwrap() = e;
             }
         })
     });
@@ -185,7 +187,8 @@ fn run() -> i32 {
         } else if detector::LOADING.load(Ordering::Relaxed) != 0 {
             format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
         } else if now - last_det_ns > 2_000_000_000 {
-            "Waiting for camera frames".into()
+            let p = detector::PROBLEM.lock().unwrap();
+            if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else {
             format!("Watching  ·  YOLO {:.0} ms  ·  {n} in view", YOLO_MS.load())
         };
