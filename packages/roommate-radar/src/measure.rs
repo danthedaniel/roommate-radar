@@ -64,6 +64,9 @@ fn own_arm(o: &Obj) -> bool {
     z > 0.0 && z < 1.2 && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
 }
 
+/// Boxes entirely higher than this above the floor (standing universe y = 0) are dropped: nobody's up there (m).
+const MAX_BOTTOM: f32 = 2.5;
+
 /// How far outside the play area's boundary detections are still kept (m).
 const PLAY_AREA_MARGIN: f32 = 1.5;
 
@@ -85,8 +88,8 @@ fn near_play_area(walls: &[[[f32; 2]; 2]], x: f32, z: f32) -> bool {
 }
 
 /// Detections this frame that roommate-radar cares about, in the standing universe (head pose at capture): stereo (has
-/// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range and near the
-/// play area (`walls`: its boundary when that setting is on, else empty).
+/// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range, not entirely
+/// above MAX_BOTTOM, and near the play area (`walls`: its boundary when that setting is on, else empty).
 pub fn measurements(
     objs: &[Obj],
     head: &HmdMatrix34_t,
@@ -113,6 +116,9 @@ pub fn measurements(
             let dist = (c.x - h.x).hypot(c.z - h.z);
             if dist > set.max_dist || (o.cls == 0 && dist < 0.5) || !near_play_area(walls, c.x, c.z) {
                 return None; // a "person" closer than 50 cm is you
+            }
+            if w.iter().all(|p| p.y > MAX_BOTTOM) {
+                return None;
             }
             // ponytail: isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
             // ray would track lateral motion tighter
@@ -189,6 +195,10 @@ mod tests {
         assert!(meas(&[low(0.8, -0.3)], &[], &set).is_empty());
         assert!(meas(&[low(0.8, 0.1)], &[], &set).len() == 1 && meas(&[low(2.0, -0.3)], &[], &set).len() == 1);
         assert!(meas(&[person(0, 0.4, 0.0)], &[], &set).is_empty(), "person closer than 50 cm dropped");
+        let high =
+            |y0: f32| obj(0, 2.0, [[-0.3, y0 + 0.5, -2.0], [0.3, y0 + 0.5, -2.0], [0.3, y0, -2.0], [-0.3, y0, -2.0]]);
+        assert!(meas(&[high(1.0)], &[], &set).is_empty(), "box entirely above 2.5 m dropped");
+        assert_eq!(meas(&[high(0.8)], &[], &set).len(), 1, "box reaching below 2.5 m kept");
     }
 
     #[test]
