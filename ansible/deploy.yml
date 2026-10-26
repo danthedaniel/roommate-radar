@@ -1,4 +1,4 @@
-# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|roommate-radar] (or make deploy[-mirror|-roommate-radar])
+# Configure the Frame: cd ansible && ansible-playbook deploy.yml [--tags mirror|roommate-radar] (or make deploy-all|deploy-mirror|deploy)
 # From a fresh Frame this does all the setup; only Developer Mode (Settings -> System) has to be switched on by hand.
 # roommate-radar installs what build.sh (make build) left in dist/roommate-radar.
 - import_playbook: pair.yml

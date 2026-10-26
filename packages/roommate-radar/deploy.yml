@@ -1,5 +1,5 @@
 # roommate-radar, installed as it would be from the Steam store: what build.sh (make build) left in dist/roommate-radar. Run
-# through ansible/deploy.yml (make deploy-roommate-radar), which pairs the ssh key first.
+# through ansible/deploy.yml (make deploy), which pairs the ssh key first.
 # Valve's devkit install: dist/roommate-radar synced to ~/devkit-game/roommate_radar and added to Steam as a shortcut that runs in
 # Steam Linux Runtime 4 (steamrt4-any, the tool Store apps native to Linux get). The app's own setup (driver, overlay
 # manifest) happens on its first run: Steam has no install scripts on Linux (src/register.rs).

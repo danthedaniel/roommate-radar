@@ -31,7 +31,7 @@ you're playing.
 git clone --recursive git@github.com:danthedaniel/roommate-radar.git
 cd roommate-radar
 make build                   # models, ncnn and the app, built in the Steam Runtime SDK into dist/roommate-radar
-make deploy-roommate-radar   # pairs your ssh key with the Frame (approve on the headset), installs it as a Steam app
+make deploy                  # pairs your ssh key with the Frame (approve on the headset), installs it as a Steam app
 ```
 
 Then start **Devkit Game: roommate_radar** from the Steam Library once and restart SteamVR: the first run registers
@@ -59,7 +59,7 @@ the measurements behind the defaults and what didn't work are in
 - `third_party/ncnn`: submodule, [danthedaniel/ncnn](https://github.com/danthedaniel/ncnn) (upstream ncnn plus a GPU
   queue priority option and a few C API calls).
 - `ansible/` (inventory, key pairing, the playbook that runs each package's `deploy.yml`) and the `Makefile`:
-  `make build | deploy | deploy-mirror | deploy-roommate-radar | logs | stream | cams | ssh`. `make deploy` sets up a
+  `make build | deploy | deploy-all | deploy-mirror | logs | stream | cams | ssh`. `make deploy-all` sets up a
   fresh Frame and redeploys an existing one; every first-time step is skipped once its output exists.
 - Lint/format: ruff and basedpyright for the Python (3.12, the Frame's) in `pyproject.toml`; `cargo fmt` and
   `cargo clippy` for the Rust (`packages/roommate-radar/rustfmt.toml`). CI (`.github/workflows/ci.yml`) type-checks
