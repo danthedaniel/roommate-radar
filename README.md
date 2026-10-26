@@ -1,5 +1,7 @@
 # Roommate Radar
 
+https://github.com/user-attachments/assets/209e909d-0cea-47e2-8dc6-f2a63bc855a5
+
 <img src="packages/roommate-radar/assets/icon.svg" width="96" align="right" alt="">
 
 See the people, cats and dogs around you while you play in VR, without turning on passthrough. Roommate Radar is a
