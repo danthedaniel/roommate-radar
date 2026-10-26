@@ -9,7 +9,7 @@ SteamVR overlay for the Steam Frame: it watches the headset's tracking cameras, 
 alongside your game, and outlines whoever is within range, with what they are and how sure it is, on top of whatever
 you're playing.
 
-- People, cats and dogs within range (1–8 m) get an outline and a label, world-locked and turned to face you. Your own
+- People, cats and dogs within range (1.5–8 m) get an outline and a label, world-locked and turned to face you. Your own
   arms and hands are ignored.
 - Works over any VR app. A **Roommate Radar** tab in the SteamVR dashboard turns it on and off, picks what to detect,
   the range, whether to detect within the play area, the detection resolution and rate, and whether to run only while a game is running.

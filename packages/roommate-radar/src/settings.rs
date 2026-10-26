@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 pub const SIZES: [i32; 3] = [320, 480, 640];
 pub const RATES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
-pub const MIN_DIST: f32 = 1.0; // max_dist's range (m)
+pub const MIN_DIST: f32 = 1.5; // max_dist's range (m)
 pub const MAX_DIST: f32 = 8.0;
 
 #[derive(Clone, Debug)]
