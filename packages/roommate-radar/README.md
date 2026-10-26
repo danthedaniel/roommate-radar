@@ -11,22 +11,26 @@ total; drawing at the Kalman prediction for "now" instead looked worse). Boxes w
 or the forearm leading to it, inside them (same depth) are your arms and are ignored.
 
 - Installed like a Store app (see below): runs in the Steam Linux Runtime 4 container, started by Steam from the
-  Library or by SteamVR's auto-launch (through Steam). Log: `/tmp/roommate-radar.log`.
+  Library or, when SteamVR starts, by its driver (through Steam, below). Log: `/tmp/roommate-radar.log`.
 - No root: the camera frames come from `driver_roommate_radar` (`src/driver/`), camserver's loop on a thread inside vrserver.
   vrserver is XRService's parent, so Yama (`ptrace_scope=1`) lets it `pidfd_getfd` XRService's camera buffers. It
   also copies `/persist`'s calibration to `/dev/shm/steamframe-calib`, as the container can't see `/persist`. Logs
-  to `~/.local/share/Steam/logs/vrserver.txt` (`roommate-radar: ...`).
+  to `~/.local/share/Steam/logs/vrserver.txt` (`roommate_radar: ...`).
 - First run (Steam has no install scripts on Linux, so roommate-radar does setup on every start, `register.rs`): registers
   `driver/` with SteamVR (`vrpathreg adddriver`) and writes `roommate-radar.vrmanifest`, then runs `bin/roommate-radar --register` before
   the overlay itself. SteamVR knows the running app as `steam.overlay.<SteamAppId>`, the key Steam's own manifest uses
-  for a Store overlay; `--register` adds our manifest for it (launching `steam://rungameid/<SteamGameId>`, so
-  auto-launch also goes through Steam) and, once that entry is live, turns auto-launch on, once (`autolaunch_set` in
-  `roommate-radar.conf`; after that it's the user's, in the tab or SteamVR's startup overlay apps). The driver loads on
-  SteamVR's next start: until then the dashboard says "Restart SteamVR to finish setup".
-- "Roommate Radar" tab in the SteamVR dashboard: on/off, start with SteamVR (SteamVR's auto-launch for the app, on by
-  default), only in games (runs from a game's launch, intro included, until it quits; passthrough itself isn't
-  reported to apps), people, cats and dogs, ignore my hands, range, status. Saved in `~/.config/roommate-radar.conf`
-  (auto-launch is SteamVR's setting, in `vrappconfig/`).
+  for a Store overlay; `--register` adds our manifest for it (launching `steam://rungameid/<SteamGameId>`) and turns
+  SteamVR's own auto-launch for it off (below). The driver loads on SteamVR's next start: until then the dashboard says
+  "Restart SteamVR to finish setup".
+- Starting with SteamVR is the driver's job (`driver/autostart.rs`), not SteamVR's auto-launch: on the Frame SteamVR
+  starts before Steam has logged in, Steam holds the launch SteamVR asks for until it has, then runs it ~20 ms before
+  its UI can answer the launch's first step (ShowInterstitials), and it sits at "Launching…" for good (any auto-launched
+  overlay; a Steam bug). The driver waits for Steam's login (`config/loginusers.vdf` newer than the running Steam,
+  the pid in `~/.steam/steam.pid`), then 10 s, then sends `steam://rungameid/<gameid>` to `~/.steam/steam.pipe`. The
+  app records its `gameid` (SteamGameId) in `roommate-radar.conf` at each start, next to `autostart` (the tab's
+  switch).
+- "Roommate Radar" tab in the SteamVR dashboard: on/off, start with SteamVR (on by default), only in games (runs from a game's launch, intro included, until it quits; passthrough itself isn't
+  reported to apps), people, cats and dogs, ignore my hands, range, status. Saved in `~/.config/roommate-radar.conf`.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
   at start) so the game preempts it (msm has preemption on: 4 rings). Every 5 s it logs the game's
   presented/dropped/reprojected frames and GPU time; `--no-detector` gives the baseline.
@@ -72,7 +76,7 @@ make deploy-roommate-radar   # deploy.yml: install dist/roommate-radar as a Stea
 ```
 
 Then start "Devkit Game: roommate_radar" from the Steam Library once, and restart SteamVR (first run, above); after that it
-auto-launches with SteamVR.
+starts with SteamVR.
 
 - Build (`build.sh`, also runnable directly): like a Store depot, in the Steam Runtime 4 arm64 SDK (`registry.gitlab.steamos.cloud/steamrt/
   steamrt4/sdk/arm64`, natively in the Mac's arm64 Docker Desktop) in `build-sdk/` (rustup and the toolchain in

@@ -123,7 +123,13 @@ fn run() -> i32 {
     let mut detect = true; // --no-detector: just log frame stats (baseline for the detector's cost)
     let home = std::env::var("HOME").unwrap_or_default();
     let mut set = settings::Settings::load(format!("{home}/.config/roommate-radar.conf").into());
-    let app_key = std::env::var("SteamAppId").ok().map(|id| format!("steam.overlay.{id}"));
+    // How the driver starts the app with SteamVR (driver/autostart.rs)
+    if let Some(gameid) = std::env::var("SteamGameId").ok().and_then(|g| g.parse().ok())
+        && set.gameid != Some(gameid)
+    {
+        set.gameid = Some(gameid);
+        set.save();
+    }
     (opts.size, opts.max_hz) = (set.size, set.hz); // --size and --max-hz override them for this run
 
     let mut args = std::env::args().skip(1);
@@ -132,7 +138,7 @@ fn run() -> i32 {
         let next: &mut dyn FnMut() -> Result<String, String> = &mut next;
         let prm = &mut tracker.prm;
         let parsed = match a.as_str() {
-            "--register" => return register::register_app(app_key.as_deref(), &mut set),
+            "--register" => return register::register_app(),
             "--max-dist" => detector::num(&a, next).map(|v| set.max_dist = v),
             "--confirm-hits" => detector::num(&a, next).map(|v| prm.min_hits = v as u32),
             "--hold-ms" => detector::num(&a, next).map(|v| prm.max_age = v / 1000.0),
@@ -173,7 +179,7 @@ fn run() -> i32 {
     let mut textures = textures::Textures::new();
     let via = if textures.vulkan() { "Vulkan" } else { "SetOverlayRaw (Vulkan setup failed)" };
     println!("roommate-radar: overlay textures via {via}");
-    let mut panel = panel::Panel::new(app_key);
+    let mut panel = panel::Panel::new();
     let mut boxes = match boxes::Boxes::create().and_then(|b| panel.create(&mut textures, &set).map(|_| b)) {
         Ok(b) => b,
         Err(e) => {

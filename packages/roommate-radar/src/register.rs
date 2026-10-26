@@ -1,19 +1,20 @@
 //! The app's setup with SteamVR, done on every start since Steam has no install scripts on Linux:
 //! - driver/ (driver_roommate_radar, the camera frames) registered with vrpathreg; it loads on SteamVR's next start
 //! - roommate-radar.vrmanifest (the overlay, launched through Steam) written, and added by `roommate-radar --register`
-//!   where Steam hasn't, with auto-launch.
+//!   where Steam hasn't.
 //!
 //! SteamVR knows an overlay app started by Steam as steam.overlay.<SteamAppId>. A Store install's manifest for that key
 //! comes from Steam ("Launch SteamVR Overlay"); a devkit install has ours. Adding it has to happen before the overlay
 //! connects: SteamVR then makes up an entry for the key (a "binary" app, not a dashboard overlay) and skips manifests
-//! describing it until it restarts, hence --register as a process of its own, first. Once the manifest's entry is
-//! there, auto-launch is switched on, once (the user may turn it off).
+//! describing it until it restarts, hence --register as a process of its own, first.
+//!
+//! SteamVR's own auto-launch for the app is kept off: starting with SteamVR is the driver's job (autostart.rs), as the
+//! launch SteamVR asks for comes too early and hangs at "Launching…" (and would block the driver's).
 use std::process::Command;
 
 use serde_json::{Value, json};
 
 use crate::openvr::{self, vr};
-use crate::settings::Settings;
 
 /// From the install directory, before the overlay starts.
 pub fn setup() {
@@ -62,10 +63,11 @@ fn write_manifest(appid: &str, gameid: &str) {
 }
 
 /// roommate-radar --register
-pub fn register_app(app_key: Option<&str>, set: &mut Settings) -> i32 {
-    let Some(key) = app_key else {
+pub fn register_app() -> i32 {
+    let Ok(appid) = std::env::var("SteamAppId") else {
         return 0; // not started by Steam
     };
+    let key = &format!("steam.overlay.{appid}");
     if let Err(e) = openvr::init(openvr::EVRApplicationType_VRApplication_Utility) {
         eprintln!("VR_Init: {e}");
         return 1;
@@ -78,11 +80,10 @@ pub fn register_app(app_key: Option<&str>, set: &mut Settings) -> i32 {
     }
     if !vr().is_dashboard_overlay(key) {
         println!("roommate-radar: {key} isn't a dashboard overlay yet; restart SteamVR");
-    } else if !set.autolaunch_set {
-        let e = vr().set_auto_launch(key, true);
-        println!("roommate-radar: SetApplicationAutoLaunch({key}): {}", vr().app_error_name(e));
-        set.autolaunch_set = e == 0;
-        set.save();
+    }
+    if vr().auto_launch(key) {
+        let e = vr().set_auto_launch(key, false);
+        println!("roommate-radar: SetApplicationAutoLaunch({key}, false): {}", vr().app_error_name(e));
     }
     openvr::shutdown();
     0

@@ -14,7 +14,7 @@ const ROW_H: f32 = 92.0;
 
 // Controls: one row per switch, then the dropdown rows and the range row
 const ENABLED: usize = 0;
-const AUTO_LAUNCH: usize = 1; // SteamVR's auto-launch for this app, not a Settings field
+const AUTO_LAUNCH: usize = 1; // Settings::autostart
 const GAMES_ONLY: usize = 2;
 const PEOPLE: usize = 3;
 const PETS: usize = 4;
@@ -97,16 +97,15 @@ fn icon() -> Image {
 }
 
 pub struct Panel {
-    app_key: Option<String>, // SteamVR's key for this app; None if not started by Steam
-    popup: Option<usize>,    // the dropdown (SIZE, RATE) whose popup is showing
+    popup: Option<usize>, // the dropdown (SIZE, RATE) whose popup is showing
     hover: Option<usize>,
     drawn: String, // the status the tab was last drawn with ("" = redraw)
     dash: VROverlayHandle_t,
 }
 
 impl Panel {
-    pub fn new(app_key: Option<String>) -> Panel {
-        Panel { app_key, popup: None, hover: None, drawn: String::new(), dash: 0 }
+    pub fn new() -> Panel {
+        Panel { popup: None, hover: None, drawn: String::new(), dash: 0 }
     }
 
     /// Creates the dashboard overlay (the tab) and its icon.
@@ -122,13 +121,10 @@ impl Panel {
         Ok(())
     }
 
-    fn autolaunch(&self) -> bool {
-        self.app_key.as_ref().is_some_and(|k| vr().auto_launch(k))
-    }
-
-    /// Greyed out: the detection settings while Enabled is off, Start with SteamVR when not started by Steam.
+    /// Greyed out: the detection settings while Enabled is off, Start with SteamVR when never started by Steam (no game
+    /// id to launch it by).
     fn dimmed(&self, row: usize, set: &Settings) -> bool {
-        if row == AUTO_LAUNCH { self.app_key.is_none() } else { row > AUTO_LAUNCH && !set.enabled }
+        if row == AUTO_LAUNCH { set.gameid.is_none() } else { row > AUTO_LAUNCH && !set.enabled }
     }
 
     /// Which control (texture pixel, y down) is under the pointer: the whole row for toggles, the buttons for range.
@@ -174,12 +170,7 @@ impl Panel {
         }
         match ctl {
             Some(ENABLED) => set.enabled = !set.enabled,
-            Some(AUTO_LAUNCH) => {
-                if let Some(k) = &self.app_key {
-                    vr().set_auto_launch(k, !self.autolaunch());
-                }
-                return;
-            }
+            Some(AUTO_LAUNCH) => set.autostart = !set.autostart,
             Some(PEOPLE) => set.people = !set.people,
             Some(PETS) => set.pets = !set.pets,
             Some(HANDS) => set.hands = !set.hands,
@@ -235,7 +226,7 @@ impl Panel {
         fill_rrect(&mut img, 0.0, 0.0, wf, hf, 32.0, BG, 0.94);
         img.text(PAD as i32, 100, "Roommate Radar", WHITE, 56.0);
         img.text(PAD as i32, 150, status, GREY, 30.0);
-        let on = [set.enabled, self.autolaunch(), set.games_only, set.people, set.pets, set.hands];
+        let on = [set.enabled, set.autostart, set.games_only, set.people, set.pets, set.hands];
         for row in 0..=RANGE_ROW {
             let cy = row_cy(row);
             if hover == Some(row) {
@@ -319,7 +310,7 @@ mod tests {
     #[test]
     fn hit_test() {
         // Rows and buttons hit-test to their controls; greyed-out ones don't.
-        let (p, mut set) = (Panel::new(None), Settings::default());
+        let (p, mut set) = (Panel::new(), Settings::default());
         assert_eq!(p.hit(500.0, row_cy(PEOPLE), &set), Some(PEOPLE));
         assert_eq!(p.hit(PLUS_CX, row_cy(RANGE_ROW), &set), Some(RANGE_PLUS));
         assert_eq!(p.hit(500.0, row_cy(HANDS), &set), Some(HANDS));
@@ -332,7 +323,7 @@ mod tests {
 
     #[test]
     fn press_and_render() {
-        let (mut p, mut set) = (Panel::new(None), Settings::default());
+        let (mut p, mut set) = (Panel::new(), Settings::default());
         p.press(Some(PEOPLE), &mut set);
         for _ in 0..20 {
             p.press(Some(RANGE_PLUS), &mut set);
@@ -353,7 +344,7 @@ mod tests {
     #[test]
     fn dropdowns() {
         // Pick, a press outside closes, the rate popup fits the panel.
-        let (mut p, mut set) = (Panel::new(None), Settings::default());
+        let (mut p, mut set) = (Panel::new(), Settings::default());
         p.press(Some(SIZE), &mut set);
         let iy = popup_top(SIZE, &set) + 2.5 * ITEM_H; // the third choice
         assert_eq!(p.popup, Some(SIZE));

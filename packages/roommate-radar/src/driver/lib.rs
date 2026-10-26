@@ -1,4 +1,5 @@
-//! driver_roommate_radar: SteamVR driver that runs camserver's loop (camserver.rs) on a thread inside vrserver.
+//! driver_roommate_radar: SteamVR driver that runs camserver's loop (camserver.rs) on a thread inside vrserver, and
+//! starts the app with SteamVR (autostart.rs).
 //! vrserver is XRService's parent, so Yama (ptrace_scope=1) lets it pidfd_getfd XRService's camera fds without root or
 //! CAP_SYS_PTRACE. Adds no devices. Log: vrserver.txt. roommate-radar registers it with vrpathreg on its first run
 //! (register.rs).
@@ -17,6 +18,7 @@ macro_rules! log {
     ($($arg:tt)*) => { $crate::log_line(&format!($($arg)*)) };
 }
 
+mod autostart;
 mod camserver;
 #[allow(dead_code)] // the reader's half is roommate-radar's
 #[path = "../shm.rs"]
@@ -86,7 +88,7 @@ static PROVIDER: Provider = Provider {
     },
 };
 static DRIVER_LOG: AtomicPtr<DriverLog> = AtomicPtr::new(null_mut());
-static CAMSERVER: Mutex<Option<JoinHandle<()>>> = Mutex::new(None);
+static THREADS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new()); // camserver, autostart
 
 /// To vrserver.txt once vrserver gave us its log, else stderr.
 fn log_line(line: &str) {
@@ -111,16 +113,18 @@ unsafe extern "C" fn init(_: *mut Provider, ctx: *mut DriverContext) -> i32 {
     let _ = std::fs::create_dir_all(shm::CALIB_DIR);
     for f in ["xrservice.json", "device_config.json"] {
         if let Err(e) = std::fs::copy(format!("/persist/{f}"), format!("{}/{f}", shm::CALIB_DIR)) {
-            log!("roommate-radar: copy /persist/{f}: {e}");
+            log!("copy /persist/{f}: {e}");
         }
     }
-    *CAMSERVER.lock().unwrap() = Some(std::thread::spawn(|| camserver::run(["/dev/video3", "/dev/video0"])));
+    *THREADS.lock().unwrap() =
+        vec![std::thread::spawn(|| camserver::run(["/dev/video3", "/dev/video0"])), std::thread::spawn(autostart::run)];
     INIT_ERROR_NONE
 }
 
 unsafe extern "C" fn cleanup(_: *mut Provider) {
     camserver::stop();
-    if let Some(t) = CAMSERVER.lock().unwrap().take() {
+    autostart::stop();
+    for t in THREADS.lock().unwrap().drain(..) {
         let _ = t.join();
     }
     DRIVER_LOG.store(null_mut(), Ordering::Release);

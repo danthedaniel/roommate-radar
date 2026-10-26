@@ -14,7 +14,8 @@ pub struct Settings {
     pub max_dist: f32,         // ignore detections farther than this (m, horizontal)
     pub size: i32,             // YOLO per-view size, one of SIZES
     pub hz: f32,               // YOLO runs per second, one of RATES
-    pub autolaunch_set: bool,  // not in the tab: auto-launch was switched on once (--register)
+    pub autostart: bool,       // start with SteamVR (the driver launches the app, autostart.rs)
+    pub gameid: Option<u64>,   // not in the tab: Steam's id for this app (SteamGameId), for the driver to launch it
     pub path: Option<PathBuf>, // where save() writes; None: nowhere (tests)
 }
 
@@ -29,7 +30,8 @@ impl Default for Settings {
             max_dist: 3.0,
             size: 320,
             hz: 4.0,
-            autolaunch_set: false,
+            autostart: true,
+            gameid: None,
             path: None,
         }
     }
@@ -41,19 +43,21 @@ impl Settings {
         let mut s = Settings { path: Some(path), ..Settings::default() };
         let text = std::fs::read_to_string(s.path.as_ref().unwrap()).unwrap_or_default();
         for (k, v) in text.lines().filter_map(|l| l.split_once('=')) {
-            let Ok(v) = v.trim().parse::<f32>() else {
+            let v = v.trim();
+            let Ok(f) = v.parse::<f32>() else {
                 continue;
             };
             match k.trim() {
-                "enabled" => s.enabled = v != 0.0,
-                "people" => s.people = v != 0.0,
-                "pets" => s.pets = v != 0.0,
-                "hands" => s.hands = v != 0.0,
-                "games_only" => s.games_only = v != 0.0,
-                "autolaunch_set" => s.autolaunch_set = v != 0.0,
-                "max_dist" => s.max_dist = v,
-                "size" if SIZES.contains(&(v as i32)) => s.size = v as i32,
-                "hz" if RATES.contains(&v) => s.hz = v,
+                "enabled" => s.enabled = f != 0.0,
+                "people" => s.people = f != 0.0,
+                "pets" => s.pets = f != 0.0,
+                "hands" => s.hands = f != 0.0,
+                "games_only" => s.games_only = f != 0.0,
+                "autostart" => s.autostart = f != 0.0,
+                "gameid" => s.gameid = v.parse().ok(),
+                "max_dist" => s.max_dist = f,
+                "size" if SIZES.contains(&(f as i32)) => s.size = f as i32,
+                "hz" if RATES.contains(&f) => s.hz = f,
                 _ => {}
             }
         }
@@ -68,7 +72,7 @@ impl Settings {
         let _ = std::fs::write(
             path,
             format!(
-                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nmax_dist={:.1}\nsize={}\nhz={}\nautolaunch_set={}\n",
+                "enabled={}\npeople={}\npets={}\nhands={}\ngames_only={}\nmax_dist={:.1}\nsize={}\nhz={}\nautostart={}\n{}",
                 b(self.enabled),
                 b(self.people),
                 b(self.pets),
@@ -77,7 +81,8 @@ impl Settings {
                 self.max_dist,
                 self.size,
                 self.hz,
-                b(self.autolaunch_set)
+                b(self.autostart),
+                self.gameid.map(|g| format!("gameid={g}\n")).unwrap_or_default()
             ),
         );
     }
@@ -95,6 +100,8 @@ mod tests {
             max_dist: 4.5,
             size: 640,
             hz: 16.0,
+            autostart: false,
+            gameid: Some(16375998297183092736),
             path: Some(path.clone()),
             ..Settings::default()
         };
@@ -102,5 +109,6 @@ mod tests {
         let l = Settings::load(path.clone());
         std::fs::remove_file(path).unwrap();
         assert!(!l.people && l.pets && l.max_dist == 4.5 && l.size == 640 && l.hz == 16.0);
+        assert!(!l.autostart && l.gameid == Some(16375998297183092736), "a game id doesn't fit in an f32");
     }
 }
