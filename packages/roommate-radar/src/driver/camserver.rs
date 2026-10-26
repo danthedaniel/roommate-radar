@@ -91,7 +91,13 @@ fn check_format(vfd: &OwnedFd) -> Result<(), String> {
         != (shm::W as u32, shm::H as u32, u32::from_le_bytes(*b"NV12"), want_size)
     {
         let fourcc = String::from_utf8_lossy(&f.pixelformat.to_le_bytes()).into_owned();
-        return Err(format!("{}x{} {fourcc} {size} B, not 1056x1024 NV12 {want_size} B", f.width, f.height));
+        return Err(format!(
+            "{}x{} {fourcc} {size} B, not {}x{} NV12 {want_size} B",
+            f.width,
+            f.height,
+            shm::W,
+            shm::H
+        ));
     }
     Ok(())
 }

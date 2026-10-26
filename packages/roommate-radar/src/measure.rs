@@ -55,14 +55,17 @@ fn holds_controller(o: &Obj, controllers: &[V3]) -> bool {
     })
 }
 
-/// Your own arm or lap, controller or not: the box reaches the bottom 10% of the view, is within 1.2 m, and its top is
+/// Your own arm or lap, controller or not: the box reaches the bottom 10% of the view, is within ARM_DIST, and its top is
 /// below eye level (anyone else that close shows their head). Head frame, like holds_controller.
 fn own_arm(o: &Obj) -> bool {
     let b = &o.corners;
     let z = o.origin.z - b[3].z;
     let edge = (HFOV_DEG.to_radians() / 2.0).tan();
-    z > 0.0 && z < 1.2 && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
+    z > 0.0 && z < ARM_DIST && (o.origin.y - b[3].y) / z > 0.8 * edge && b[0].y < o.origin.y
 }
+
+/// How close your own arm or lap is, at most (m).
+const ARM_DIST: f32 = 1.2;
 
 /// Boxes entirely higher than this above the floor (standing universe y = 0) are dropped: nobody's up there (m).
 const MAX_BOTTOM: f32 = 2.0;
@@ -195,10 +198,13 @@ mod tests {
         assert!(meas(&[low(0.8, -0.3)], &[], &set).is_empty());
         assert!(meas(&[low(0.8, 0.1)], &[], &set).len() == 1 && meas(&[low(2.0, -0.3)], &[], &set).len() == 1);
         assert!(meas(&[person(0, 0.4, 0.0)], &[], &set).is_empty(), "person closer than 50 cm dropped");
-        let high =
-            |y0: f32| obj(0, 2.0, [[-0.3, y0 + 0.5, -2.0], [0.3, y0 + 0.5, -2.0], [0.3, y0, -2.0], [-0.3, y0, -2.0]]);
-        assert!(meas(&[high(0.5)], &[], &set).is_empty(), "box entirely above 2 m dropped");
-        assert_eq!(meas(&[high(0.3)], &[], &set).len(), 1, "box reaching below 2 m kept");
+        // box 0.5 m tall whose bottom is `y` above the floor
+        let high = |y: f32| {
+            let y0 = y - HEAD.m[1][3];
+            obj(0, 2.0, [[-0.3, y0 + 0.5, -2.0], [0.3, y0 + 0.5, -2.0], [0.3, y0, -2.0], [-0.3, y0, -2.0]])
+        };
+        assert!(meas(&[high(MAX_BOTTOM + 0.1)], &[], &set).is_empty(), "box entirely above {MAX_BOTTOM} m dropped");
+        assert_eq!(meas(&[high(MAX_BOTTOM - 0.1)], &[], &set).len(), 1, "box reaching below {MAX_BOTTOM} m kept");
     }
 
     #[test]

@@ -13,12 +13,14 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use crate::shm;
+
 static STOP: AtomicBool = AtomicBool::new(false);
 const MARGIN: Duration = Duration::from_secs(10); // after the login; Steam's UI is ready ~0.1 s after it
 
 /// The app's launch URL, if it should start with SteamVR and has recorded its game id.
 fn launch_url(home: &str) -> Option<String> {
-    let conf = fs::read_to_string(format!("{home}/.config/roommate-radar.conf")).ok()?;
+    let conf = fs::read_to_string(format!("{home}/{}", shm::CONF)).ok()?;
     let get = |k: &str| conf.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(str::trim);
     if get("autostart") == Some("0") {
         return None;
@@ -95,7 +97,7 @@ mod tests {
         let home = std::env::temp_dir().join(format!("roommate-radar-autostart-{}", std::process::id()));
         std::fs::create_dir_all(home.join(".config")).unwrap();
         let url = |conf: &str| {
-            std::fs::write(home.join(".config/roommate-radar.conf"), conf).unwrap();
+            std::fs::write(home.join(crate::shm::CONF), conf).unwrap();
             super::launch_url(home.to_str().unwrap())
         };
         let on = url("enabled=1\ngameid=16375998297183092736\n");

@@ -5,6 +5,7 @@ use std::sync::atomic::{AtomicU8, AtomicU64, Ordering, fence};
 
 pub const PATH: &str = "/dev/shm/steamframe-cams";
 pub const CALIB_DIR: &str = "/dev/shm/steamframe-calib"; // the driver's copy of /persist's calibration
+pub const CONF: &str = ".config/roommate-radar.conf"; // under $HOME: the app's settings, which the driver's autostart reads
 pub const W: usize = 1056;
 pub const H: usize = 1024;
 pub const STRIDE: usize = 1152;

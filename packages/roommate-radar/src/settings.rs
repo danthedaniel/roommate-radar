@@ -3,6 +3,8 @@ use std::path::PathBuf;
 
 pub const SIZES: [i32; 3] = [320, 480, 640];
 pub const RATES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
+pub const MIN_DIST: f32 = 1.0; // max_dist's range (m)
+pub const MAX_DIST: f32 = 8.0;
 
 #[derive(Clone, Debug)]
 pub struct Settings {
@@ -61,7 +63,7 @@ impl Settings {
                 "autostart" => s.autostart = f != 0.0,
                 "warned" => s.warned = f != 0.0,
                 "gameid" => s.gameid = v.parse().ok(),
-                "max_dist" => s.max_dist = f,
+                "max_dist" if (MIN_DIST..=MAX_DIST).contains(&f) => s.max_dist = f,
                 "size" if SIZES.contains(&(f as i32)) => s.size = f as i32,
                 "hz" if RATES.contains(&f) => s.hz = f,
                 _ => {}
@@ -117,8 +119,11 @@ mod tests {
         };
         s.save();
         let l = Settings::load(path.clone());
-        std::fs::remove_file(path).unwrap();
         assert!(!l.people && l.pets && l.play_area && l.max_dist == 4.5 && l.size == 640 && l.hz == 16.0);
         assert!(!l.autostart && l.warned && l.gameid == Some(16375998297183092736), "a game id doesn't fit in an f32");
+        std::fs::write(&path, "max_dist=20\nsize=100\n").unwrap();
+        let l = Settings::load(path.clone());
+        std::fs::remove_file(path).unwrap();
+        assert!(l.max_dist == Settings::default().max_dist && l.size == 320, "out of range: the defaults");
     }
 }

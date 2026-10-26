@@ -31,7 +31,7 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
   switch).
 - "Roommate Radar" tab in the SteamVR dashboard: on/off, start with SteamVR (on by default), only in games (runs from a game's launch, intro included, until it quits; passthrough itself isn't
   reported to apps), people, cats and dogs, ignore my hands, only near the play area (inside the SteamVR boundary or
-  within 1.5 m of it, `IVRChaperoneSetup` live collision bounds; no boundary: everywhere), range, status. Saved in `~/.config/roommate-radar.conf`.
+  within 1 m of it, `IVRChaperoneSetup` live collision bounds; no boundary: everywhere), range, status. Saved in `~/.config/roommate-radar.conf`.
 - GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
   at start) so the game preempts it (msm has preemption on: 4 rings).
 

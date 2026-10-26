@@ -83,7 +83,7 @@ fn run() -> i32 {
     start();
     let mut tracker = tracker::Tracker::default();
     let home = std::env::var("HOME").unwrap_or_default();
-    let mut set = settings::Settings::load(format!("{home}/.config/roommate-radar.conf").into());
+    let mut set = settings::Settings::load(format!("{home}/{}", shm::CONF).into());
     // How the driver starts the app with SteamVR (driver/autostart.rs)
     if let Some(gameid) = std::env::var("SteamGameId").ok().and_then(|g| g.parse().ok())
         && set.gameid != Some(gameid)

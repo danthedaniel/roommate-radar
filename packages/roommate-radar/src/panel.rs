@@ -3,7 +3,7 @@
 use crate::detector;
 use crate::draw::{self, Image, Rgb, WHITE, over, rrect_sd};
 use crate::openvr::{self, VROverlayHandle_t, vr};
-use crate::settings::{RATES, SIZES, Settings};
+use crate::settings::{MAX_DIST, MIN_DIST, RATES, SIZES, Settings};
 use crate::textures::Textures;
 
 pub const W: usize = 1000;
@@ -56,7 +56,7 @@ static SECTIONS: [&[Control]; 3] = [
             title: "Range",
             detail: "",
             dimmed: NEEDS_ENABLED,
-            kind: Kind::Stepper { val: |s| &mut s.max_dist, step: 0.5, min: 1.0, max: 8.0 },
+            kind: Kind::Stepper { val: |s| &mut s.max_dist, step: 0.5, min: MIN_DIST, max: MAX_DIST },
         },
     ],
     &[
@@ -65,7 +65,8 @@ static SECTIONS: [&[Control]; 3] = [
             detail: "",
             dimmed: NEEDS_ENABLED,
             kind: Kind::Choice {
-                labels: &["Low (320px)", "Medium (480px)", "High (640px)"],
+                n: SIZES.len(),
+                label: |i| format!("{} ({}px)", SIZE_NAMES[i], SIZES[i]),
                 get: |s| SIZES.iter().position(|&x| x == s.size).unwrap_or(0),
                 pick: |s, i| {
                     s.size = SIZES[i];
@@ -78,7 +79,8 @@ static SECTIONS: [&[Control]; 3] = [
             detail: "",
             dimmed: NEEDS_ENABLED,
             kind: Kind::Choice {
-                labels: &["2Hz", "4Hz", "8Hz", "16Hz"],
+                n: RATES.len(),
+                label: |i| format!("{}Hz", RATES[i]),
                 get: |s| RATES.iter().position(|&x| x == s.hz).unwrap_or(0),
                 pick: |s, i| {
                     s.hz = RATES[i];
@@ -97,6 +99,9 @@ const ROWS: usize = {
     n
 };
 
+/// Detection Resolution's names for SIZES.
+const SIZE_NAMES: [&str; SIZES.len()] = ["Low", "Medium", "High"];
+
 /// The detection settings are greyed out while Enabled is off.
 const NEEDS_ENABLED: fn(&Settings) -> bool = |s| !s.enabled;
 
@@ -111,7 +116,7 @@ struct Control {
 enum Kind {
     Switch(fn(&mut Settings) -> &mut bool),
     Stepper { val: fn(&mut Settings) -> &mut f32, step: f32, min: f32, max: f32 }, // (-) value (+)
-    Choice { labels: &'static [&'static str], get: fn(&Settings) -> usize, pick: fn(&mut Settings, usize) }, // dropdown
+    Choice { n: usize, label: fn(usize) -> String, get: fn(&Settings) -> usize, pick: fn(&mut Settings, usize) }, // dropdown
 }
 
 /// What's under the pointer.
@@ -160,6 +165,7 @@ const DROP_X0: f32 = W as f32 - PAD - DROP_W;
 const MINUS_CX: f32 = W as f32 - PAD - BTN_R - 220.0;
 const PLUS_CX: f32 = W as f32 - PAD - BTN_R;
 const HOVER_TICK_US: u16 = 1500; // hover haptic
+const DASH_KEY: &str = "steamframe.roommate-radar.dashboard"; // the tab's overlay key
 const BG: Rgb = [20, 20, 24];
 const GREY: Rgb = [150, 150, 160];
 const LIGHT: Rgb = [205, 205, 212]; // body text: between WHITE and GREY
@@ -239,11 +245,11 @@ impl Control {
                 let knob = if on { x0 + TOGGLE_W - TOGGLE_H / 2.0 } else { x0 + TOGGLE_H / 2.0 };
                 fill_circle(img, knob, cy, TOGGLE_H / 2.0 - 5.0, WHITE, if dim { 0.6 } else { 1.0 });
             }
-            Kind::Choice { labels, get, .. } => {
+            Kind::Choice { label, get, .. } => {
                 // current choice and a chevron
                 let a = if hovered { 1.0 } else { 0.8 } * fade;
                 fill_rrect(img, DROP_X0, cy - DROP_H / 2.0, DROP_W, DROP_H, 14.0, BTN, a);
-                img.text((DROP_X0 + 22.0) as i32, (cy + 10.0) as i32, labels[get(set)], fg, 28.0);
+                img.text((DROP_X0 + 22.0) as i32, (cy + 10.0) as i32, &label(get(set)), fg, 28.0);
                 for k in -8i32..=8 {
                     let x = wf - PAD - 34.0 + k as f32;
                     fill_circle(img, x, cy - 3.0 + (8 - k.abs()) as f32 * 0.6, 2.0, fg, 1.0);
@@ -265,37 +271,36 @@ impl Control {
         }
     }
 
-    /// A dropdown's choices and which one is current.
-    fn choice(&self, set: &Settings) -> (&'static [&'static str], usize) {
-        let Kind::Choice { labels, get, .. } = self.kind else { unreachable!("not a dropdown") };
-        (labels, get(set))
+    /// A dropdown's number of choices, their labels and which one is current.
+    fn choice(&self, set: &Settings) -> (usize, fn(usize) -> String, usize) {
+        let Kind::Choice { n, label, get, .. } = self.kind else { unreachable!("not a dropdown") };
+        (n, label, get(set))
     }
 
     /// The popup opens with the current choice over the dropdown, moved up as needed to stay inside the panel.
     fn popup_top(&self, row: usize, set: &Settings) -> f32 {
-        let (labels, i) = self.choice(set);
-        (row_cy(row) - (i as f32 + 0.5) * ITEM_H).min(H as f32 - labels.len() as f32 * ITEM_H - 8.0)
+        let (n, _, i) = self.choice(set);
+        (row_cy(row) - (i as f32 + 0.5) * ITEM_H).min(H as f32 - n as f32 * ITEM_H - 8.0)
     }
 
     fn hit_popup(&self, row: usize, x: f32, y: f32, set: &Settings) -> Option<Ctl> {
         let i = ((y - self.popup_top(row, set)) / ITEM_H).floor();
-        let inside = (DROP_X0..=DROP_X0 + DROP_W).contains(&x) && i >= 0.0 && (i as usize) < self.choice(set).0.len();
+        let inside = (DROP_X0..=DROP_X0 + DROP_W).contains(&x) && i >= 0.0 && (i as usize) < self.choice(set).0;
         inside.then_some(Ctl::Item(i as usize))
     }
 
     /// Over the rows: the choices, the current one in the accent color.
     fn render_popup(&self, img: &mut Image, row: usize, hover: Option<Ctl>, set: &Settings) {
-        let (y0, (labels, cur)) = (self.popup_top(row, set), self.choice(set));
-        let n = labels.len();
+        let (y0, (n, label, cur)) = (self.popup_top(row, set), self.choice(set));
         fill_rrect(img, DROP_X0 - 2.0, y0 - 2.0, DROP_W + 4.0, n as f32 * ITEM_H + 4.0, 16.0, WHITE, 0.15);
         fill_rrect(img, DROP_X0, y0, DROP_W, n as f32 * ITEM_H, 14.0, BTN, 1.0);
-        for (i, label) in labels.iter().enumerate() {
+        for i in 0..n {
             let iy = y0 + i as f32 * ITEM_H;
             if hover == Some(Ctl::Item(i)) {
                 fill_rrect(img, DROP_X0 + 6.0, iy + 4.0, DROP_W - 12.0, ITEM_H - 8.0, 10.0, WHITE, 0.1);
             }
             let fg = if i == cur { draw::class_rgb(0) } else { WHITE };
-            img.text((DROP_X0 + 22.0) as i32, (iy + ITEM_H / 2.0 + 10.0) as i32, label, fg, 28.0);
+            img.text((DROP_X0 + 22.0) as i32, (iy + ITEM_H / 2.0 + 10.0) as i32, &label(i), fg, 28.0);
         }
     }
 }
@@ -332,7 +337,7 @@ impl Panel {
     /// Creates the dashboard overlay (the tab) and its icon.
     pub fn create(&mut self, textures: &mut Textures, set: &Settings) -> Result<(), String> {
         let (dash, icon_ov) = vr()
-            .create_dashboard_overlay("steamframe.roommate-radar.dashboard", "Roommate Radar")
+            .create_dashboard_overlay(DASH_KEY, "Roommate Radar")
             .map_err(|e| format!("CreateDashboardOverlay: {e}"))?;
         self.dash = dash;
         textures.set(icon_ov, &icon());
@@ -340,7 +345,7 @@ impl Panel {
         vr().set_mouse_input(dash, W as f32, height(set) as f32);
         textures.set(dash, &self.render(None, "Starting", set));
         if !set.warned {
-            vr().show_dashboard("steamframe.roommate-radar.dashboard");
+            vr().show_dashboard(DASH_KEY);
         }
         Ok(())
     }
@@ -528,6 +533,7 @@ mod tests {
         // Pick, a press outside closes, the rate popup fits the panel.
         let (mut p, mut set) = (Panel::default(), warned());
         let (size, rate) = (row("Detection Resolution"), row("Detection Rate"));
+        assert_eq!((at(size).1.choice(&set).1(2), at(rate).1.choice(&set).1(0)), ("High (640px)".into(), "2Hz".into()));
         p.press(Some(Ctl::Row(size)), &mut set);
         let iy = at(size).1.popup_top(size, &set) + 2.5 * ITEM_H; // the third choice
         assert_eq!(p.popup, Some(size));
