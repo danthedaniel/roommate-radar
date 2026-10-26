@@ -68,7 +68,7 @@ fn own_arm(o: &Obj) -> bool {
 const MAX_BOTTOM: f32 = 2.0;
 
 /// How far outside the play area's boundary detections are still kept (m).
-const PLAY_AREA_MARGIN: f32 = 1.5;
+pub const PLAY_AREA_MARGIN: f32 = 1.0;
 
 /// [x, z] inside the boundary (`walls`, Vr::play_area_walls) or within PLAY_AREA_MARGIN of it; no walls: anywhere.
 fn near_play_area(walls: &[[[f32; 2]; 2]], x: f32, z: f32) -> bool {
@@ -203,22 +203,29 @@ mod tests {
 
     #[test]
     fn play_area() {
-        // 2 x 2 m square around the origin; the margin reaches 1.5 m past it
+        // 2 x 2 m square around the origin; the margin reaches PLAY_AREA_MARGIN past it (e: its edge)
         let walls = [
             [[-1.0, -1.0], [1.0, -1.0]],
             [[1.0, -1.0], [1.0, 1.0]],
             [[1.0, 1.0], [-1.0, 1.0]],
             [[-1.0, 1.0], [-1.0, -1.0]],
         ];
+        let (m, e) = (PLAY_AREA_MARGIN, 1.0 + PLAY_AREA_MARGIN);
         assert!(
-            near_play_area(&walls, 0.0, 0.0) && near_play_area(&walls, 2.4, 0.0) && near_play_area(&walls, 0.0, -2.4)
+            near_play_area(&walls, 0.0, 0.0)
+                && near_play_area(&walls, e - 0.1, 0.0)
+                && near_play_area(&walls, 0.0, 0.1 - e)
         );
+        let c = 1.0 + 0.75 * m; // 1.06 margins from the corner
         assert!(
-            !near_play_area(&walls, 2.6, 0.0) && !near_play_area(&walls, 2.1, 2.1) && near_play_area(&[], 9.0, 9.0)
+            !near_play_area(&walls, e + 0.1, 0.0) && !near_play_area(&walls, c, c) && near_play_area(&[], 9.0, 9.0)
         );
         let set = Settings::default();
         let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, &[], &walls, &set).len();
-        assert!(ms(2.0) == 1 && ms(2.9) == 0, "person 2 m ahead kept, 2.9 m dropped (center 1.9 m past the wall)");
+        assert!(
+            ms(e - 0.5) == 1 && ms(e + 0.5) == 0,
+            "kept half a meter inside the margin, dropped half a meter past it"
+        );
     }
 
     #[test]

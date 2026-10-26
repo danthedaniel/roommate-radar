@@ -48,7 +48,7 @@ static SECTIONS: [&[Control]; 3] = [
         },
         Control {
             title: "Only Detect Near Play Area",
-            detail: "Inside your boundary or within 1.5 m of it",
+            detail: "Inside your boundary or within 1m of it", // PLAY_AREA_MARGIN, tested
             dimmed: NEEDS_ENABLED,
             kind: Kind::Switch(|s| &mut s.play_area),
         },
@@ -506,6 +506,13 @@ mod tests {
         assert!(!set.people && set.max_dist == 8.0);
         let mut img = p.render(Some(Ctl::Row(row("Detect Cats and Dogs"))), "Watching", &set);
         assert!(img.at(0, 0)[3] == 0 && img.at(500, 5)[3] > 200);
+    }
+
+    #[test]
+    fn play_area_detail() {
+        // The row's text (a static, so not formatted) says measure.rs's margin.
+        let m = format!("within {}m ", crate::measure::PLAY_AREA_MARGIN);
+        assert!(at(row("Only Detect Near Play Area")).1.detail.contains(&m));
     }
 
     #[test]
