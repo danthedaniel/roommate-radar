@@ -12,7 +12,7 @@ you're playing.
 - People, cats and dogs within range (1–8 m) get an outline and a label, world-locked and turned to face you. Your own
   arms and hands are ignored.
 - Works over any VR app. A **Roommate Radar** tab in the SteamVR dashboard turns it on and off, picks what to detect,
-  the range, whether to stay near the play area, the detection resolution and rate, and whether to run only while a game is running.
+  the range, whether to detect within the play area, the detection resolution and rate, and whether to run only while a game is running.
 - Starts with SteamVR. No root and no system changes: it installs like a Steam app (in the Steam Linux Runtime 4
   container), plus a SteamVR driver that reads the camera frames.
 - Light on the GPU: YOLO11n at 320 px and 4 Hz (default, adjustable up to 640px and 16Hz), on a low-priority queue the
