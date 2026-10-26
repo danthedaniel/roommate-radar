@@ -7,71 +7,96 @@ use crate::settings::{RATES, SIZES, Settings};
 use crate::textures::Textures;
 
 pub const W: usize = 1000;
-pub const H: usize = 1140 + 2 * GAP as usize;
+pub const H: usize = (TOP + ROWS as f32 * ROW_H + (SECTIONS.len() - 1) as f32 * GAP + 30.0) as usize; // 30 px below
 const PAD: f32 = 48.0;
 const TOP: f32 = 190.0;
 const ROW_H: f32 = 92.0;
 const GAP: f32 = 36.0; // extra space above each section after the first
-const SECTIONS: [usize; 2] = [3, 8]; // their first rows: Detect People, Detection Resolution
 
-/// The tab's controls, one per row, top to bottom: what each shows and changes, and when it's greyed out.
-static CONTROLS: [Control; 10] = [
-    Control { title: "Enabled", detail: "", dimmed: |_| false, kind: Kind::Switch(|s| &mut s.enabled) },
-    // greyed out when never started by Steam: no game id to launch it by
-    Control {
-        title: "Start with SteamVR",
-        detail: "",
-        dimmed: |s| s.gameid.is_none(),
-        kind: Kind::Switch(|s| &mut s.autostart),
-    },
-    Control { title: "Only in Games", detail: "", dimmed: NEEDS_ENABLED, kind: Kind::Switch(|s| &mut s.games_only) },
-    Control { title: "Detect People", detail: "", dimmed: NEEDS_ENABLED, kind: Kind::Switch(|s| &mut s.people) },
-    Control { title: "Detect Cats and Dogs", detail: "", dimmed: NEEDS_ENABLED, kind: Kind::Switch(|s| &mut s.pets) },
-    Control {
-        title: "Ignore My Hands",
-        detail: "Works best when holding controllers",
-        dimmed: NEEDS_ENABLED,
-        kind: Kind::Switch(|s| &mut s.hands),
-    },
-    Control {
-        title: "Only Near Play Area",
-        detail: "Inside your boundary or within 1.5 m of it",
-        dimmed: NEEDS_ENABLED,
-        kind: Kind::Switch(|s| &mut s.play_area),
-    },
-    Control {
-        title: "Range",
-        detail: "",
-        dimmed: NEEDS_ENABLED,
-        kind: Kind::Stepper { val: |s| &mut s.max_dist, step: 0.5, min: 1.0, max: 8.0 },
-    },
-    Control {
-        title: "Detection Resolution",
-        detail: "",
-        dimmed: NEEDS_ENABLED,
-        kind: Kind::Choice {
-            labels: &["Low (320px)", "Medium (480px)", "High (640px)"],
-            get: |s| SIZES.iter().position(|&x| x == s.size).unwrap_or(0),
-            pick: |s, i| {
-                s.size = SIZES[i];
-                detector::SIZE.store(s.size, std::sync::atomic::Ordering::Relaxed); // the detector reloads
+/// The tab's controls, one per row, top to bottom, in sections (a gap and a stronger line between them): what each
+/// shows and changes, and when it's greyed out.
+static SECTIONS: [&[Control]; 3] = [
+    &[
+        Control { title: "Enabled", detail: "", dimmed: |_| false, kind: Kind::Switch(|s| &mut s.enabled) },
+        // greyed out when never started by Steam: no game id to launch it by
+        Control {
+            title: "Start with SteamVR",
+            detail: "",
+            dimmed: |s| s.gameid.is_none(),
+            kind: Kind::Switch(|s| &mut s.autostart),
+        },
+        Control {
+            title: "Only in Games",
+            detail: "",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Switch(|s| &mut s.games_only),
+        },
+    ],
+    &[
+        Control { title: "Detect People", detail: "", dimmed: NEEDS_ENABLED, kind: Kind::Switch(|s| &mut s.people) },
+        Control {
+            title: "Detect Cats and Dogs",
+            detail: "",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Switch(|s| &mut s.pets),
+        },
+        Control {
+            title: "Ignore My Hands",
+            detail: "Works best when holding controllers",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Switch(|s| &mut s.hands),
+        },
+        Control {
+            title: "Only Near Play Area",
+            detail: "Inside your boundary or within 1.5 m of it",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Switch(|s| &mut s.play_area),
+        },
+        Control {
+            title: "Range",
+            detail: "",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Stepper { val: |s| &mut s.max_dist, step: 0.5, min: 1.0, max: 8.0 },
+        },
+    ],
+    &[
+        Control {
+            title: "Detection Resolution",
+            detail: "",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Choice {
+                labels: &["Low (320px)", "Medium (480px)", "High (640px)"],
+                get: |s| SIZES.iter().position(|&x| x == s.size).unwrap_or(0),
+                pick: |s, i| {
+                    s.size = SIZES[i];
+                    detector::SIZE.store(s.size, std::sync::atomic::Ordering::Relaxed); // the detector reloads
+                },
             },
         },
-    },
-    Control {
-        title: "Detection Rate",
-        detail: "",
-        dimmed: NEEDS_ENABLED,
-        kind: Kind::Choice {
-            labels: &["2Hz", "4Hz", "8Hz", "16Hz"],
-            get: |s| RATES.iter().position(|&x| x == s.hz).unwrap_or(0),
-            pick: |s, i| {
-                s.hz = RATES[i];
-                detector::HZ.store(s.hz);
+        Control {
+            title: "Detection Rate",
+            detail: "",
+            dimmed: NEEDS_ENABLED,
+            kind: Kind::Choice {
+                labels: &["2Hz", "4Hz", "8Hz", "16Hz"],
+                get: |s| RATES.iter().position(|&x| x == s.hz).unwrap_or(0),
+                pick: |s, i| {
+                    s.hz = RATES[i];
+                    detector::HZ.store(s.hz);
+                },
             },
         },
-    },
+    ],
 ];
+const ROWS: usize = {
+    let (mut n, mut i) = (0, 0);
+    while i < SECTIONS.len() {
+        n += SECTIONS[i].len();
+        i += 1;
+    }
+    n
+};
+
 /// The detection settings are greyed out while Enabled is off.
 const NEEDS_ENABLED: fn(&Settings) -> bool = |s| !s.enabled;
 
@@ -112,9 +137,13 @@ const GREY: Rgb = [150, 150, 160];
 const TRACK_OFF: Rgb = [68, 68, 76];
 const BTN: Rgb = [52, 52, 60];
 
+/// Row `row` (0..ROWS): its section and control.
+fn at(row: usize) -> (usize, &'static Control) {
+    SECTIONS.iter().enumerate().flat_map(|(s, cs)| cs.iter().map(move |c| (s, c))).nth(row).expect("no such row")
+}
+
 fn row_cy(row: usize) -> f32 {
-    let sections = SECTIONS.iter().filter(|&&s| row >= s).count();
-    TOP + (row as f32 + 0.5) * ROW_H + sections as f32 * GAP
+    TOP + (row as f32 + 0.5) * ROW_H + at(row).0 as f32 * GAP
 }
 
 impl Control {
@@ -158,7 +187,7 @@ impl Control {
         }
         // a line above each row but the first, stronger mid-gap between sections
         if row > 0 {
-            let (h, a, y) = if SECTIONS.contains(&row) { (3.0, 0.25, GAP / 2.0) } else { (1.5, 0.08, 0.0) };
+            let (h, a, y) = if at(row).0 != at(row - 1).0 { (3.0, 0.25, GAP / 2.0) } else { (1.5, 0.08, 0.0) };
             fill_rrect(img, PAD, cy - ROW_H / 2.0 - y - h / 2.0, wf - 2.0 * PAD, h, 0.0, WHITE, a);
         }
         let dim = (self.dimmed)(set);
@@ -287,10 +316,10 @@ impl Panel {
     /// Which control (texture pixel, y down) is under the pointer; greyed-out rows don't hover or press.
     fn hit(&self, x: f32, y: f32, set: &Settings) -> Option<Ctl> {
         if let Some(row) = self.popup {
-            return CONTROLS[row].hit_popup(row, x, y, set);
+            return at(row).1.hit_popup(row, x, y, set);
         }
-        let row = (0..CONTROLS.len()).find(|&r| (y - row_cy(r)).abs() < ROW_H / 2.0)?; // none in the gaps
-        let c = Some(&CONTROLS[row]).filter(|c| x >= PAD && x <= W as f32 - PAD && !(c.dimmed)(set))?;
+        let row = (0..ROWS).find(|&r| (y - row_cy(r)).abs() < ROW_H / 2.0)?; // none in the gaps
+        let c = Some(at(row).1).filter(|c| x >= PAD && x <= W as f32 - PAD && !(c.dimmed)(set))?;
         c.hit(row, x, y)
     }
 
@@ -298,10 +327,10 @@ impl Panel {
     fn press(&mut self, ctl: Option<Ctl>, set: &mut Settings) {
         if let Some(row) = self.popup.take() {
             if let Some(c @ Ctl::Item(_)) = ctl {
-                CONTROLS[row].press(c, set);
+                at(row).1.press(c, set);
             }
         } else if let Some(c @ (Ctl::Row(row) | Ctl::Step(row, _))) = ctl
-            && CONTROLS[row].press(c, set)
+            && at(row).1.press(c, set)
         {
             self.popup = Some(row);
         }
@@ -342,11 +371,11 @@ impl Panel {
         fill_rrect(&mut img, 0.0, 0.0, W as f32, H as f32, 32.0, BG, 0.94);
         img.text(PAD as i32, 100, "Roommate Radar", WHITE, 56.0);
         img.text(PAD as i32, 150, status, GREY, 30.0);
-        for (row, c) in CONTROLS.iter().enumerate() {
-            c.render(&mut img, row, hover, set);
+        for row in 0..ROWS {
+            at(row).1.render(&mut img, row, hover, set);
         }
         if let Some(row) = self.popup {
-            CONTROLS[row].render_popup(&mut img, row, hover, set);
+            at(row).1.render_popup(&mut img, row, hover, set);
         }
         img
     }
@@ -358,18 +387,16 @@ mod tests {
     use std::sync::atomic::Ordering;
 
     fn row(title: &str) -> usize {
-        CONTROLS.iter().position(|r| r.title == title).unwrap()
+        (0..ROWS).find(|&r| at(r).1.title == title).unwrap()
     }
 
     #[test]
     fn sections() {
-        assert!(
-            CONTROLS[SECTIONS[0]].title == "Detect People" && CONTROLS[SECTIONS[1]].title == "Detection Resolution"
-        );
-        assert_eq!(
-            Panel::default().hit(500.0, row_cy(SECTIONS[0]) - ROW_H / 2.0 - GAP / 2.0, &Settings::default()),
-            None
-        );
+        // A gap (that hits nothing) above each section after the first; the last row ends 30 px above the bottom.
+        let people = row("Detect People");
+        assert!(at(people - 1).0 == 0 && at(people).0 == 1 && at(ROWS - 1).0 == 2);
+        assert_eq!(Panel::default().hit(500.0, row_cy(people) - ROW_H / 2.0 - GAP / 2.0, &Settings::default()), None);
+        assert_eq!(row_cy(ROWS - 1) + ROW_H / 2.0 + 30.0, H as f32);
     }
 
     #[test]
@@ -413,7 +440,7 @@ mod tests {
         let (mut p, mut set) = (Panel::default(), Settings::default());
         let (size, rate) = (row("Detection Resolution"), row("Detection Rate"));
         p.press(Some(Ctl::Row(size)), &mut set);
-        let iy = CONTROLS[size].popup_top(size, &set) + 2.5 * ITEM_H; // the third choice
+        let iy = at(size).1.popup_top(size, &set) + 2.5 * ITEM_H; // the third choice
         assert_eq!(p.popup, Some(size));
         assert_eq!(p.hit(500.0, iy, &set), None);
         assert_eq!(p.hit(DROP_X0 + 10.0, iy, &set), Some(Ctl::Item(2)));
@@ -422,7 +449,7 @@ mod tests {
         p.press(Some(Ctl::Row(size)), &mut set);
         p.press(None, &mut set);
         p.press(Some(Ctl::Row(rate)), &mut set);
-        assert!(CONTROLS[rate].popup_top(rate, &set) + 4.0 * ITEM_H <= H as f32);
+        assert!(at(rate).1.popup_top(rate, &set) + 4.0 * ITEM_H <= H as f32);
         p.press(Some(Ctl::Item(3)), &mut set);
         assert!(set.size == 640 && set.hz == 16.0 && detector::HZ.load() == 16.0 && p.popup.is_none());
     }
