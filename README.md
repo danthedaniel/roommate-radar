@@ -1,4 +1,4 @@
-# Roommate Radar
+# Roommate Radar for Steam Frame
 
 https://github.com/user-attachments/assets/209e909d-0cea-47e2-8dc6-f2a63bc855a5
 
