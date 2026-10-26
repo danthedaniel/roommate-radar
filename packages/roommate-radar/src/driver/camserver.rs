@@ -178,6 +178,10 @@ impl Camera {
         self.maps.clear();
         self.remote_vfd = -1;
         self.last_published = None; // a restarted XRService counts from 0 again
+        // and may bring a new camera clock and exposure: the offset only creeps down (1 us a frame), the mean only
+        // follows frames it accepts
+        self.clock_offset_ns = None;
+        self.normal_mean = 0.0;
     }
 }
 
@@ -344,6 +348,7 @@ pub fn run(nodes: [&'static str; shm::NUM_CAMS]) {
             // XRService restarted streaming on the same fd: its sequence counts from 0 again
             if c.last_published.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
                 c.last_published = None;
+                c.clock_offset_ns = None;
             }
             if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
                 continue;

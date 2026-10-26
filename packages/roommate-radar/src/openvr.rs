@@ -121,10 +121,13 @@ impl Vr {
     // IVRChaperoneSetup
 
     /// The play area's boundary (standing universe) as its walls' ends on the floor, [x, z]; empty if there's none.
+    /// Reread from disk: this process's copy is loaded when it connects and SteamVR doesn't update it when the
+    /// boundary is redrawn (it sends ChaperoneDataHasChanged/UniverseHasChanged instead).
     pub fn play_area_walls(&self) -> Vec<[[f32; 2]; 2]> {
         let Some(t) = self.chaperone else {
             return vec![];
         };
+        call!(t, ReloadFromDisk, EChaperoneConfigFile_Live);
         let mut n = 0;
         call!(t, GetLiveCollisionBoundsInfo, std::ptr::null_mut(), &mut n); // just the count
         let mut quads: Vec<HmdQuad_t> = vec![unsafe { std::mem::zeroed() }; n as usize];

@@ -115,6 +115,7 @@ fn run() -> i32 {
         }
     };
     let mut in_game = vr().game_running();
+    let mut walls = vr().play_area_walls();
 
     // The driver copies the factory calibration when it loads: none means driver_roommate_radar wasn't loaded when this
     // SteamVR started (the first run registers it).
@@ -149,6 +150,12 @@ fn run() -> i32 {
             if ev.eventType == openvr::EVREventType_VREvent_SceneApplicationStateChanged {
                 in_game = vr().game_running();
             }
+            if ev.eventType == openvr::EVREventType_VREvent_ChaperoneDataHasChanged
+                || ev.eventType == openvr::EVREventType_VREvent_ChaperoneUniverseHasChanged
+            {
+                walls = vr().play_area_walls();
+                tracker.tracks.clear(); // in the standing universe, which may have moved
+            }
         }
         panel.poll(&mut set);
         let run = set.warned && set.enabled && (in_game || !set.games_only); // the tab's first-run warning first
@@ -170,9 +177,8 @@ fn run() -> i32 {
             let ago = (d.t_capture_ns as i64 - now as i64) as f32 / 1e9;
             lag_s += (-ago + 1.0 / set.hz - lag_s) * 0.1;
             if let (head, true) = head_pose(ago) {
-                // boundary fetched per detection (cheap IPC at <= 16 Hz); cache it on ChaperoneDataHasChanged if not
-                let walls = if set.play_area { vr().play_area_walls() } else { vec![] };
-                let ms = measure::measurements(&d.objs, &head, &controllers(ago), &walls, &set);
+                let walls: &[_] = if set.play_area { &walls } else { &[] };
+                let ms = measure::measurements(&d.objs, &head, &controllers(ago), walls, &set);
                 tracker.update(&ms, d.t_capture_ns as f64 / 1e9);
             }
         }
