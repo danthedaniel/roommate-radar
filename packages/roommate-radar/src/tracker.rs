@@ -28,8 +28,9 @@ const ACCEL: f32 = 2.0; // process noise: std dev of a person's acceleration (m/
 const SIZE_RATE: f32 = 0.3; // process noise for box size (m/s^2 equivalent)
 const SIZE_SIGMA: f32 = 0.1; // box size measurement std dev (m)
 const HISTORY: usize = 4; // matched detections kept per track
-const SIZE_ALPHA: f32 = 0.2; // w, h in history are exponentially smoothed (1 = raw); the spline alone follows noise
-const DIST_ALPHA: f32 = 0.4; // same for the distance from the eye (stereo depth); the bearing stays raw
+// w, h and the distance from the eye (stereo depth) in history are exponentially smoothed, the spline alone follows
+// noise: a step is 90% there after this long (s), whatever the detection rate. The bearing stays raw.
+const SETTLE_S: f64 = 1.0;
 
 /// One axis: position p, velocity v, covariance pc.
 #[derive(Clone, Copy, Debug, Default)]
@@ -240,14 +241,15 @@ impl Tracker {
 fn remember(tr: &mut Track, d: &Meas, t: f64) {
     let mut s = Sample { t, v: d.v };
     if let Some(prev) = tr.history.back() {
+        let alpha = alpha(t - prev.t);
         for c in 3..5 {
-            s.v[c] = prev.v[c] + SIZE_ALPHA * (s.v[c] - prev.v[c]);
+            s.v[c] = prev.v[c] + alpha * (s.v[c] - prev.v[c]);
         }
         // Previous distance measured from this eye, so the head moving isn't smoothed away.
         let dist = |v: &[f32; 5]| (0..3).map(|c| (v[c] - d.eye[c]).powi(2)).sum::<f32>().sqrt();
         let (r, rp) = (dist(&s.v), dist(&prev.v));
         if r > 0.0 {
-            let k = (rp + DIST_ALPHA * (r - rp)) / r;
+            let k = (rp + alpha * (r - rp)) / r;
             for c in 0..3 {
                 s.v[c] = d.eye[c] + k * (s.v[c] - d.eye[c]);
             }
@@ -259,6 +261,11 @@ fn remember(tr: &mut Track, d: &Meas, t: f64) {
     while tr.history.len() > HISTORY {
         tr.history.pop_front();
     }
+}
+
+/// Smoothing factor for a sample dt (s) after the previous one: 10% of a step is left after SETTLE_S.
+fn alpha(dt: f64) -> f32 {
+    (1.0 - 0.1f64.powf(dt.max(0.0) / SETTLE_S)) as f32
 }
 
 #[cfg(test)]
@@ -316,16 +323,18 @@ mod tests {
 
     #[test]
     fn size_and_distance_alpha_smoothed() {
-        // A 20 cm jump in height moves the stored height by SIZE_ALPHA of it.
+        // 4 Hz settles 90% in 4 samples.
+        assert!(((1.0 - alpha(0.25)).powi(4) - 0.1).abs() < 1e-5);
+        // A 20 cm jump in height moves the stored height by alpha of it.
         let mut sz = Tracker::default();
         sz.update(&[meas([0.0, 1.0, -2.0, 0.5, 1.7], 0.8)], 0.0);
         sz.update(&[meas([0.0, 1.0, -2.0, 0.5, 1.9], 0.8)], 0.25);
         let last = *sz.tracks[0].history.back().unwrap();
-        assert!((last.v[4] - (1.7 + SIZE_ALPHA * 0.2)).abs() < 1e-5 && last.v[3] == 0.5);
-        // Distance too, along the ray from the eye: 2 m then 2.5 m straight ahead stores 2 + DIST_ALPHA * 0.5.
+        assert!((last.v[4] - (1.7 + alpha(0.25) * 0.2)).abs() < 1e-5 && last.v[3] == 0.5);
+        // Distance too, along the ray from the eye: 2 m then 2.5 m straight ahead stores 2 + alpha * 0.5.
         sz.update(&[Meas { eye: [0.0, 1.0, 0.0], ..meas([0.0, 1.0, -2.5, 0.5, 1.7], 0.8) }], 0.5);
         let last = *sz.tracks[0].history.back().unwrap();
-        assert!((last.v[2] + 2.0 + DIST_ALPHA * 0.5).abs() < 1e-5 && (last.v[1] - 1.0).abs() < 1e-5);
+        assert!((last.v[2] + 2.0 + alpha(0.25) * 0.5).abs() < 1e-5 && (last.v[1] - 1.0).abs() < 1e-5);
     }
 
     #[test]
