@@ -121,7 +121,7 @@ enum Kind {
 
 /// What's under the pointer.
 #[derive(Clone, Copy, PartialEq, Debug)]
-enum Ctl {
+enum Target {
     Row(usize),       // a switch's or dropdown's row
     Step(usize, i32), // a stepper's (-) (-1) or (+) (1)
     Item(usize),      // the open popup's choice
@@ -183,29 +183,29 @@ fn row_cy(row: usize) -> f32 {
 
 impl Control {
     /// Which part of this control, in row `row`, is at (x, y): the whole row, but a stepper's buttons.
-    fn hit(&self, row: usize, x: f32, y: f32) -> Option<Ctl> {
+    fn hit(&self, row: usize, x: f32, y: f32) -> Option<Target> {
         let Kind::Stepper { .. } = self.kind else {
-            return Some(Ctl::Row(row));
+            return Some(Target::Row(row));
         };
         let near = |cx: f32| (x - cx).hypot(y - row_cy(row)) < BTN_R + 12.0;
         if near(MINUS_CX) {
-            Some(Ctl::Step(row, -1))
+            Some(Target::Step(row, -1))
         } else if near(PLUS_CX) {
-            Some(Ctl::Step(row, 1))
+            Some(Target::Step(row, 1))
         } else {
             None
         }
     }
 
     /// Changes and saves the setting; true: a dropdown's row, which opens its popup instead.
-    fn press(&self, ctl: Ctl, set: &mut Settings) -> bool {
-        match (ctl, self.kind) {
-            (Ctl::Row(_), Kind::Switch(f)) => *f(set) = !*f(set),
-            (Ctl::Step(_, d), Kind::Stepper { val, step, min, max }) => {
+    fn press(&self, target: Target, set: &mut Settings) -> bool {
+        match (target, self.kind) {
+            (Target::Row(_), Kind::Switch(f)) => *f(set) = !*f(set),
+            (Target::Step(_, d), Kind::Stepper { val, step, min, max }) => {
                 *val(set) = (*val(set) + d as f32 * step).clamp(min, max)
             }
-            (Ctl::Item(i), Kind::Choice { pick, .. }) => pick(set, i),
-            (Ctl::Row(_), Kind::Choice { .. }) => return true,
+            (Target::Item(i), Kind::Choice { pick, .. }) => pick(set, i),
+            (Target::Row(_), Kind::Choice { .. }) => return true,
             _ => return false,
         }
         set.save();
@@ -213,10 +213,10 @@ impl Control {
     }
 
     /// Draws row `row`: title (and detail) on the left, the control on the right.
-    fn render(&self, img: &mut Image, row: usize, hover: Option<Ctl>, set: &Settings) {
+    fn render(&self, img: &mut Image, row: usize, hover: Option<Target>, set: &Settings) {
         let wf = W as f32;
         let cy = row_cy(row);
-        let hovered = hover == Some(Ctl::Row(row));
+        let hovered = hover == Some(Target::Row(row));
         if hovered {
             fill_rrect(img, PAD - 20.0, cy - ROW_H / 2.0 + 4.0, wf - 2.0 * PAD + 40.0, ROW_H - 8.0, 18.0, WHITE, 0.05);
         }
@@ -257,7 +257,7 @@ impl Control {
             }
             Kind::Stepper { val, .. } => {
                 for (cx, d) in [(MINUS_CX, -1), (PLUS_CX, 1)] {
-                    let a = if hover == Some(Ctl::Step(row, d)) { 1.0 } else { 0.8 } * fade;
+                    let a = if hover == Some(Target::Step(row, d)) { 1.0 } else { 0.8 } * fade;
                     fill_circle(img, cx, cy, BTN_R, BTN, a);
                     fill_rrect(img, cx - 11.0, cy - 1.5, 22.0, 3.0, 1.5, fg, 1.0);
                     if d == 1 {
@@ -283,20 +283,20 @@ impl Control {
         (row_cy(row) - (i as f32 + 0.5) * ITEM_H).min(H as f32 - n as f32 * ITEM_H - 8.0)
     }
 
-    fn hit_popup(&self, row: usize, x: f32, y: f32, set: &Settings) -> Option<Ctl> {
+    fn hit_popup(&self, row: usize, x: f32, y: f32, set: &Settings) -> Option<Target> {
         let i = ((y - self.popup_top(row, set)) / ITEM_H).floor();
         let inside = (DROP_X0..=DROP_X0 + DROP_W).contains(&x) && i >= 0.0 && (i as usize) < self.choice(set).0;
-        inside.then_some(Ctl::Item(i as usize))
+        inside.then_some(Target::Item(i as usize))
     }
 
     /// Over the rows: the choices, the current one in the accent color.
-    fn render_popup(&self, img: &mut Image, row: usize, hover: Option<Ctl>, set: &Settings) {
+    fn render_popup(&self, img: &mut Image, row: usize, hover: Option<Target>, set: &Settings) {
         let (y0, (n, label, cur)) = (self.popup_top(row, set), self.choice(set));
         fill_rrect(img, DROP_X0 - 2.0, y0 - 2.0, DROP_W + 4.0, n as f32 * ITEM_H + 4.0, 16.0, WHITE, 0.15);
         fill_rrect(img, DROP_X0, y0, DROP_W, n as f32 * ITEM_H, 14.0, BTN, 1.0);
         for i in 0..n {
             let iy = y0 + i as f32 * ITEM_H;
-            if hover == Some(Ctl::Item(i)) {
+            if hover == Some(Target::Item(i)) {
                 fill_rrect(img, DROP_X0 + 6.0, iy + 4.0, DROP_W - 12.0, ITEM_H - 8.0, 10.0, WHITE, 0.1);
             }
             let fg = if i == cur { draw::class_rgb(0) } else { WHITE };
@@ -328,7 +328,7 @@ fn icon() -> Image {
 #[derive(Default)]
 pub struct Panel {
     popup: Option<usize>, // the dropdown row whose popup is showing
-    hover: Option<Ctl>,
+    hover: Option<Target>,
     drawn: String, // the status the tab was last drawn with ("" = redraw)
     dash: VROverlayHandle_t,
 }
@@ -351,10 +351,10 @@ impl Panel {
     }
 
     /// Which control (texture pixel, y down) is under the pointer; greyed-out rows don't hover or press.
-    fn hit(&self, x: f32, y: f32, set: &Settings) -> Option<Ctl> {
+    fn hit(&self, x: f32, y: f32, set: &Settings) -> Option<Target> {
         if !set.warned {
             let on = (ACK_X0..=ACK_X0 + ACK_W).contains(&x) && (ACK_Y0..=ACK_Y0 + ACK_H).contains(&y);
-            return on.then_some(Ctl::Ack);
+            return on.then_some(Target::Ack);
         }
         if let Some(row) = self.popup {
             return at(row).1.hit_popup(row, x, y, set);
@@ -365,15 +365,15 @@ impl Panel {
     }
 
     /// While a popup is open any press closes it (None: outside it); an item also picks that choice.
-    fn press(&mut self, ctl: Option<Ctl>, set: &mut Settings) {
-        if ctl == Some(Ctl::Ack) {
+    fn press(&mut self, target: Option<Target>, set: &mut Settings) {
+        if target == Some(Target::Ack) {
             set.warned = true;
             set.save();
         } else if let Some(row) = self.popup.take() {
-            if let Some(c @ Ctl::Item(_)) = ctl {
+            if let Some(c @ Target::Item(_)) = target {
                 at(row).1.press(c, set);
             }
-        } else if let Some(c @ (Ctl::Row(row) | Ctl::Step(row, _))) = ctl
+        } else if let Some(c @ (Target::Row(row) | Target::Step(row, _))) = target
             && at(row).1.press(c, set)
         {
             self.popup = Some(row);
@@ -398,7 +398,7 @@ impl Panel {
             if ev.eventType == openvr::EVREventType_VREvent_MouseButtonDown && (c.is_some() || self.popup.is_some()) {
                 self.press(c, set);
                 self.drawn.clear();
-                if c == Some(Ctl::Ack) {
+                if c == Some(Target::Ack) {
                     vr().set_mouse_input(self.dash, W as f32, H as f32); // the settings' height from now on
                 }
             }
@@ -413,7 +413,7 @@ impl Panel {
         }
     }
 
-    fn render(&self, hover: Option<Ctl>, status: &str, set: &Settings) -> Image {
+    fn render(&self, hover: Option<Target>, status: &str, set: &Settings) -> Image {
         let mut img = Image::new(W, height(set));
         fill_rrect(&mut img, 0.0, 0.0, W as f32, height(set) as f32, 32.0, BG, 0.94);
         if !set.warned {
@@ -429,7 +429,7 @@ impl Panel {
             for (i, p) in ic.px.chunks(4).enumerate() {
                 over(img.at(x0 + i % ic.w, ICON_Y0 as usize + i / ic.w), [p[0], p[1], p[2]], p[3] as f32 / 255.0);
             }
-            let a = if hover == Some(Ctl::Ack) { 1.0 } else { 0.85 };
+            let a = if hover == Some(Target::Ack) { 1.0 } else { 0.85 };
             fill_rrect(&mut img, ACK_X0, ACK_Y0, ACK_W, ACK_H, ACK_H / 2.0, draw::class_rgb(0), a);
             let label = "I Understand";
             let x = (W as f32 - draw::text_width(0, label, ACK_SIZE) as f32) / 2.0;
@@ -468,7 +468,7 @@ mod tests {
         let (mut p, mut set) = (Panel::default(), Settings::default());
         assert_eq!(p.hit(500.0, row_cy(row("Detect People")), &set), None);
         let ack = p.hit(W as f32 / 2.0, ACK_Y0 + ACK_H / 2.0, &set);
-        assert_eq!(ack, Some(Ctl::Ack));
+        assert_eq!(ack, Some(Target::Ack));
         assert!(WARNING.iter().all(|l| draw::text_width(0, l, WARN_SIZE) as f32 <= W as f32 - 2.0 * PAD));
         assert!(WARN_Y + (WARNING.len() - 1) as f32 * WARN_LINE + 40.0 < ACK_Y0);
         let mut img = p.render(None, "", &set);
@@ -491,25 +491,25 @@ mod tests {
         // Rows and buttons hit-test to their controls; greyed-out ones don't.
         let (p, mut set) = (Panel::default(), warned());
         let (people, range, hands) = (row("Detect People"), row("Max Range"), row("Ignore My Hands"));
-        assert_eq!(p.hit(500.0, row_cy(people), &set), Some(Ctl::Row(people)));
-        assert_eq!(p.hit(PLUS_CX, row_cy(range), &set), Some(Ctl::Step(range, 1)));
-        assert_eq!(p.hit(500.0, row_cy(hands), &set), Some(Ctl::Row(hands)));
+        assert_eq!(p.hit(500.0, row_cy(people), &set), Some(Target::Row(people)));
+        assert_eq!(p.hit(PLUS_CX, row_cy(range), &set), Some(Target::Step(range, 1)));
+        assert_eq!(p.hit(500.0, row_cy(hands), &set), Some(Target::Row(hands)));
         assert_eq!(p.hit(500.0, 50.0, &set), None);
         assert_eq!(p.hit(500.0, row_cy(row("Start with SteamVR")), &set), None, "greyed out: not started by Steam");
         set.enabled = false;
         assert_eq!(p.hit(500.0, row_cy(people), &set), None);
-        assert_eq!(p.hit(500.0, row_cy(0), &set), Some(Ctl::Row(0)));
+        assert_eq!(p.hit(500.0, row_cy(0), &set), Some(Target::Row(0)));
     }
 
     #[test]
     fn press_and_render() {
         let (mut p, mut set) = (Panel::default(), Settings::default());
-        p.press(Some(Ctl::Row(row("Detect People"))), &mut set);
+        p.press(Some(Target::Row(row("Detect People"))), &mut set);
         for _ in 0..20 {
-            p.press(Some(Ctl::Step(row("Max Range"), 1)), &mut set);
+            p.press(Some(Target::Step(row("Max Range"), 1)), &mut set);
         }
         assert!(!set.people && set.max_dist == 8.0);
-        let mut img = p.render(Some(Ctl::Row(row("Detect Cats and Dogs"))), "Watching", &set);
+        let mut img = p.render(Some(Target::Row(row("Detect Cats and Dogs"))), "Watching", &set);
         assert!(img.at(0, 0)[3] == 0 && img.at(500, 5)[3] > 200);
     }
 
@@ -534,18 +534,18 @@ mod tests {
         let (mut p, mut set) = (Panel::default(), warned());
         let (size, rate) = (row("Detection Resolution"), row("Detection Rate"));
         assert_eq!((at(size).1.choice(&set).1(2), at(rate).1.choice(&set).1(0)), ("High (640px)".into(), "2Hz".into()));
-        p.press(Some(Ctl::Row(size)), &mut set);
+        p.press(Some(Target::Row(size)), &mut set);
         let iy = at(size).1.popup_top(size, &set) + 2.5 * ITEM_H; // the third choice
         assert_eq!(p.popup, Some(size));
         assert_eq!(p.hit(500.0, iy, &set), None);
-        assert_eq!(p.hit(DROP_X0 + 10.0, iy, &set), Some(Ctl::Item(2)));
-        p.press(Some(Ctl::Item(2)), &mut set);
+        assert_eq!(p.hit(DROP_X0 + 10.0, iy, &set), Some(Target::Item(2)));
+        p.press(Some(Target::Item(2)), &mut set);
         assert!(set.size == 640 && detector::SIZE.load(Ordering::Relaxed) == 640 && p.popup.is_none());
-        p.press(Some(Ctl::Row(size)), &mut set);
+        p.press(Some(Target::Row(size)), &mut set);
         p.press(None, &mut set);
-        p.press(Some(Ctl::Row(rate)), &mut set);
+        p.press(Some(Target::Row(rate)), &mut set);
         assert!(at(rate).1.popup_top(rate, &set) + 4.0 * ITEM_H <= H as f32);
-        p.press(Some(Ctl::Item(3)), &mut set);
+        p.press(Some(Target::Item(3)), &mut set);
         assert!(set.size == 640 && set.hz == 16.0 && detector::HZ.load() == 16.0 && p.popup.is_none());
     }
 }
