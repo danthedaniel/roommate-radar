@@ -1,7 +1,7 @@
 # Run from the Mac. See README for what each piece does.
 FRAME ?= steamos@frame.local
 
-.PHONY: build deploy deploy-all deploy-mirror logs stream cams ssh
+.PHONY: build deploy deploy-all deploy-mirror deploy-calibrate logs stream cams ssh
 
 # Build roommate-radar on the Mac (Steam Runtime SDK, docker) into dist/roommate-radar, as released
 build:
@@ -16,6 +16,12 @@ deploy:
 deploy-all:
 	packages/roommate-radar/build.sh --developer
 	cd ansible && ansible-playbook deploy.yml
+
+# The calibration app (roommate-radar --calibrate) as its own devkit game, roommate_radar_calibrate; records to
+# /tmp/roommate-radar-calibration.jsonl on the Frame
+deploy-calibrate:
+	packages/roommate-radar/build.sh --developer
+	cd ansible && ansible-playbook deploy.yml --tags calibrate
 
 # The mirrorserver service only
 deploy-mirror:

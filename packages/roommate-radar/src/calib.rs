@@ -79,9 +79,79 @@ pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
     })
 }
 
+/// The rotation by w (rad: axis times angle, Rodrigues), row-major.
+pub fn rotation(w: [f32; 3]) -> [f32; 9] {
+    let t = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
+    if t < 1e-12 {
+        return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
+    }
+    let (x, y, z) = (w[0] / t, w[1] / t, w[2] / t);
+    let (s, c) = t.sin_cos();
+    let k = 1.0 - c;
+    [
+        c + x * x * k,
+        x * y * k - z * s,
+        x * z * k + y * s,
+        y * x * k + z * s,
+        c + y * y * k,
+        y * z * k - x * s,
+        z * x * k - y * s,
+        z * y * k + x * s,
+        c + z * z * k,
+    ]
+}
+
+/// The camera turned by w (rad, head frame axes): what it sees moves by w in its rectified view.
+pub fn rotated(c: &CamCal, w: [f32; 3]) -> CamCal {
+    let r = rotation(w);
+    let m = |i: usize, j: usize| (0..3).map(|k| r[i * 3 + k] * c.r[k * 3 + j]).sum::<f32>();
+    CamCal { r: std::array::from_fn(|n| m(n / 3, n % 3)), ..*c }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Rectification: virtual pinhole camera at the SLAM camera's position, axes aligned with the head
 // (x right, y down, looking along head -z). Both views share orientation -> rectified stereo pair.
+
+/// A rectified view's valid region: per row the valid columns [first, last + 1), per column the valid rows; (S, 0)
+/// where there are none. The fisheye's image is convex, so that's all of it.
+#[derive(Clone, Debug)]
+pub struct Valid {
+    pub rows: Vec<(f32, f32)>,
+    pub cols: Vec<(f32, f32)>,
+}
+
+impl Valid {
+    /// Whether (x, y) (px) is at least `margin` px inside the region.
+    pub fn inside(&self, x: f32, y: f32, margin: f32) -> bool {
+        let s = self.rows.len() as f32;
+        if !(x >= 0.0 && y >= 0.0 && x < s && y < s) {
+            return false;
+        }
+        let (r, c) = (self.rows[y as usize], self.cols[x as usize]);
+        x - r.0 >= margin && r.1 - x >= margin && y - c.0 >= margin && c.1 - y >= margin
+    }
+
+    /// The region's left (right) edge, at its furthest in (out) over rows y0..y1 (px): a box edge there is cut off.
+    pub fn left(&self, y0: f32, y1: f32) -> f32 {
+        self.span(&self.rows, y0, y1).0
+    }
+    pub fn right(&self, y0: f32, y1: f32) -> f32 {
+        self.span(&self.rows, y0, y1).1
+    }
+    pub fn top(&self, x0: f32, x1: f32) -> f32 {
+        self.span(&self.cols, x0, x1).0
+    }
+    pub fn bottom(&self, x0: f32, x1: f32) -> f32 {
+        self.span(&self.cols, x0, x1).1
+    }
+
+    /// Over lines a..b of `lines`: the largest start and the smallest end.
+    fn span(&self, lines: &[(f32, f32)], a: f32, b: f32) -> (f32, f32) {
+        let n = lines.len();
+        let (a, b) = ((a.max(0.0) as usize).min(n - 1), (b.max(0.0) as usize).min(n - 1));
+        lines[a..=b.max(a)].iter().fold((0.0f32, n as f32), |(s, e), l| (s.max(l.0), e.min(l.1)))
+    }
+}
 
 pub struct Rectifier {
     s: usize,
@@ -118,6 +188,22 @@ impl Rectifier {
             }
         }
         Rectifier { s: size, f, map }
+    }
+
+    /// Where the view has image (inside the fisheye and the sensor).
+    pub fn valid(&self) -> Valid {
+        let s = self.s;
+        let none: (f32, f32) = (s as f32, 0.0);
+        let (mut rows, mut cols) = (vec![none; s], vec![none; s]);
+        for (i, m) in self.map.iter().enumerate() {
+            let (u, v) = (i % s, i / s);
+            if m[0] >= 0.0 {
+                let (r, c) = (&mut rows[v], &mut cols[u]);
+                (r.0, r.1) = (r.0.min(u as f32), r.1.max(u as f32 + 1.0));
+                (c.0, c.1) = (c.0.min(v as f32), c.1.max(v as f32 + 1.0));
+            }
+        }
+        Valid { rows, cols }
     }
 
     /// The S x S rectified view of a camera frame (Y plane, shm::STRIDE).
@@ -163,5 +249,34 @@ mod tests {
         assert!(c.fx == 1.0 && c.cy == 4.0 && c.k == [5.0, 6.0, 7.0, 8.0]);
         assert!(c.t[0].abs() < 1e-7 && (c.t[1] + 0.01).abs() < 1e-7 && c.t[2].abs() < 1e-7);
         assert!(c.r[0].abs() < 1e-7 && (c.r[3] + 1.0).abs() < 1e-7 && (c.r[8] - 1.0).abs() < 1e-7);
+    }
+
+    #[test]
+    fn rotations() {
+        // 90 deg about z takes x to y; a turned camera's content moves the same way: the rectified pixel that saw the
+        // camera's ray h now sees R^T h.
+        let r = rotation([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
+        assert!((r[3] - 1.0).abs() < 1e-6 && r[0].abs() < 1e-6 && (r[8] - 1.0).abs() < 1e-6);
+        let c = CamCal { r: rotation([0.1, 0.2, 0.3]), ..Default::default() };
+        let back = rotated(&rotated(&c, [0.01, -0.02, 0.03]), [-0.01, 0.02, -0.03]);
+        assert!(back.r.iter().zip(&c.r).all(|(a, b)| (a - b).abs() < 1e-6));
+    }
+
+    #[test]
+    fn valid_region() {
+        // An 8 x 8 view whose left 2 columns and bottom row are outside the image.
+        let s = 8;
+        let map = (0..s * s).map(|i| if i % s < 2 || i / s == s - 1 { [-1.0, 0.0] } else { [1.0, 1.0] }).collect();
+        let v = Rectifier { s, f: 1.0, map }.valid();
+        assert!(
+            v.rows[0] == (2.0, 8.0) && v.rows[7] == (8.0, 0.0) && v.cols[0] == (8.0, 0.0) && v.cols[4] == (0.0, 7.0)
+        );
+        assert!(
+            v.inside(4.0, 3.0, 1.0)
+                && !v.inside(2.5, 3.0, 1.0)
+                && !v.inside(4.0, 6.5, 1.0)
+                && !v.inside(-1.0, 3.0, 0.0)
+        );
+        assert!(v.left(0.0, 6.0) == 2.0 && v.left(0.0, 7.0) == 8.0 && v.bottom(2.0, 7.0) == 7.0);
     }
 }

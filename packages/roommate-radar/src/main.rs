@@ -9,6 +9,7 @@
 //! first does the setup an installer would (register.rs).
 mod boxes;
 mod calib;
+mod calibrate;
 mod detector;
 mod draw;
 mod measure;
@@ -17,11 +18,13 @@ mod openvr;
 mod openvr_sys;
 mod panel;
 mod register;
+mod selfcal;
 mod settings;
 #[allow(dead_code)] // the writer's half is camserver's
 mod shm;
 mod stereo;
 mod textures;
+mod trace;
 mod tracker;
 mod v3;
 
@@ -57,31 +60,62 @@ fn main() {
     std::process::exit(run());
 }
 
-/// Into the install directory (bin/..), output to the log, then register.rs's setup.
-fn start() {
+/// Into the install directory (bin/..), output to `log`.
+fn start(log: &str) {
     if let Some(dir) = std::env::current_exe().ok().and_then(|e| Some(e.parent()?.parent()?.to_path_buf())) {
         let _ = std::env::set_current_dir(dir);
     }
     use std::os::fd::AsRawFd;
     use std::os::unix::fs::OpenOptionsExt;
-    match std::fs::OpenOptions::new().append(true).create(true).mode(0o644).open("/tmp/roommate-radar.log") {
-        Ok(log) => unsafe {
-            libc::dup2(log.as_raw_fd(), 1);
-            libc::dup2(log.as_raw_fd(), 2);
+    match std::fs::OpenOptions::new().append(true).create(true).mode(0o644).open(log) {
+        Ok(f) => unsafe {
+            libc::dup2(f.as_raw_fd(), 1);
+            libc::dup2(f.as_raw_fd(), 2);
         },
-        Err(e) => eprintln!("/tmp/roommate-radar.log: {e}"),
+        Err(e) => eprintln!("{log}: {e}"),
     }
     // Low GPU priority: the game preempts the detector (patched ncnn, the third_party/ncnn submodule)
     unsafe { std::env::set_var("NCNN_QUEUE_GLOBAL_PRIORITY", "low") }; // no other threads yet
-    register::setup();
+    // Quit cleanly on SIGTERM (Steam stopping it, deploy.yml) and SIGINT
+    extern "C" fn quit(_: libc::c_int) {
+        QUIT.store(true, Ordering::Relaxed);
+    }
+    unsafe {
+        libc::signal(libc::SIGINT, quit as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGTERM, quit as *const () as libc::sighandler_t);
+    }
+}
+
+/// The detector thread, unless the driver hasn't been loaded yet: then there's no calibration (the driver copies the
+/// factory one when it loads; the first run registers it) and nothing to detect from.
+fn spawn_detector() -> Option<std::thread::JoinHandle<()>> {
+    if !std::path::Path::new(shm::CALIB_DIR).join("xrservice.json").exists() {
+        println!("roommate-radar: no calibration in {}: restart SteamVR to load driver_roommate_radar", shm::CALIB_DIR);
+        return None;
+    }
+    Some(std::thread::spawn(|| {
+        // Stays up to show the error in the tab
+        if let Err(e) = detector::run_loop() {
+            eprintln!("detector: {e}");
+            detector::LOADING.store(0, Ordering::Relaxed);
+            *detector::PROBLEM.lock().unwrap() = e;
+        }
+    }))
 }
 
 fn run() -> i32 {
-    if std::env::args().nth(1).as_deref() == Some("--register") {
-        return register::register_app();
+    match std::env::args().nth(1).as_deref() {
+        Some("--register") => return register::register_app(),
+        Some("--calibrate") => {
+            start(calibrate::LOG); // its own install: no setup (calibrate.rs)
+            return calibrate::run();
+        }
+        _ => {}
     }
-    start();
+    start("/tmp/roommate-radar.log");
+    register::setup();
     let mut tracker = tracker::Tracker::default();
+    let mut trace = trace::Trace::new();
     let home = std::env::var("HOME").unwrap_or_default();
     let mut set = settings::Settings::load(format!("{home}/{}", shm::CONF).into());
     // How the driver starts the app with SteamVR (driver/autostart.rs)
@@ -93,13 +127,6 @@ fn run() -> i32 {
     }
     detector::SIZE.store(set.size, Ordering::Relaxed);
     detector::HZ.store(set.hz);
-    extern "C" fn quit(_: libc::c_int) {
-        QUIT.store(true, Ordering::Relaxed);
-    }
-    unsafe {
-        libc::signal(libc::SIGINT, quit as *const () as libc::sighandler_t);
-        libc::signal(libc::SIGTERM, quit as *const () as libc::sighandler_t);
-    }
 
     if let Err(e) = openvr::init(openvr::EVRApplicationType_VRApplication_Overlay) {
         eprintln!("VR_Init: {e}");
@@ -117,22 +144,10 @@ fn run() -> i32 {
     let mut in_game = vr().game_running();
     let mut walls = vr().play_area_walls();
 
-    // The driver copies the factory calibration when it loads: none means driver_roommate_radar wasn't loaded when this
-    // SteamVR started (the first run registers it).
-    let setup_pending = !std::path::Path::new(shm::CALIB_DIR).join("xrservice.json").exists();
-    if setup_pending {
-        println!("roommate-radar: no calibration in {}: restart SteamVR to load driver_roommate_radar", shm::CALIB_DIR);
-    }
-    let det = (!setup_pending).then(|| {
-        std::thread::spawn(|| {
-            // Stays up to show the error in the tab
-            if let Err(e) = detector::run_loop() {
-                eprintln!("detector: {e}");
-                detector::LOADING.store(0, Ordering::Relaxed);
-                *detector::PROBLEM.lock().unwrap() = e;
-            }
-        })
-    });
+    let mut selfcal = selfcal::SelfCal::new(set.align); // before the detector starts
+    let mut saved_align_ns = now_ns();
+    let det = spawn_detector();
+    let setup_pending = det.is_none();
 
     let (mut seen_det_id, mut last_det_ns) = (0, 0);
     // Playback runs this far behind now: detection age (capture -> here) plus one detection period, smoothed.
@@ -178,8 +193,24 @@ fn run() -> i32 {
             lag_s += (-ago + 1.0 / set.hz - lag_s) * 0.1;
             if let (head, true) = head_pose(ago) {
                 let walls: &[_] = if set.play_area { &walls } else { &[] };
-                let ms = measure::measurements(&d.objs, &head, &controllers(ago), walls, &set);
-                tracker.update(&ms, d.t_capture_ns as f64 / 1e9);
+                let ctrl = controllers(ago);
+                let ms = measure::measurements(&d.objs, &head, &ctrl, walls, &set);
+                // A track missing where the views can't see it, or out of range, isn't gone.
+                let view = d.view.as_deref();
+                let seen = |p| view.is_none_or(|v| measure::observable(v, &head, p, walls, &set));
+                tracker.update(&ms, d.t_capture_ns as f64 / 1e9, seen);
+                let mut extra = serde_json::Map::new();
+                if let Some(a) = &d.align {
+                    let r = |v: f32| (v * 100.0).round() / 100.0;
+                    extra.insert("align".into(), serde_json::json!(a.iter().map(|p| p.map(r)).collect::<Vec<_>>()));
+                }
+                trace.frame(&d, &head, &ctrl, &ms, &tracker, extra);
+                selfcal.step(&d, &head);
+                // saved at most once a minute, for the next start
+                if selfcal.moved_from(set.align) && now - saved_align_ns > 60_000_000_000 {
+                    (set.align, saved_align_ns) = (selfcal.omega, now);
+                    set.save();
+                }
             }
         }
 
@@ -191,6 +222,9 @@ fn run() -> i32 {
             "Restart SteamVR to finish setup".into()
         } else if !run {
             "Paused: no game running".into()
+        } else if detector::WAITING.load(Ordering::Relaxed) {
+            let p = detector::PROBLEM.lock().unwrap();
+            if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else if detector::LOADING.load(Ordering::Relaxed) != 0 {
             format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
         } else if now - last_det_ns > 2_000_000_000 {

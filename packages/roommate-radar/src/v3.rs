@@ -14,7 +14,11 @@ pub const fn v3(x: f32, y: f32, z: f32) -> V3 {
 
 impl V3 {
     pub fn len(self) -> f32 {
-        (self.x * self.x + self.y * self.y + self.z * self.z).sqrt()
+        self.dot(self).sqrt()
+    }
+
+    pub fn dot(self, b: V3) -> f32 {
+        self.x * b.x + self.y * b.y + self.z * b.z
     }
 }
 

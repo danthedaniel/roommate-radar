@@ -39,13 +39,15 @@ case $ncnn in *-dirty) ncnn= ;; esac
 [ "$check" ] || get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt \
 	models/yolo11n-grayscale.pt b81f01d60918e3194df21c305d9bd2275ab33cfddc79b26ca145a9190d1932f5
 [ "$check" ] || for s in 320 480 640; do
-	[ -f "models/yolo11n-grayscale_${s}_gray.ncnn.param" ] && continue
+	[ -f "models/yolo11n-grayscale_${s}_rr.ncnn.param" ] && continue
 	(
 		cd models
-		uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=$((2 * s)),$s
-		mv yolo11n-grayscale_ncnn_model/model.ncnn.param "yolo11n-grayscale_$s.ncnn.param"
-		mv yolo11n-grayscale_ncnn_model/model.ncnn.bin "yolo11n-grayscale_$s.ncnn.bin"
-		rm -r yolo11n-grayscale_ncnn_model
+		if [ ! -f "yolo11n-grayscale_$s.ncnn.param" ]; then
+			uvx --from ultralytics --with ncnn --with pnnx yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=$((2 * s)),$s
+			mv yolo11n-grayscale_ncnn_model/model.ncnn.param "yolo11n-grayscale_$s.ncnn.param"
+			mv yolo11n-grayscale_ncnn_model/model.ncnn.bin "yolo11n-grayscale_$s.ncnn.bin"
+			rm -r yolo11n-grayscale_ncnn_model
+		fi
 		python3 ../packages/roommate-radar/prep_model.py "yolo11n-grayscale_$s.ncnn"
 	)
 done
@@ -91,7 +93,7 @@ d=/src/dist/roommate-radar
 rm -rf $d
 mkdir -p $d/bin $d/driver/bin/linuxarm64 $d/models
 cp /src/third_party/fonts/NotoSans-Medium.ttf $d/
-cp /src/models/*_gray.ncnn.* $d/models/
+cp /src/models/*_rr.ncnn.* $d/models/
 cp $CARGO_TARGET_DIR/release/roommate-radar /src/third_party/openvr/bin/linuxarm64/libopenvr_api.so $d/bin/
 cp driver.vrdrivermanifest $d/driver/
 cp $CARGO_TARGET_DIR/release/libdriver_roommate_radar.so $d/driver/bin/linuxarm64/driver_roommate_radar.so'

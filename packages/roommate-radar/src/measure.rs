@@ -1,6 +1,8 @@
 //! The detector's objects (head frame at capture) as the tracker's measurements (standing universe), keeping only what
-//! roommate-radar shows: stereo, a wanted class, in range, not your own arms or hands.
-use crate::detector::HFOV_DEG;
+//! roommate-radar shows: a wanted class, in range, not your own arms or hands. Depth from stereo, and from where the
+//! box meets the floor (the floor and the head pose are known exactly) where the two agree; boxes seen in one view only
+//! get theirs from the floor alone.
+use crate::detector::{HFOV_DEG, View};
 use crate::openvr::HmdMatrix34_t;
 use crate::settings::Settings;
 use crate::stereo::Obj;
@@ -90,9 +92,68 @@ fn near_play_area(walls: &[[[f32; 2]; 2]], x: f32, z: f32) -> bool {
     inside
 }
 
-/// Detections this frame that roommate-radar cares about, in the standing universe (head pose at capture): stereo (has
-/// depth), a wanted class, not around a controller (`ctrl`, standing universe, at capture), within range, not entirely
-/// above MAX_BOTTOM, and near the play area (`walls`: its boundary when that setting is on, else empty).
+/// The standing universe's p in the head frame of pose m: R^T (p - t).
+pub fn to_head(m: &HmdMatrix34_t, p: V3) -> V3 {
+    let d = p - position(m);
+    let col = |j: usize| m.m[0][j] * d.x + m.m[1][j] * d.y + m.m[2][j] * d.z;
+    v3(col(0), col(1), col(2))
+}
+
+/// Box center noise across the viewing ray (m): this much, plus CENTER_REL of the box's width (a box's center isn't a
+/// fixed point on a body: arms, legs, a turn), plus a pixel at its distance.
+const CENTER_M: f32 = 0.02;
+const CENTER_REL: f32 = 0.03;
+/// A box's bottom edge's noise (px), plus BOTTOM_REL of its height, for floor_depth().
+const BOTTOM_PX: f32 = 1.5;
+const BOTTOM_REL: f32 = 0.02;
+/// Where feet or paws meet the floor relative to the box's bottom edge, as a fraction of the distance.
+const CONTACT_REL: f32 = 0.06; // fitted: it reads 3-9% short beyond 3 m (the box bottom below the feet), 1-6 cm scatter
+/// Floor contact and stereo further apart than this many std devs: not standing on the floor (sitting, behind
+/// furniture, cut off at the view's edge), and floor contact is left out.
+const CONTACT_GATE: f32 = 2.5;
+/// Only boxes whose bottom is at least this far below the horizon (sine of the angle) get a floor-contact depth.
+const MIN_DOWN: f32 = 0.05;
+/// What the tracker counts as in view (observable()) is this fraction of the view's size in from its edges.
+const VIEW_MARGIN: f32 = 0.04;
+
+/// Depth (head frame) at which the box's bottom edge meets the floor (standing universe y = 0), and its std dev. For
+/// something standing on the floor with its feet in view, a far better range at a distance than stereo's: the
+/// camera's height is a 1.6 m baseline, stereo's is 10.6 cm. None if the bottom edge is cut off by the view, or isn't
+/// looking down onto the floor.
+fn floor_depth(o: &Obj, head: &HmdMatrix34_t) -> Option<(f32, f32)> {
+    let cam = apply(head, o.origin);
+    let dir = apply(head, (o.corners[2] + o.corners[3]) * 0.5) - cam;
+    let down = -dir.y / dir.len();
+    if o.clip[3] || cam.y < 0.5 || down < MIN_DOWN {
+        return None;
+    }
+    let z = o.dist * cam.y / -dir.y;
+    let h_px = (o.corners[0].y - o.corners[3].y) / o.dist * o.f;
+    let sigma_angle = (BOTTOM_PX + BOTTOM_REL * h_px) / o.f;
+    // The range is H / tan(a), a the angle below the horizon: dR/da = H / sin^2 a
+    Some((z, cam.y / (down * down) * sigma_angle + CONTACT_REL * z))
+}
+
+/// The object's depth (head frame), its std dev, and whether it's weak (seen in one view only, depth from the floor):
+/// stereo, fused with floor contact where the two agree. None for one-view boxes off the floor.
+fn depth(o: &Obj, head: &HmdMatrix34_t) -> Option<(f32, f32, bool)> {
+    let floor = floor_depth(o, head);
+    match floor {
+        Some((zf, sf)) if !o.stereo => Some((zf, sf, true)),
+        Some((zf, sf)) if (zf - o.dist).abs() < CONTACT_GATE * sf.hypot(o.sigma_z) => {
+            let (wf, ws) = (1.0 / (sf * sf), 1.0 / (o.sigma_z * o.sigma_z));
+            Some(((wf * zf + ws * o.dist) / (wf + ws), (wf + ws).sqrt().recip(), false))
+        }
+        _ if o.stereo => Some((o.dist, o.sigma_z, false)),
+        _ => None,
+    }
+}
+
+/// Detections this frame that roommate-radar cares about, in the standing universe (head pose at capture): with a
+/// depth (stereo, or for one-view boxes where they meet the floor), a wanted class, not around a controller (`ctrl`,
+/// standing universe, at capture), within range, not entirely above MAX_BOTTOM, and near the play area (`walls`: its
+/// boundary when that setting is on, else empty). Each with its noise: stereo's along the viewing ray, far larger than
+/// across it.
 pub fn measurements(
     objs: &[Obj],
     head: &HmdMatrix34_t,
@@ -101,19 +162,16 @@ pub fn measurements(
     set: &Settings,
 ) -> Vec<Meas> {
     let h = position(head);
-    let m = &head.m;
-    // head_from_world = R^T (p - t)
-    let ctrl_head: Vec<V3> = if set.hands { ctrl } else { &[] }
-        .iter()
-        .map(|&p| {
-            let d = p - h;
-            let col = |j: usize| m[0][j] * d.x + m[1][j] * d.y + m[2][j] * d.z;
-            v3(col(0), col(1), col(2))
-        })
-        .collect();
+    let ctrl_head: Vec<V3> = if set.hands { ctrl } else { &[] }.iter().map(|&p| to_head(head, p)).collect();
     objs.iter()
-        .filter(|o| o.stereo && wanted(o.cls, set) && !holds_controller(o, &ctrl_head) && !(set.hands && own_arm(o)))
+        .filter(|o| wanted(o.cls, set))
         .filter_map(|o| {
+            let (z, sigma_z, weak) = depth(o, head)?;
+            let corners = o.corners.map(|c| o.origin + (c - o.origin) * (z / o.dist));
+            let o = &Obj { dist: z, sigma_z, corners, ..*o };
+            if holds_controller(o, &ctrl_head) || (set.hands && own_arm(o)) {
+                return None;
+            }
             let w = o.corners.map(|c| apply(head, c));
             let c = (w[0] + w[1] + w[2] + w[3]) * 0.25;
             let dist = (c.x - h.x).hypot(c.z - h.z);
@@ -123,23 +181,49 @@ pub fn measurements(
             if w.iter().all(|p| p.y > MAX_BOTTOM) {
                 return None;
             }
-            // isotropic position noise growing like stereo depth error (~Z^2); per-axis noise along the view
-            // ray would track lateral motion tighter
-            let sigma = 0.05 + 0.02 * o.dist * o.dist;
+            let cam = apply(head, o.origin);
+            let r = (c - cam).len();
+            let (bw, bh) = ((w[1] - w[0]).len(), (w[3] - w[0]).len());
+            let sigma_lat = CENTER_M + CENTER_REL * bw + r / o.f;
             Some(Meas {
-                v: [c.x, c.y, c.z, (w[1] - w[0]).len(), (w[3] - w[0]).len()],
-                sigma,
+                p: c,
+                w: bw,
+                h: bh,
+                ray: (c - cam) * (1.0 / r),
+                sigma_ray: (sigma_z * r / z).max(sigma_lat), // depth's std dev, along the ray
+                sigma_lat,
                 score: o.score,
                 cls: o.cls,
-                eye: [h.x, h.y, h.z],
+                eye: h,
+                clip_w: o.clip[0] || o.clip[2],
+                clip_h: o.clip[1] || o.clip[3],
+                weak,
             })
         })
         .collect()
 }
 
+/// Whether something at p (standing universe), with the head at `head`, would have been detected: inside both views'
+/// image (VIEW_MARGIN in from the edges), within range, near the play area (`walls`, as for measurements()). Only there
+/// does the tracker count missing it against its track.
+pub fn observable(view: &View, head: &HmdMatrix34_t, p: V3, walls: &[[[f32; 2]; 2]], set: &Settings) -> bool {
+    let h = position(head);
+    if (p.x - h.x).hypot(p.z - h.z) > set.max_dist || !near_play_area(walls, p.x, p.z) {
+        return false;
+    }
+    let q = to_head(head, p);
+    let half = view.s as f32 / 2.0;
+    (0..2).all(|i| {
+        let d = q - view.origins[i];
+        let (u, v) = (half + view.f * d.x / -d.z, half - view.f * d.y / -d.z);
+        d.z < -0.3 && view.valid[i].inside(u, v, VIEW_MARGIN * view.s as f32)
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::calib::Valid;
 
     const HEAD: HmdMatrix34_t = HmdMatrix34_t { m: [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 1.6], [0.0, 0.0, 1.0, 0.0]] };
 
@@ -148,9 +232,13 @@ mod tests {
             cls,
             score: 0.8,
             dist: z,
+            sigma_z: 0.05,
+            f: 134.0,
             corners: corners.map(|[x, y, z]| v3(x, y, z)),
+            clip: [false; 4],
             stereo: true,
             origin: V3::default(),
+            disp: crate::stereo::NO_DISPARITY,
         }
     }
 
@@ -175,9 +263,11 @@ mod tests {
         let ctrl = [v3(0.0, 1.25, -0.6), v3(0.2, 1.3, -0.6)]; // one in the hand box, one before the person
         let ms = meas(&[hand(), person(0, 2.0, 0.2), person(0, 5.0, 0.0), person(41, 1.0, 0.0)], &ctrl, &set);
         assert_eq!(ms.len(), 1);
-        let v = ms[0].v;
-        assert!((v[0] - 0.2).abs() < 1e-5 && (v[1] - 1.35).abs() < 1e-5, "head frame -> standing universe center");
-        assert!((v[3] - 0.6).abs() < 1e-5 && (v[4] - 1.5).abs() < 1e-5, "and size");
+        let m = ms[0];
+        assert!((m.p.x - 0.2).abs() < 1e-5 && (m.p.y - 1.35).abs() < 1e-5, "head frame -> standing universe center");
+        assert!((m.w - 0.6).abs() < 1e-5 && (m.h - 1.5).abs() < 1e-5, "and size");
+        assert!(!m.weak && (m.ray.len() - 1.0).abs() < 1e-5 && m.ray.z < -0.98, "seen ahead");
+        assert!(m.sigma_ray >= m.sigma_lat && m.sigma_lat < 0.1);
         assert_eq!(meas(&[hand()], &[], &set).len(), 1, "a hand without a controller is kept");
         assert_eq!(meas(&[hand()], &ctrl, &Settings { hands: false, ..set }).len(), 1, "unless ignoring hands is off");
     }
@@ -232,6 +322,47 @@ mod tests {
             ms(e - 0.5) == 1 && ms(e + 0.5) == 0,
             "kept half a meter inside the margin, dropped half a meter past it"
         );
+    }
+
+    #[test]
+    fn floor_contact() {
+        let set = Settings { max_dist: 6.0, ..Settings::default() };
+        // Standing 4 m ahead, feet on the floor (1.6 m below the eyes): stereo reading 4.6 m with a 1 m std dev is
+        // pulled to the floor contact's 4 m, and its noise shrinks.
+        let standing = |z: f32| obj(0, z, [[-0.3, 0.1, -z], [0.3, 0.1, -z], [0.3, -1.6, -z], [-0.3, -1.6, -z]]);
+        let seen = Obj { sigma_z: 1.0, ..scale(standing(4.0), 4.6) };
+        let m = meas(&[seen], &[], &set)[0];
+        assert!((m.p.z + 4.0).abs() < 0.15 && m.sigma_ray < 0.5 && !m.weak, "{m:?}");
+        // Seen in one view only (on the 1 m plane): the floor contact's depth alone, weak.
+        let one = Obj { stereo: false, sigma_z: 0.0, ..scale(standing(4.0), 1.0) };
+        let m = meas(&[one], &[], &set)[0];
+        assert!((m.p.z + 4.0).abs() < 0.01 && m.weak);
+        // Sitting (bottom edge 0.5 m up), stereo good: the floor contact (far behind) is left out.
+        let sitting = obj(0, 3.0, [[-0.3, 0.1, -3.0], [0.3, 0.1, -3.0], [0.3, -1.1, -3.0], [-0.3, -1.1, -3.0]]);
+        assert!((meas(&[sitting], &[], &set)[0].p.z + 3.0).abs() < 1e-4);
+        // Its bottom cut off by the view's edge, seen in one view: no depth at all.
+        let cut = Obj { clip: [false, false, false, true], ..one };
+        assert!(meas(&[cut], &[], &set).is_empty());
+    }
+
+    /// o moved to depth z along its rays from the camera.
+    fn scale(o: Obj, z: f32) -> Obj {
+        Obj { dist: z, corners: o.corners.map(|c| o.origin + (c - o.origin) * (z / o.dist)), ..o }
+    }
+
+    #[test]
+    fn what_the_views_see() {
+        // Two views at f = 100 px, 200 px wide, the right half of the left one outside the fisheye.
+        let mut left = Valid { rows: vec![(0.0, 100.0); 200], cols: vec![(0.0, 200.0); 200] };
+        left.cols[100..].fill((200.0, 0.0));
+        let all = Valid { rows: vec![(0.0, 200.0); 200], cols: vec![(0.0, 200.0); 200] };
+        let view = View { s: 200, f: 100.0, origins: [V3::default(); 2], valid: [left, all] };
+        let set = Settings { max_dist: 6.0, ..Settings::default() };
+        let sees = |p: V3| observable(&view, &HEAD, p, &[], &set);
+        assert!(sees(v3(-0.5, 1.6, -3.0)), "ahead, a little left");
+        assert!(!sees(v3(0.5, 1.6, -3.0)), "outside the left view's image");
+        assert!(!sees(v3(0.0, 1.6, 3.0)), "behind");
+        assert!(!sees(v3(-0.5, 1.6, -7.0)), "beyond range");
     }
 
     #[test]

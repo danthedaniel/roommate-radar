@@ -94,6 +94,16 @@ impl Vr {
         )
     }
 
+    /// The left hand's controller, if there is one.
+    pub fn left_hand(&self) -> Option<u32> {
+        let i = call!(
+            self.system,
+            GetTrackedDeviceIndexForControllerRole,
+            ETrackedControllerRole_TrackedControllerRole_LeftHand
+        );
+        ((i as usize) < MAX_TRACKED_DEVICES).then_some(i)
+    }
+
     pub fn device_class(&self, i: u32) -> ETrackedDeviceClass {
         call!(self.system, GetTrackedDeviceClass, i)
     }
@@ -204,6 +214,10 @@ impl Vr {
     /// Placed in the standing universe.
     pub fn set_transform(&self, h: VROverlayHandle_t, m: &HmdMatrix34_t) {
         call!(self.overlay(), SetOverlayTransformAbsolute, h, STANDING, m as *const _ as *mut _);
+    }
+
+    pub fn set_alpha(&self, h: VROverlayHandle_t, alpha: f32) {
+        call!(self.overlay(), SetOverlayAlpha, h, alpha);
     }
 
     pub fn show(&self, h: VROverlayHandle_t) {

@@ -2,15 +2,16 @@
 //! each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified stereo pair, calib.rs),
 //! runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views and triangulates
 //! depth from disparity (stereo.rs). Results (head frame at capture time) go to DETS.
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use crate::calib::{self, Rectifier};
+use crate::calib::{self, Rectifier, Valid};
 use crate::ncnn;
 use crate::shm::{self, now_ns};
 use crate::stereo::{self, Det, Obj};
-use crate::v3::v3;
+use crate::tracker::CLASSES;
+use crate::v3::{V3, v3};
 
 pub static QUIT: AtomicBool = AtomicBool::new(false);
 pub static PAUSED: AtomicBool = AtomicBool::new(false); // skip frames (no GPU work) while set
@@ -18,8 +19,21 @@ pub static SIZE: AtomicI32 = AtomicI32::new(0); // per-view size to run at; a ch
 pub static HZ: AtomicF32 = AtomicF32::new(0.0); // runs per second, changeable while running
 pub static LOADING: AtomicI32 = AtomicI32::new(0); // size being loaded (model, then its first run compiles shaders); 0 = done
 pub static PROBLEM: Mutex<String> = Mutex::new(String::new()); // why there are no detections, for the tab ("" = none)
+pub static WAITING: AtomicBool = AtomicBool::new(false); // no pair of camera frames for over a second (headset idle)
 pub static YOLO_MS: AtomicF32 = AtomicF32::new(0.0); // mean YOLO time over the last stats period
-pub static DETS: Mutex<DetectionSet> = Mutex::new(DetectionSet { id: 0, t_capture_ns: 0, objs: Vec::new() });
+// The rectification's correction (rad, head axes: the left view's rotation relative to the right; selfcal.rs), half on
+// each camera. A change rebuilds the rectifiers.
+pub static CORRECTION: Mutex<[f32; 3]> = Mutex::new([0.0; 3]);
+const ALIGN_EVERY: u64 = 8; // runs between stereo::alignment()s, which selfcal.rs estimates the correction from
+pub static DETS: Mutex<DetectionSet> = Mutex::new(DetectionSet {
+    id: 0,
+    t_capture_ns: 0,
+    objs: Vec::new(),
+    views: [Vec::new(), Vec::new()],
+    view: None,
+    align: None,
+    correction: [0.0; 3],
+});
 
 pub struct AtomicF32(AtomicU32);
 
@@ -40,26 +54,40 @@ pub struct DetectionSet {
     pub id: u64,
     pub t_capture_ns: u64,
     pub objs: Vec<Obj>,
+    pub views: [Vec<Det>; 2],              // each view's boxes (px), for the trace
+    pub view: Option<Arc<View>>,           // what the views see, for the tracker (measure::observable)
+    pub align: Option<Arc<Vec<[f32; 5]>>>, // stereo::alignment()'s matches, every ALIGN_EVERY runs (no images leave here)
+    pub correction: [f32; 3],              // CORRECTION as these were rectified with
+}
+
+/// The rectified views' geometry.
+pub struct View {
+    pub s: usize,
+    pub f: f32,            // px
+    pub origins: [V3; 2],  // cameras in the head frame
+    pub valid: [Valid; 2], // where each has image
 }
 
 pub const HFOV_DEG: f32 = 100.0; // the rectified views' field of view
 const CONF: f32 = 0.1; // ByteTrack wants the weak detections too
-const IOU: f32 = 0.5; // overlapping detections/tracks above this IoU keep only the most confident
-const CONTAIN: f32 = 0.8; // ...same if this fraction of the smaller box lies inside the larger one
+const IOU: f32 = 0.5; // overlapping detections above this IoU keep only the most confident
 const MIN_BOX: f32 = 0.05; // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
 const LATENCY_MS: f32 = 8.0; // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
 
-/// Duplicate if they overlap a lot (IoU) or one is mostly inside the other (intersection over the
-/// smaller area): a half-size box nested in a bigger one is only ~25% IoU but clearly the same object.
-pub fn duplicate(a: &Det, b: &Det) -> bool {
+/// Duplicate if they overlap a lot (IoU). Not when one is merely inside the other: someone farther away is, in the box
+/// of someone in front of them (a cutout 3 m away hid, from one view, the person 2 m away it was inside of). One
+/// object's nested boxes (upper body and whole) are one at a similar depth, and are merged after stereo, in 3D
+/// (tracker.rs).
+fn duplicate(a: &Det, b: &Det) -> bool {
     let ix = (a.x1.min(b.x1) - a.x0.max(b.x0)).max(0.0);
     let iy = (a.y1.min(b.y1) - a.y0.max(b.y0)).max(0.0);
     let inter = ix * iy;
     let (aa, ab) = ((a.x1 - a.x0) * (a.y1 - a.y0), (b.x1 - b.x0) * (b.y1 - b.y0));
-    inter / (aa + ab - inter + 1e-6) > IOU || inter > CONTAIN * aa.min(ab)
+    inter / (aa + ab - inter + 1e-6) > IOU
 }
 
-/// Class-agnostic: overlapping boxes of different classes (laptop/tv/keyboard on one object) keep only the best.
+/// Overlapping boxes keep only the best, whatever their class (a person and a dog box on one body). Only our classes
+/// are decoded: suppressing across all of COCO's, a "couch" box around someone sitting on it hid them.
 fn nms(d: &mut Vec<Det>) {
     d.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut keep: Vec<Det> = Vec::new();
@@ -71,17 +99,17 @@ fn nms(d: &mut Vec<Det>) {
     *d = keep;
 }
 
-/// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then per-class sigmoid scores) as boxes in each S x S
-/// view.
+/// YOLO's output [4 + 3, N] (cx, cy, w, h in input pixels, then sigmoid scores for tracker::CLASSES only:
+/// prep_model.py cut the other 77 out of the model) as boxes in each S x S view.
 fn decode(out: &ncnn::Mat, s: usize) -> [Vec<Det>; 2] {
     let mut views = [Vec::new(), Vec::new()];
-    let rows: Vec<&[f32]> = (0..4 + 80).map(|r| out.row(r)).collect();
+    let rows: Vec<&[f32]> = (0..4 + CLASSES.len()).map(|r| out.row(r)).collect();
     let s = s as f32;
     for i in 0..out.w() {
         let (mut best, mut bs) = (0, 0.0);
-        for k in 0..80 {
+        for (k, &cls) in CLASSES.iter().enumerate() {
             if rows[4 + k][i] > bs {
-                (best, bs) = (k, rows[4 + k][i]);
+                (best, bs) = (cls, rows[4 + k][i]);
             }
         }
         if bs < CONF {
@@ -184,7 +212,7 @@ fn stretch(input: &mut [u8]) {
 fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
     let t_load = now_ns();
-    let model = format!("models/yolo11n-grayscale_{s}_gray.ncnn");
+    let model = format!("models/yolo11n-grayscale_{s}_rr.ncnn");
     let net = ncnn::Net::load(&model)?;
 
     let Some(hdr) = open_frames()? else {
@@ -193,9 +221,21 @@ fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
     // After the frames: the calibration is the driver's copy of the factory one
     let cal = [calib::load(shm::CALIB_DIR, shm::CAM_NAMES[0])?, calib::load(shm::CALIB_DIR, shm::CAM_NAMES[1])?];
-    let rect = [Rectifier::new(&cal[0], s, HFOV_DEG), Rectifier::new(&cal[1], s, HFOV_DEG)];
-    let f = rect[0].f;
     let baseline = cal[1].t[0] - cal[0].t[0]; // right cam is at +x in the head frame
+    let origins = cal.map(|c| v3(c.t[0], c.t[1], c.t[2]));
+    // The rectifiers with the correction w, half of it on each camera, and the views they make
+    let rectify = |w: [f32; 3]| {
+        let (l, r) = (w.map(|v| v / 2.0), w.map(|v| -v / 2.0));
+        let rect = [
+            Rectifier::new(&calib::rotated(&cal[0], l), s, HFOV_DEG),
+            Rectifier::new(&calib::rotated(&cal[1], r), s, HFOV_DEG),
+        ];
+        let view = Arc::new(View { s, f: rect[0].f, origins, valid: [rect[0].valid(), rect[1].valid()] });
+        (rect, view)
+    };
+    let mut correction = *CORRECTION.lock().unwrap();
+    let (mut rect, mut view) = rectify(correction);
+    let f = rect[0].f;
     println!("detector: {s}x{s} views, f={f:.1} px, baseline {:.1} mm", baseline * 1000.0);
     // 105.6 mm on the Frame: anything else is swapped cameras or a changed calibration format
     if !(0.095..0.116).contains(&baseline) {
@@ -206,9 +246,10 @@ fn run(s: usize) -> Result<(), String> {
     let mut raw = [vec![0u8; shm::FRAME], vec![0u8; shm::FRAME]];
     let mut scratch = vec![0u8; shm::FRAME];
     let mut input = vec![0u8; s * s * 2];
-    let (mut last_seq, mut t_ns, mut last_pair) = ([0u64; 2], [0u64; 2], 0u64);
+    let (mut last_seq, mut t_ns, mut last_pair, mut last_pair_ns) = ([0u64; 2], [0u64; 2], 0u64, now_ns());
     let (mut frames, mut stat_t, mut last_run) = (0u64, now_ns(), 0u64);
-    let (mut t_rect, mut t_net, mut t_post) = (0f64, 0f64, 0f64);
+    let mut runs = 0u64; // for ALIGN_EVERY
+    let (mut t_rect, mut t_net, mut t_post, mut t_align) = (0f64, 0f64, 0f64, 0f64);
 
     while !QUIT.load(Ordering::Relaxed) && SIZE.load(Ordering::Relaxed) == s as i32 {
         if PAUSED.load(Ordering::Relaxed) {
@@ -229,13 +270,22 @@ fn run(s: usize) -> Result<(), String> {
         // Both cameras are hardware-synchronized: wait for a pair with the same capture time.
         if t_ns[0] == 0 || t_ns[0] == last_pair || (t_ns[0] as i64 - t_ns[1] as i64).abs() > 2_000_000 {
             *PROBLEM.lock().unwrap() = shm::problem(&hdr);
+            WAITING.store(now_ns() - last_pair_ns > 1_000_000_000, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(1));
             continue;
         }
-        last_pair = t_ns[0];
+        (last_pair, last_pair_ns) = (t_ns[0], now_ns());
+        WAITING.store(false, Ordering::Relaxed);
 
         let a = now_ns();
         last_run = a;
+        let want = *CORRECTION.lock().unwrap();
+        if want != correction {
+            correction = want;
+            (rect, view) = rectify(correction);
+            let deg = correction.map(f32::to_degrees);
+            println!("detector: rectification corrected by {:.3} {:.3} {:.3} deg (x y z)", deg[0], deg[1], deg[2]);
+        }
         let (l_img, r_img) = input.split_at_mut(s * s);
         rect[0].apply(&raw[0], l_img);
         rect[1].apply(&raw[1], r_img);
@@ -252,43 +302,52 @@ fn run(s: usize) -> Result<(), String> {
         let Some(out) = out else {
             continue;
         };
-        if out.h() < 4 + 80 {
-            return Err(format!("{model}: {} output rows, not YOLO's 4 + 80", out.h()));
+        if out.h() != 4 + CLASSES.len() {
+            return Err(format!("{model}: {} output rows, not 4 + {} (prep_model.py's)", out.h(), CLASSES.len()));
         }
         let mut views = decode(&out, s);
         nms(&mut views[0]);
         nms(&mut views[1]);
-        let origin = v3(cal[0].t[0], cal[0].t[1], cal[0].t[2]);
-        let objs = stereo::match_views(&views, &input[..s * s], &input[s * s..], s, f, baseline, origin);
+        let (l_img, r_img) = input.split_at(s * s);
+        let objs = stereo::match_views(&views, [l_img, r_img], s, f, baseline, origins, &view.valid);
         let e = now_ns();
         let stereo_n = objs.iter().filter(|o| o.stereo).count();
+        runs += 1;
+        let align = runs.is_multiple_of(ALIGN_EVERY).then(|| Arc::new(stereo::alignment(l_img, r_img, s))); // a few ms
+        let g = now_ns();
         {
             let mut d = DETS.lock().unwrap();
             d.id += 1;
             d.t_capture_ns = t_ns[0] - (LATENCY_MS * 1e6) as u64;
             d.objs = objs;
+            d.views = views.clone();
+            d.view = Some(view.clone());
+            d.align = align;
+            d.correction = correction;
         }
 
         frames += 1;
         t_rect += (b - a) as f64 / 1e6;
         t_net += (c - b) as f64 / 1e6;
         t_post += (e - c) as f64 / 1e6;
+        t_align = t_align.max((g - e) as f64 / 1e6);
         let t = now_ns();
         if t - stat_t > 5_000_000_000 {
             let n = frames as f64;
             println!(
-                "detector: {:.1} fps | rectify {:.1} ms, yolo {:.1} ms, match {:.1} ms | {}+{} dets, {stereo_n} objects | \
-                 age {:.0} ms",
+                "detector: {:.1} fps | rectify {:.1} ms, yolo {:.1} ms, match {:.1} ms, align {:.0} ms | {}+{} dets, \
+                 {stereo_n} objects | age {:.0} ms",
                 n / ((t - stat_t) as f64 / 1e9),
                 t_rect / n,
                 t_net / n,
                 t_post / n,
+                t_align,
                 views[0].len(),
                 views[1].len(),
                 (t - t_ns[0]) as f64 / 1e6
             );
             YOLO_MS.store((t_net / n) as f32);
-            (frames, t_rect, t_net, t_post, stat_t) = (0, 0.0, 0.0, 0.0, t);
+            (frames, t_rect, t_net, t_post, t_align, stat_t) = (0, 0.0, 0.0, 0.0, 0.0, t);
         }
     }
     Ok(())
@@ -300,4 +359,25 @@ pub fn run_loop() -> Result<(), String> {
         run(SIZE.load(Ordering::Relaxed) as usize)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn det(x0: f32, y0: f32, x1: f32, y1: f32, score: f32) -> Det {
+        Det { x0, y0, x1, y1, score, cls: 0 }
+    }
+
+    #[test]
+    fn nms_keeps_people_behind_people() {
+        // A person 2 m away (tall box) with someone smaller, farther, inside it and more confident: both stay. Two
+        // boxes on one person, mostly overlapping: one.
+        let mut d = vec![det(100.0, 50.0, 160.0, 260.0, 0.45), det(110.0, 60.0, 135.0, 130.0, 0.6)];
+        nms(&mut d);
+        assert_eq!(d.len(), 2);
+        let mut d = vec![det(100.0, 50.0, 160.0, 260.0, 0.45), det(102.0, 55.0, 158.0, 250.0, 0.6)];
+        nms(&mut d);
+        assert!(d.len() == 1 && d[0].score == 0.6);
+    }
 }

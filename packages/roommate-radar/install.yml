@@ -1,0 +1,38 @@
+# Valve's devkit install of dist/roommate-radar as devkit game {{ gameid }} (in {{ dir }}), run as {{ argv }}: what the
+# devkit client's upload does. Registers `sync` (rsync's changes) and driver_changed. Imported by deploy.yml's plays.
+# The "depot". Kept: what the app writes into its install directory (Steam leaves those alone on updates too).
+# checksum: build.sh makes dist/ afresh, so only the contents tell what changed (driver_changed, below).
+- name: Install dist/roommate-radar to ~/devkit-game/{{ gameid }}
+  synchronize:
+    src: "{{ playbook_dir }}/../../dist/roommate-radar/"
+    dest: "{{ dir }}/"
+    delete: true
+    checksum: true
+    rsync_opts: [--exclude=/roommate-radar.vrmanifest]
+  register: sync
+
+# From rsync's itemized changes (synchronize drops the <<CHANGED>> marker from stdout_lines): a file under driver/
+# sent (<f..., a push) or deleted
+- set_fact:
+    driver_changed: "{{ sync.stdout_lines | select('search', '^(<f\\S*|\\*deleting) +driver/') | list | length > 0 }}"
+
+# What the devkit client's upload writes: the command line, and the runtime Steam should run it in
+- name: Set the launch command and runtime
+  copy:
+    dest: ~/devkit-game/{{ gameid }}-{{ item.key }}.json
+    content: "{{ item.value | to_json }}"
+  loop: "{{ {'argv': argv, 'settings': {'compat_tool': 'steamrt4-any'}} | dict2items }}"
+
+# devkit-utils/steam-client-create-shortcut: a devkit-1 command on Steam's pipe; Steam answers in a file
+- name: Add it to Steam (devkit shortcut)
+  shell: |
+    d=$(mktemp -d /tmp/create-shortcutXXXXXXXX)
+    r=$(python3 -c 'import sys, urllib.parse; print(urllib.parse.quote_plus(sys.argv[1]))' "$d/registered")
+    printf 'devkit-1 steam://devkit-1/%s/create-shortcut?response=%s&gameid={{ gameid }}\n' "$(cat ~/.steam/steam.token)" "$r" > ~/.steam/steam.pipe
+    for i in $(seq 15); do
+      sleep 1
+      if [ -e "$d/registered.error" ]; then cat "$d/registered.error"; exit 1; fi
+      if [ -e "$d/registered" ] && [ ! -e "$d/registered.lock" ]; then cat "$d/registered"; rm -r "$d"; exit 0; fi
+    done
+    echo "Steam didn't answer (is it running?)"; exit 1
+  changed_when: false

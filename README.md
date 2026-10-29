@@ -9,14 +9,14 @@ SteamVR overlay for the Steam Frame: it watches the headset's tracking cameras, 
 alongside your game, and outlines whoever is within range, with what they are, on top of whatever
 you're playing.
 
-- People, cats and dogs within range (1.5–8 m) get an outline and a label, world-locked and turned to face you. Your own
+- People, cats and dogs within range (1.5–6 m) get an outline and a label, world-locked and turned to face you. Your own
   arms and hands are ignored.
 - Works over any VR app. A **Roommate Radar** tab in the SteamVR dashboard turns it on and off, picks what to detect,
   the range, whether to detect within the play area, the detection resolution and rate, and whether to run only while a game is running.
 - Starts with SteamVR. No root and no system changes: it installs like a Steam app (in the Steam Linux Runtime 4
   container), plus a SteamVR driver that reads the camera frames.
-- Light on the GPU: YOLO11n at 320 px and 4 Hz (default, adjustable up to 640px and 16Hz), on a low-priority queue the
-  game preempts.
+- Light on the GPU: YOLO11n at 480 px and 4 Hz (default, adjustable from 320 px up to 640 px and 16 Hz), on a
+  low-priority queue the game preempts.
 
 ## Requirements
 
@@ -58,6 +58,8 @@ the measurements behind the defaults and what didn't work are in
   dead ends.
 - [`docs/arcturus-av1.md`](docs/arcturus-av1.md): the Arcturus Vision color passthrough add-on: modes, frame formats,
   XRService's settings for it, the Arcturus app.
+- [`docs/detection-tracking-prior-art.md`](docs/detection-tracking-prior-art.md): prior art for stereo depth, view
+  matching, tracking and box smoothing, what fits the budget, and the measurements to decide between them.
 - `scripts/`: raw camera tools (live mosaic of all four tracking cameras).
 - `third_party/ncnn`: submodule, [danthedaniel/ncnn](https://github.com/danthedaniel/ncnn) (upstream ncnn plus a GPU
   queue priority option and a few C API calls).

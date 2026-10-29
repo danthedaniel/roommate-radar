@@ -3,12 +3,21 @@
 OpenVR overlay app (Rust, `src/`, sources below) for playing without
 passthrough: outlines people, cats and dogs within range, with their class, on top of whatever game is
 running. Each one is an upright sprite (rounded outline + label) facing you, world-locked in the standing universe.
-Detections are matched into tracks by a ByteTrack-style tracker (`tracker.rs`: per-track constant-velocity Kalman
-filter for prediction, Hungarian matching on 3D distance, low-confidence detections only extend tracks). Box centers
-and sizes follow a Catmull-Rom spline through each track's last 4 detections (sizes and distance
-alpha-smoothed first, 90% of a step in 1 s at any rate), played back one detection period behind (~300-350 ms
-total; drawing at the Kalman prediction for "now" instead looked worse). Boxes with a controller,
-or the forearm leading to it, inside them (same depth) are your arms and are ignored.
+Left and right boxes are paired by an optimal assignment (`stereo.rs`) on edge agreement, a disparity plausible for
+the box's height and class, and ZNCC, ignoring edges cut off by a view's edge; depth comes from the nearest cluster of
+small-patch disparities over the object's middle, fused with the box edges' (`measure.rs` adds where the box meets
+the floor, when the two agree). Each detection's noise is a thin ellipsoid along its viewing ray (stereo depth error
+grows like z^2, bearing error like z), and a ByteTrack-style tracker (`tracker.rs`) matches on Mahalanobis distance
+under it: one constant-velocity Kalman filter per track over 3D position and velocity, Hungarian matching, weak
+detections (low confidence, one view) only extend tracks, no new track inside an existing one's gate, tracks that
+become indistinguishable merge, and missing a track only counts where the views could have seen it. Boxes are drawn
+at a cubic Hermite between the track's filter states (position + velocity), played back one detection period behind
+(~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse), sized from the box's angular
+size at the filtered distance, fading in and out. Prior art and the measurements still to take are in
+[docs/detection-tracking-prior-art.md](../../docs/detection-tracking-prior-art.md). Boxes with a controller, or the
+forearm leading to it, inside them (as seen from the camera, at any depth) are your arms and are ignored. Developer
+builds write each detector frame (boxes, objects, measurements, tracks) to `/tmp/roommate-radar-trace.jsonl`
+(`trace.rs`; at 32 MB it moves to `.1` and a new one starts, as /tmp is RAM).
 
 - Installed like a Store app (see below): runs in the Steam Linux Runtime 4 container, started by Steam from the
   Library or, when SteamVR starts, by its driver (through Steam, below). Log: `/tmp/roommate-radar.log`.
@@ -34,7 +43,7 @@ or the forearm leading to it, inside them (same depth) are your arms and are ign
   within 1 m of it, `IVRChaperoneSetup` live collision bounds; no boundary: everywhere), range, status. Saved in `~/.config/roommate-radar.conf`.
 - Developer builds (`build.sh --developer`, the `developer` cargo feature; what `make deploy` installs) add the YOLO time to the
   tab's status and the confidence to each label. `make build` is the release build, without them.
-- GPU sharing with the game: YOLO at 320 and 4 Hz, on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
+- GPU sharing with the game: YOLO at 480 and 4 Hz (by default), on a low-priority queue (`NCNN_QUEUE_GLOBAL_PRIORITY=low`, set
   at start) so the game preempts it (msm has preemption on: 4 rings).
 
 ```
@@ -48,7 +57,7 @@ normal-exposure SLAM L/R frames                                 head-aligned pin
 Sources (`src/`, one cargo package): `main.rs` (main loop), `detector.rs` (the detector thread; `calib.rs`
 rectification, `stereo.rs` matching and depth), `measure.rs` (detections to tracker measurements, your own arms
 dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
-`textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `v3.rs`; `openvr.rs` and
+`textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `trace.rs` (developer builds), `v3.rs`; `openvr.rs` and
 `ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs`, and
 `shm.rs` between it and roommate-radar. `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)
 (the command is in `panel.rs`). Tests: `cargo test` (build.sh runs them in the SDK); on the Mac,
@@ -65,6 +74,15 @@ dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard t
 - Calibration: `/persist/xrservice.json` (factory KB4 intrinsics + extrinsics) and
   `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `calib.rs` chains
   them into head_from_cam per SLAM camera. Cam0 = `slam_right`, Cam1 = `slam_left`.
+- The factory extrinsics are about a degree off: XRService refines them online (its log: "Current extrinsics
+  differences to factory calibration ... cam0 0.84 deg, cam1 0.53 deg") but doesn't publish the result, and a degree
+  between the views is 3-4 px of disparity at 480 (a person 4 m away read as 2.5 m). `selfcal.rs` estimates the views'
+  relative rotation from the detector's own patch matches (`stereo::alignment`, every 8 runs, ~15 ms): pitch and roll
+  from their row offsets (none in a rectified pair), yaw from the floor (the farthest thing a ray below the horizon can
+  meet, at a distance known from the head pose). The detector rectifies with half of it on each camera; it's saved as
+  `align` in the settings file for the next start. Measured on the Frame: steady over head angle and across reboots
+  (0.1 px), drifting by hundredths of a degree a minute. The `kb_spline` lens model in the calibration only moves
+  things by ~0.3 px.
 - Camera timestamps are `TIMESTAMP_MONOTONIC`-flagged but run ~210–230 ms ahead of
   `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `LATENCY_MS` (`detector.rs`) covers the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
@@ -95,8 +113,9 @@ Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 
 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt).
 `yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
 to `models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 packages/roommate-radar/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
-→ `yolo11n-grayscale_<S>_gray.ncnn.*`, which roommate-radar loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
-1/255 folded into the first conv). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
+→ `yolo11n-grayscale_<S>_rr.ncnn.*`, which roommate-radar loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
+1/255 folded into the first conv; each scale's last class conv cut to person, cat and dog, so the output is [4 + 3, N]:
+outputs identical to the full model's rows 0, 15, 16). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
 The export bakes in the input size, so each S needs its own (build.sh exports the tab's 320, 480 and 640).
 Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
 Vulkan on the Frame, pycocotools: mAP50-95 **35.8 vs 32.3** (mAP50 49.3 vs 45.4, AP small/medium/large 15.4/40.6/56.6 vs

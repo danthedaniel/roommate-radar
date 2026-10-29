@@ -166,11 +166,11 @@ const MINUS_CX: f32 = W as f32 - PAD - BTN_R - 220.0;
 const PLUS_CX: f32 = W as f32 - PAD - BTN_R;
 const HOVER_TICK_US: u16 = 1500; // hover haptic
 const DASH_KEY: &str = "steamframe.roommate-radar.dashboard"; // the tab's overlay key
-const BG: Rgb = [20, 20, 24];
-const GREY: Rgb = [150, 150, 160];
-const LIGHT: Rgb = [205, 205, 212]; // body text: between WHITE and GREY
-const TRACK_OFF: Rgb = [68, 68, 76];
-const BTN: Rgb = [52, 52, 60];
+pub const BG: Rgb = [20, 20, 24];
+pub const GREY: Rgb = [150, 150, 160];
+pub const LIGHT: Rgb = [205, 205, 212]; // body text: between WHITE and GREY
+pub const TRACK_OFF: Rgb = [68, 68, 76];
+pub const BTN: Rgb = [52, 52, 60];
 
 /// Row `row` (0..ROWS): its section and control.
 fn at(row: usize) -> (usize, &'static Control) {
@@ -306,7 +306,7 @@ impl Control {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn fill_rrect(img: &mut Image, x0: f32, y0: f32, w: f32, h: f32, r: f32, rgb: Rgb, a: f32) {
+pub fn fill_rrect(img: &mut Image, x0: f32, y0: f32, w: f32, h: f32, r: f32, rgb: Rgb, a: f32) {
     for y in (y0 as i32 - 1).max(0)..((y0 + h) as i32 + 2).min(img.h as i32) {
         for x in (x0 as i32 - 1).max(0)..((x0 + w) as i32 + 2).min(img.w as i32) {
             let sd = rrect_sd(x as f32 + 0.5 - x0, y as f32 + 0.5 - y0, w, h, 0.0, r);
@@ -315,13 +315,13 @@ fn fill_rrect(img: &mut Image, x0: f32, y0: f32, w: f32, h: f32, r: f32, rgb: Rg
     }
 }
 
-fn fill_circle(img: &mut Image, cx: f32, cy: f32, r: f32, rgb: Rgb, a: f32) {
+pub fn fill_circle(img: &mut Image, cx: f32, cy: f32, r: f32, rgb: Rgb, a: f32) {
     fill_rrect(img, cx - r, cy - r, 2.0 * r, 2.0 * r, r, rgb, a);
 }
 
 /// Tab icon: assets/icon.svg, rasterized (straight-alpha RGBA) with
 /// `rsvg-convert -w 128 -h 128 icon.svg | magick - -depth 8 rgba:icon-128.rgba` (and 176 for the warning's)
-fn icon() -> Image {
+pub fn icon() -> Image {
     Image { w: 128, h: 128, px: include_bytes!("../assets/icon-128.rgba").to_vec() }
 }
 
@@ -508,7 +508,7 @@ mod tests {
         for _ in 0..20 {
             p.press(Some(Target::Step(row("Max Range"), 1)), &mut set);
         }
-        assert!(!set.people && set.max_dist == 8.0);
+        assert!(!set.people && set.max_dist == MAX_DIST);
         let mut img = p.render(Some(Target::Row(row("Detect Cats and Dogs"))), "Watching", &set);
         assert!(img.at(0, 0)[3] == 0 && img.at(500, 5)[3] > 200);
     }
