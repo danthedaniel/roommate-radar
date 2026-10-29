@@ -137,6 +137,7 @@ struct Pair {
     cost: f32,
     d: f32,
     edges: usize,
+    spread: f32, // how far apart the two sides' disparities are (px), 0 with one
 }
 
 /// Scores pairing left box l with right box r (clip: their cut-off edges); None if they can't be one object.
@@ -176,7 +177,8 @@ fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: u
     }
     let looks = 0.5 * (1.0 - ncc.unwrap_or(0.5)); // too flat to tell: neutral
     let class = if l.cls != r.cls { CLASS_COST } else { 0.0 };
-    Some(Pair { cost: 2.0 * dy + dx + looks + class, d, edges: dxs.len() })
+    let spread = dx * h;
+    Some(Pair { cost: 2.0 * dy + dx + looks + class, d, edges: dxs.len(), spread })
 }
 
 /// What became of patch_disparity()'s patches, for the trace: how many it tried, and of those how many were partly
@@ -425,7 +427,9 @@ pub fn match_views(
         let (r, rc, p) = (&views[1][j], &clips[1][j], pairs[i][j].as_ref().unwrap());
         let (hmin, hmax) = heights(l.cls);
         let h = (l.y1 - l.y0).max(r.y1 - r.y0);
-        let edge_sigma = EDGE_PX / (p.edges as f32).sqrt();
+        // At least what the two sides disagree by: a seated person's sides gave 15 and 29 px when their patches all
+        // failed (true: 10), and the edges alone put them at half their distance.
+        let edge_sigma = (EDGE_PX / (p.edges as f32).sqrt()).max(p.spread / 2.0);
         let (lo, hi) = (D_MIN.max(0.8 * h * baseline / hmax), 1.25 * h * baseline / hmin);
         let (patches, patch_stats) = patch_disparity(imgs, s, l, p.d, lo, hi);
         let (d, sigma_d) = match patches {
@@ -443,7 +447,10 @@ pub fn match_views(
         let d = d.max(D_MIN);
         // z = fB/d is convex in d: noise makes it read far, by a factor 1 + (sigma_d / d)^2 on average.
         let z = f * baseline / d / (1.0 + (sigma_d / d).powi(2));
-        let sigma_z = z * z * sigma_d.max(SIGMA_D_MIN_RAD * f) / (f * baseline);
+        // How much farther it reads with d one sigma less: z^2 sigma_d / (f B) for a small sigma_d, and the far side's
+        // much longer reach when it isn't (22 +- 7 px read 1.0 m for a person 2.1 m away).
+        let sd = sigma_d.max(SIGMA_D_MIN_RAD * f);
+        let sigma_z = f * baseline / (d - sd).max(D_MIN) - f * baseline / d;
         // One box in the left view: the two views' edges (the right one's shifted by d), each from the views where it
         // isn't cut off.
         let edge = |a: f32, ac: bool, b: f32, bc: bool| match (ac, bc) {
@@ -528,6 +535,23 @@ mod tests {
         let z = F * B / 8.0;
         assert!(o.stereo && (o.dist - z).abs() < 0.03 * z, "{} vs {z}", o.dist);
         assert!(o.sigma_z > 0.0 && o.sigma_z < 0.05 * z);
+    }
+
+    #[test]
+    fn edges_that_disagree_are_uncertain() {
+        // Nothing to match patches on, so depth is the box edges': the sides' disparities 8 and 18 px, then 13 and 13.
+        let img = vec![0u8; S * S];
+        let sigma = |r: Det| {
+            let views = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![r]];
+            let o = &match_views(&views, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
+            assert!(o.stereo && o.disp.patches.is_nan());
+            o.disp.sigma_edges
+        };
+        assert_eq!(sigma(det(22.0, 40.0, 52.0, 120.0)), 5.0);
+        let views = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![det(22.0, 40.0, 52.0, 120.0)]];
+        let o = &match_views(&views, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
+        assert!((o.sigma_z - (F * B / 8.0 - F * B / 13.0)).abs() < 1e-4, "the far side: {}", o.sigma_z);
+        assert!(sigma(det(17.0, 40.0, 57.0, 120.0)) < 1.0);
     }
 
     #[test]
