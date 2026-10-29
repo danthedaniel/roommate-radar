@@ -39,7 +39,7 @@ case $ncnn in *-dirty) ncnn= ;; esac
 [ "$check" ] || get https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt \
 	models/yolo11n-grayscale.pt b81f01d60918e3194df21c305d9bd2275ab33cfddc79b26ca145a9190d1932f5
 [ "$check" ] || for s in 320 480 640; do
-	[ -f "models/yolo11n-grayscale_${s}_rr.ncnn.param" ] && continue
+	[ "models/yolo11n-grayscale_${s}_rr.ncnn.param" -nt packages/roommate-radar/prep_model.py ] && continue
 	(
 		cd models
 		if [ ! -f "yolo11n-grayscale_$s.ncnn.param" ]; then

@@ -209,9 +209,18 @@ impl Track {
         self.t = self.t.max(t);
     }
 
+    /// m's noise for this track. A box that changed size moved its center without the object moving (arms reaching
+    /// out widened a seated person's box from 1.2 to 2.4 m, and its depth jumped too), by up to half the change.
+    fn meas_noise(&self, m: &Meas) -> M3 {
+        let k = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
+        let dw = if m.clip_w { 0.0 } else { (m.w * k - self.w).abs() };
+        let dh = if m.clip_h { 0.0 } else { (m.h * k - self.h).abs() };
+        add(&noise(m, noise_scale(m)), &diag((dw.max(dh) / 2.0).powi(2)))
+    }
+
     /// Squared Mahalanobis distance of m from the prediction, and ln|S|.
     fn distance(&self, m: &Meas) -> Option<(f32, f32)> {
-        mahalanobis(m.p, self.p, &add(&self.pa, &noise(m, noise_scale(m))))
+        mahalanobis(m.p, self.p, &add(&self.pa, &self.meas_noise(m)))
     }
 
     /// Kalman update with m (position measured, H = [I 0]); sizes and class smoothed.
@@ -221,7 +230,7 @@ impl Track {
             (self.p, self.v, self.pa, self.pb, self.pc) =
                 (m.p, V3::default(), noise(m, 1.0), diag(0.0), diag(VEL0 * VEL0));
             self.history.clear();
-        } else if let Some((si, _)) = inv(&add(&self.pa, &noise(m, noise_scale(m)))) {
+        } else if let Some((si, _)) = inv(&add(&self.pa, &self.meas_noise(m))) {
             let (kp, kv) = (mul(&self.pa, &si), mul(&tr(&self.pb), &si));
             let y = m.p - self.p;
             self.p = self.p + mv(&kp, y);
@@ -408,8 +417,9 @@ impl Tracker {
         let (strong, weak): (Vec<usize>, Vec<usize>) =
             (0..dets.len()).filter(|&i| dets[i].score >= LOW).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
         let mut matched = vec![false; self.tracks.len()];
-        let unused = self.match_dets(&dets, &strong, &mut matched, t);
-        self.match_dets(&dets, &weak, &mut matched, t);
+        let unused = self.match_dets(&dets, &strong, &mut matched, t, false);
+        // Not tentative tracks (ByteTrack): a hand's box and a weak one 0.7 m below it confirmed a track that flew off.
+        self.match_dets(&dets, &weak, &mut matched, t, true);
         for (i, tr) in self.tracks.iter_mut().enumerate() {
             if !matched[i] && seen(tr.p) {
                 tr.unseen += dts[i];
@@ -457,8 +467,17 @@ impl Tracker {
     }
 
     /// Matches still-unmatched tracks to dets[which]; updates the matched tracks. Returns the unmatched detections.
-    fn match_dets(&mut self, dets: &[Meas], which: &[usize], matched: &mut [bool], t: f64) -> Vec<usize> {
-        let rows: Vec<usize> = (0..self.tracks.len()).filter(|&i| !matched[i]).collect();
+    fn match_dets(
+        &mut self,
+        dets: &[Meas],
+        which: &[usize],
+        matched: &mut [bool],
+        t: f64,
+        confirmed_only: bool,
+    ) -> Vec<usize> {
+        let rows: Vec<usize> = (0..self.tracks.len())
+            .filter(|&i| !matched[i] && (!confirmed_only || self.tracks[i].hits >= MIN_HITS))
+            .collect();
         let cost: Vec<Vec<f32>> = rows
             .iter()
             .map(|&r| {
@@ -580,6 +599,29 @@ mod tests {
         assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0);
         trk.update(&[meas(v3(1.75, 0.0, -3.0), 0.15)], 3.25, always);
         assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0, "below LOW: no match");
+    }
+
+    #[test]
+    fn weak_detections_dont_confirm() {
+        let mut trk = Tracker::default();
+        trk.update(&[meas(v3(0.0, 0.0, -2.0), 0.8)], 0.0, always);
+        trk.update(&[Meas { weak: true, ..meas(v3(0.0, -0.3, -2.0), 0.8) }], 0.25, always);
+        assert!(trk.tracks.iter().all(|tr| tr.hits < MIN_HITS));
+    }
+
+    #[test]
+    fn arms_out_dont_move_a_seated_person() {
+        // 2.7 m away, still; after 2 s, now and then the box is twice as wide (arms out), its center 0.3 m to the side
+        // (half the change) and 0.4 m farther. Up to 1.5 m/s without meas_noise's size term, 0.9 with it: what's left
+        // is the constant-velocity model believing a jump (ACCEL).
+        let mut trk = Tracker::default();
+        for i in 0..30 {
+            let arms = i >= 8 && i % 3 == 0;
+            let m = meas(v3(if arms { 0.3 } else { 0.0 }, 0.0, if arms { -3.1 } else { -2.7 }), 0.8);
+            trk.update(&[Meas { w: if arms { 1.2 } else { 0.6 }, ..m }], i as f64 * 0.25, always);
+            let tr = &trk.tracks[0];
+            assert!(trk.tracks.len() == 1 && (i < 8 || tr.v.len() < 1.1), "frame {i}: {:?}", tr.v);
+        }
     }
 
     #[test]

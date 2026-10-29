@@ -70,6 +70,7 @@ pub struct View {
 
 pub const HFOV_DEG: f32 = 100.0; // the rectified views' field of view
 const CONF: f32 = 0.1; // ByteTrack wants the weak detections too
+const COCO: usize = 80; // the model's classes
 const IOU: f32 = 0.5; // overlapping detections above this IoU keep only the most confident
 const MIN_BOX: f32 = 0.05; // drop boxes whose larger side is under this fraction of the view (a cat at 3 m: ~6% long)
 const LATENCY_MS: f32 = 8.0; // camserver arrival time -> mid-exposure; tune if boxes lag/lead head motion
@@ -86,8 +87,8 @@ fn duplicate(a: &Det, b: &Det) -> bool {
     inter / (aa + ab - inter + 1e-6) > IOU
 }
 
-/// Overlapping boxes keep only the best, whatever their class (a person and a dog box on one body). Only our classes
-/// are decoded: suppressing across all of COCO's, a "couch" box around someone sitting on it hid them.
+/// Overlapping boxes keep only the best, whatever their class (a person and a dog box on one body). Only boxes of our
+/// classes get here (decode): suppressing across all of COCO's, a "couch" box around someone sitting on it hid them.
 fn nms(d: &mut Vec<Det>) {
     d.sort_by(|a, b| b.score.total_cmp(&a.score));
     let mut keep: Vec<Det> = Vec::new();
@@ -99,20 +100,23 @@ fn nms(d: &mut Vec<Det>) {
     *d = keep;
 }
 
-/// YOLO's output [4 + 3, N] (cx, cy, w, h in input pixels, then sigmoid scores for tracker::CLASSES only:
-/// prep_model.py cut the other 77 out of the model) as boxes in each S x S view.
+/// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then sigmoid scores for COCO's classes) as boxes in each
+/// S x S view: those whose best class is one of tracker::CLASSES. A chair that scores 0.3 as a person and 0.8 as a
+/// chair is a chair.
 fn decode(out: &ncnn::Mat, s: usize) -> [Vec<Det>; 2] {
     let mut views = [Vec::new(), Vec::new()];
-    let rows: Vec<&[f32]> = (0..4 + CLASSES.len()).map(|r| out.row(r)).collect();
-    let s = s as f32;
-    for i in 0..out.w() {
-        let (mut best, mut bs) = (0, 0.0);
-        for (k, &cls) in CLASSES.iter().enumerate() {
-            if rows[4 + k][i] > bs {
-                (best, bs) = (cls, rows[4 + k][i]);
+    let rows: Vec<&[f32]> = (0..4 + COCO).map(|r| out.row(r)).collect();
+    let mut top = vec![(0, 0f32); out.w()]; // per anchor: (best class, its score), a row at a time
+    for (cls, row) in rows[4..].iter().enumerate() {
+        for (t, &v) in top.iter_mut().zip(*row) {
+            if v > t.1 {
+                *t = (cls, v);
             }
         }
-        if bs < CONF {
+    }
+    let s = s as f32;
+    for (i, &(best, bs)) in top.iter().enumerate() {
+        if bs < CONF || !CLASSES.contains(&best) {
             continue;
         }
         let (cx, cy, w, h) = (rows[0][i], rows[1][i], rows[2][i], rows[3][i]);
@@ -303,8 +307,8 @@ fn run(s: usize) -> Result<(), String> {
         let Some(out) = out else {
             continue;
         };
-        if out.h() != 4 + CLASSES.len() {
-            return Err(format!("{model}: {} output rows, not 4 + {} (prep_model.py's)", out.h(), CLASSES.len()));
+        if out.h() != 4 + COCO {
+            return Err(format!("{model}: {} output rows, not 4 + {COCO}", out.h()));
         }
         let mut views = decode(&out, s);
         nms(&mut views[0]);

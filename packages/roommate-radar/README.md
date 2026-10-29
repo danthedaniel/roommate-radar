@@ -114,8 +114,8 @@ https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale
 `yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
 to `models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 packages/roommate-radar/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
 → `yolo11n-grayscale_<S>_rr.ncnn.*`, which roommate-radar loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
-1/255 folded into the first conv; each scale's last class conv cut to person, cat and dog, so the output is [4 + 3, N]:
-outputs identical to the full model's rows 0, 15, 16). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
+1/255 folded into the first conv). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
+All 80 classes are kept: a box is ours only when its best class is person, cat or dog (`detector.rs` `decode`).
 The export bakes in the input size, so each S needs its own (build.sh exports the tab's 320, 480 and 640).
 Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
 Vulkan on the Frame, pycocotools: mAP50-95 **35.8 vs 32.3** (mAP50 49.3 vs 45.4, AP small/medium/large 15.4/40.6/56.6 vs
@@ -124,6 +124,9 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
 (37 ms @576 before prep_model.py and the conv options).
 
 ## Dead ends (so we don't retry them)
+
+- Cutting the model's class convs to person, cat and dog only: without the other 77 classes, nothing tells a chair
+  scoring 0.3 as a person from one; chairs became people.
 
 - Devkit `compat_tool` `SteamLinuxRuntime_4-arm64` (the devkit client's alias): Steam records the mapping but runs the
   app natively, as no tool has that name (the runtime registers as `steamlinuxruntime_steamrt4-arm64`). `steamrt4-any`
