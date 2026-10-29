@@ -203,7 +203,6 @@ struct Camera {
     maps: HashMap<RawFd, Mapping>, // by XRService's dmabuf fd
     last_published: Option<u32>,   // V4L2 sequence number
     normal_mean: f64,              // running brightness of normal-exposure frames
-    clock_offset_ns: Option<i64>,  // camera clock - CLOCK_MONOTONIC (at arrival)
 }
 
 impl Camera {
@@ -211,9 +210,7 @@ impl Camera {
         self.maps.clear();
         self.remote_vfd = -1;
         self.last_published = None; // a restarted XRService counts from 0 again
-        // and may bring a new camera clock and exposure: the offset only creeps down (1 us a frame), the mean only
-        // follows frames it accepts
-        self.clock_offset_ns = None;
+        // and may bring a new exposure: the mean only follows frames it accepts
         self.normal_mean = 0.0;
     }
 }
@@ -335,8 +332,11 @@ pub fn run() {
         maps: HashMap::new(),
         last_published: None,
         normal_mean: 0.0,
-        clock_offset_ns: None,
     });
+    // Camera clock - CLOCK_MONOTONIC (at arrival), one for both: they're hardware-synchronized on one clock, and the
+    // app pairs their frames by time. Tracked per camera, each one's arrival jitter moved its own, until they were
+    // > 2 ms apart and no frames paired.
+    let mut clock_offset_ns: Option<i64> = None;
     let mut frame = vec![0u8; shm::FRAME];
     let mut bufs = Vec::new();
     let mut pidfd: Option<OwnedFd> = None;
@@ -350,6 +350,7 @@ pub fn run() {
             for c in &mut cams {
                 c.close_all();
             }
+            clock_offset_ns = None; // a restarted XRService may bring a new camera clock: the offset only creeps down
             match attach(&mut cams) {
                 Ok((pid, fd, l)) => {
                     log!(
@@ -387,15 +388,15 @@ pub fn run() {
             // XRService restarted streaming on the same fd: its sequence counts from 0 again
             if c.last_published.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
                 c.last_published = None;
-                c.clock_offset_ns = None;
+                clock_offset_ns = None;
             }
             if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
                 continue;
             }
-            // The camera clock runs ~210 ms ahead of CLOCK_MONOTONIC. Track the offset as the
-            // max of (timestamp - arrival): the least-delayed observation bounds it best.
+            // The camera clock runs ~210 ms ahead of CLOCK_MONOTONIC. Track the offset as the max of (timestamp -
+            // arrival), over both cameras: the least-delayed observation bounds it best.
             let off = bufs[0].ts_ns as i64 - arrival as i64;
-            c.clock_offset_ns = Some(c.clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
+            clock_offset_ns = Some(clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
             // The estimate adapts to any offset; one far from the usual ~210 ms means the camera clock changed.
             if off.abs() > 1_000_000_000 && !clock_warned {
                 log!("{}: camera clock {} ms from CLOCK_MONOTONIC (was ~210 ms)\n", c.node, off / 1_000_000);
@@ -423,7 +424,7 @@ pub fn run() {
                     continue;
                 }
                 c.normal_mean = if c.normal_mean == 0.0 { m } else { 0.9 * c.normal_mean + 0.1 * m };
-                shm::write(&hdr.slots[ci], &frame, (b.ts_ns as i64 - c.clock_offset_ns.unwrap()) as u64);
+                shm::write(&hdr.slots[ci], &frame, (b.ts_ns as i64 - clock_offset_ns.unwrap()) as u64);
                 c.last_published = Some(b.seq);
                 published += 1;
                 break;
@@ -435,12 +436,10 @@ pub fn run() {
 
         let t = shm::now_ns();
         if t - last_report > 5_000_000_000 {
-            let off = |c: &Camera| c.clock_offset_ns.unwrap_or(0) as f64 / 1e6;
             log!(
-                "published {:.1} frames/s; clock offset {:.2} / {:.2} ms; mean {:.0} / {:.0}\n",
+                "published {:.1} frames/s; clock offset {:.2} ms; mean {:.0} / {:.0}\n",
                 published as f64 / ((t - last_report) as f64 / 1e9),
-                off(&cams[0]),
-                off(&cams[1]),
+                clock_offset_ns.unwrap_or(0) as f64 / 1e6,
                 cams[0].normal_mean,
                 cams[1].normal_mean
             );
