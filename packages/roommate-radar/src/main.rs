@@ -34,7 +34,12 @@ use std::time::Duration;
 use detector::{QUIT, YOLO_MS};
 use openvr::{HmdMatrix34_t, TrackedDevicePose_t, vr};
 use shm::now_ns;
-use v3::V3;
+use v3::{V3, v3};
+
+// The head moving more than this (m) between two frames is tracking relocalizing: the standing universe moved (6 m
+// and 37 deg on the Frame, when it recognized the room a minute after standby) and the tracks are elsewhere now.
+// The ChaperoneUniverseHasChanged clear below didn't catch it (the trace kept the old track).
+const POSE_JUMP_M: f32 = 0.5;
 
 /// The head's pose (standing universe) seconds_from_now (< 0: in the past), and whether it's valid.
 fn head_pose(seconds_from_now: f32) -> (HmdMatrix34_t, bool) {
@@ -152,6 +157,7 @@ fn run() -> i32 {
     let (mut seen_det_id, mut last_det_ns) = (0, 0);
     // Playback runs this far behind now: detection age (capture -> here) plus one detection period, smoothed.
     let mut lag_s = 1.0 / set.hz + 0.1;
+    let mut last_head: Option<V3> = None;
     while !QUIT.load(Ordering::Relaxed) {
         // Once per compositor frame; sleep instead if there's no frame to sync to.
         if !vr().wait_frame_sync(100) {
@@ -171,6 +177,14 @@ fn run() -> i32 {
                 walls = vr().play_area_walls();
                 tracker.tracks.clear(); // in the standing universe, which may have moved
             }
+        }
+        let (head_now, head_valid) = head_pose(0.0);
+        if head_valid {
+            let p = v3(head_now.m[0][3], head_now.m[1][3], head_now.m[2][3]);
+            if last_head.is_some_and(|q| (p - q).len() > POSE_JUMP_M) {
+                tracker.tracks.clear();
+            }
+            last_head = Some(p);
         }
         panel.poll(&mut set);
         let run = set.warned && set.enabled && (in_game || !set.games_only); // the tab's first-run warning first
@@ -214,7 +228,7 @@ fn run() -> i32 {
             }
         }
 
-        let n = boxes.show(&tracker, &head_pose(0.0).0, now, now as f64 / 1e9 - lag_s as f64, &mut textures);
+        let n = boxes.show(&tracker, &head_now, now, now as f64 / 1e9 - lag_s as f64, &mut textures);
 
         let status = if !set.enabled {
             "Off".to_string()

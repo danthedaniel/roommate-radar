@@ -5,7 +5,7 @@
 //! detector's own matches (stereo::alignment, every few runs) and corrected in the rectification (detector.rs: half of it
 //! on each camera, so neither view's direction moves by more than half the error):
 //!   - about the head's x and z axes (pitch, roll) from the matches' row offsets, which a rectified pair has none of,
-//!     whatever the scene;
+//!     whatever the scene (pooled over the last POOL_RUNS runs: a plain room leaves too few in one);
 //!   - about y (yaw: an offset in disparity) from the floor, whose distance along each ray below the horizon follows from
 //!     the head pose (SteamVR's floor, y = 0). The floor is the farthest thing such a ray can meet, so the floor's matches
 //!     are the low edge of (measured - floor) disparity, at the offset: FLOOR_EDGE of all the floor samples, per unit of
@@ -30,6 +30,7 @@ const PUBLISH_RAD: f32 = 0.02 * std::f32::consts::PI / 180.0; // the rectificati
 const MAX_RAD: f32 = 3.0 * std::f32::consts::PI / 180.0; // more than this is something else going wrong: no further
 const MIN_NCC: f32 = 0.85; // matches used
 const MIN_ROWS: usize = 20; // matches a pitch/roll estimate needs
+const POOL_RUNS: usize = 8; // from this many alignment runs: a plain room gives ~5 a run
 const ROW_OUTLIER_PX: f32 = 1.0; // after a first fit, matches off it by more than this are left out of the second
 const CONVERGED_RAD: f32 = 0.1 * std::f32::consts::PI / 180.0; // pitch/roll this close: floor samples are taken
 const FLOOR_KEEP: usize = 3000; // floor samples kept (a minute or two of looking around)
@@ -49,6 +50,7 @@ struct Floor {
 #[derive(Clone, Debug, Default)]
 pub struct SelfCal {
     pub omega: [f32; 3], // the correction (rad, about the head's x, y, z): the left view's rotation relative to the right
+    pool: VecDeque<(Vec<Match>, [f32; 3])>, // the last POOL_RUNS runs' matches, with the correction applied to each
     floor: VecDeque<Floor>,
     yaw_estimate: Option<f32>, // the floor's last (rad), for the log
     last_log_ns: u64,
@@ -146,7 +148,20 @@ impl SelfCal {
             .filter(|m| m[4] >= MIN_NCC)
             .map(|m| ((m[0] + 0.5 - half) / f, -(m[1] + 0.5 - half) / f, m[2], m[3]))
             .collect();
-        let Some((wx, wz)) = fit_rows(&pts, f) else {
+        self.pool.push_back((pts.clone(), applied));
+        if self.pool.len() > POOL_RUNS {
+            self.pool.pop_front();
+        }
+        // Each run's row offsets as if measured with `applied`: a correction w more takes f (wx (1 + Y^2) + wz X) off.
+        let pooled: Vec<Match> = self
+            .pool
+            .iter()
+            .flat_map(|(ms, then)| {
+                let (ex, ez) = (applied[0] - then[0], applied[2] - then[2]);
+                ms.iter().map(move |&(x, y, d, dy)| (x, y, d, dy - f * (ex * (1.0 + y * y) + ez * x)))
+            })
+            .collect();
+        let Some((wx, wz)) = fit_rows(&pooled, f) else {
             return;
         };
         self.omega[0] += GAIN * (applied[0] + wx - self.omega[0]);
@@ -253,6 +268,23 @@ mod tests {
                 let (got, want) = (w[k].to_degrees(), -err[k].to_degrees());
                 assert!((got - want).abs() < 0.04, "{} px, axis {k}: {got:.3} deg vs {want:.3}", view.0);
             }
+        }
+    }
+
+    #[test]
+    fn few_matches_a_run_are_pooled() {
+        // A plain room: 5 matches a run, too few on their own; pooled over runs, pitch and roll still converge.
+        let err = [0.66f32, 0.0, -0.5].map(f32::to_radians);
+        let mut cal = SelfCal::default();
+        let mut seed = 7;
+        for _ in 0..80 {
+            let applied = cal.omega;
+            let m = matches(err, applied, -1.6, &mut seed, (S, F));
+            cal.update(&m[..5], applied, &HEAD, F, S, ORIGIN, B);
+        }
+        for k in [0, 2] {
+            let (got, want) = (cal.omega[k].to_degrees(), -err[k].to_degrees());
+            assert!((got - want).abs() < 0.04, "axis {k}: {got:.3} deg vs {want:.3}");
         }
     }
 

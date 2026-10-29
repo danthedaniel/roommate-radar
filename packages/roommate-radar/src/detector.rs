@@ -250,6 +250,7 @@ fn run(s: usize) -> Result<(), String> {
     let (mut frames, mut stat_t, mut last_run) = (0u64, now_ns(), 0u64);
     let mut runs = 0u64; // for ALIGN_EVERY
     let (mut t_rect, mut t_net, mut t_post, mut t_align) = (0f64, 0f64, 0f64, 0f64);
+    let mut why = stereo::AlignStats::default(); // summed over the log's period
 
     while !QUIT.load(Ordering::Relaxed) && SIZE.load(Ordering::Relaxed) == s as i32 {
         if PAUSED.load(Ordering::Relaxed) {
@@ -313,7 +314,17 @@ fn run(s: usize) -> Result<(), String> {
         let e = now_ns();
         let stereo_n = objs.iter().filter(|o| o.stereo).count();
         runs += 1;
-        let align = runs.is_multiple_of(ALIGN_EVERY).then(|| Arc::new(stereo::alignment(l_img, r_img, s))); // a few ms
+        let align = runs.is_multiple_of(ALIGN_EVERY).then(|| {
+            let (a, st) = stereo::alignment(l_img, r_img, s); // a few ms
+            why.tried += st.tried;
+            why.flat += st.flat;
+            why.weak += st.weak;
+            why.edge_dy += st.edge_dy;
+            why.edge_d += st.edge_d;
+            why.unclear += st.unclear;
+            why.found += st.found;
+            Arc::new(a)
+        });
         let g = now_ns();
         {
             let mut d = DETS.lock().unwrap();
@@ -336,7 +347,8 @@ fn run(s: usize) -> Result<(), String> {
             let n = frames as f64;
             println!(
                 "detector: {:.1} fps | rectify {:.1} ms, yolo {:.1} ms, match {:.1} ms, align {:.0} ms | {}+{} dets, \
-                 {stereo_n} objects | age {:.0} ms",
+                 {stereo_n} objects | age {:.0} ms | align patches: {} tried, {} flat, {} weak, {} at dy's end, \
+                 {} at d's end, {} unclear, {} found",
                 n / ((t - stat_t) as f64 / 1e9),
                 t_rect / n,
                 t_net / n,
@@ -344,8 +356,16 @@ fn run(s: usize) -> Result<(), String> {
                 t_align,
                 views[0].len(),
                 views[1].len(),
-                (t - t_ns[0]) as f64 / 1e6
+                (t - t_ns[0]) as f64 / 1e6,
+                why.tried,
+                why.flat,
+                why.weak,
+                why.edge_dy,
+                why.edge_d,
+                why.unclear,
+                why.found
             );
+            why = stereo::AlignStats::default();
             YOLO_MS.store((t_net / n) as f32);
             (frames, t_rect, t_net, t_post, t_align, stat_t) = (0, 0.0, 0.0, 0.0, 0.0, t);
         }

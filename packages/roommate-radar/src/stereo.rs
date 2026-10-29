@@ -193,6 +193,19 @@ pub struct PatchStats {
     pub contrast: f32,
 }
 
+/// alignment()'s patches: tried, too flat, best ZNCC under 0.8, best at the row (dy) or disparity (d) search's end,
+/// another as good 2+ px away, or found.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct AlignStats {
+    pub tried: u32,
+    pub flat: u32,
+    pub weak: u32,
+    pub edge_dy: u32,
+    pub edge_d: u32,
+    pub unclear: u32,
+    pub found: u32,
+}
+
 /// The gray level std dev of the region (x0..x1, y0..y1) of img.
 fn std_dev(img: &[u8], s: usize, (x0, y0, x1, y1): (i32, i32, i32, i32)) -> f32 {
     let v: Vec<f32> = (y0.max(0)..y1.min(s as i32))
@@ -277,17 +290,20 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
 /// For checking the rectification (the calibration app): small textured patches over the whole left view, each found in
 /// the right view by ZNCC over disparities -2..ALIGN_D and rows -ALIGN_DY..ALIGN_DY. A rectified pair has no row offset
 /// anywhere, and no disparity for anything far away, so what's left is how the views are misaligned. Per patch found
-/// clearly: its center (px), disparity and row offset (px, sub-pixel) and ZNCC.
-pub fn alignment(l: &[u8], r: &[u8], s: usize) -> Vec<[f32; 5]> {
+/// clearly: its center (px), disparity and row offset (px, sub-pixel) and ZNCC. And why the others weren't (for the log):
+/// AlignStats.
+pub fn alignment(l: &[u8], r: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
     const R: i32 = 4; // 9 x 9
     const STEP: usize = 24;
     let (ds, dys) = (-2..=ALIGN_D, -ALIGN_DY..=ALIGN_DY);
-    let mut out = Vec::new();
+    let (mut out, mut st) = (Vec::new(), AlignStats::default());
     for cy in (STEP / 2..s - STEP / 2).step_by(STEP) {
         for cx in (STEP / 2..s - STEP / 2).step_by(STEP) {
             let (cx, cy) = (cx as i32, cy as i32);
             let patch = (cx - R, cy - R, cx + R + 1, cy + R + 1);
+            st.tried += 1;
             if std_dev(l, s, patch) < 8.0 {
+                st.flat += 1;
                 continue; // flat: nothing to find
             }
             // score[dy][d]; None outside the right view or flat there
@@ -315,16 +331,29 @@ pub fn alignment(l: &[u8], r: &[u8], s: usize) -> Vec<[f32; 5]> {
             let clear = score.iter().enumerate().all(|(i, row)| {
                 row.iter().enumerate().all(|(j, &v)| (i.abs_diff(bi) < 2 && j.abs_diff(bj) < 2) || v < b - 0.1)
             });
-            if b < 0.8 || !clear || bi == 0 || bi == score.len() - 1 || bj == 0 || bj == score[0].len() - 1 {
+            let rejected = if b < 0.8 {
+                Some(&mut st.weak)
+            } else if bi == 0 || bi == score.len() - 1 {
+                Some(&mut st.edge_dy)
+            } else if bj == 0 || bj == score[0].len() - 1 {
+                Some(&mut st.edge_d)
+            } else if !clear {
+                Some(&mut st.unclear)
+            } else {
+                None
+            };
+            if let Some(n) = rejected {
+                *n += 1;
                 continue;
             }
+            st.found += 1;
             let sub = |a: f32, c: f32| ((a - c) / (2.0 * (a - 2.0 * b + c) - 1e-9)).clamp(-0.5, 0.5);
             let d = (bj as i32 - 2) as f32 + sub(score[bi][bj - 1], score[bi][bj + 1]);
             let dy = (bi as i32 - ALIGN_DY) as f32 + sub(score[bi - 1][bj], score[bi + 1][bj]);
             out.push([cx as f32, cy as f32, d, dy, b]);
         }
     }
-    out
+    (out, st)
 }
 
 /// Of a set of disparities, the nearest (largest) cluster holding at least half as many as the largest cluster: its
@@ -552,7 +581,8 @@ mod tests {
                 if x < S && y < S { l[y * S + x] } else { 0 }
             })
             .collect();
-        let a = alignment(&l, &r, S);
+        let (a, st) = alignment(&l, &r, S);
+        assert_eq!(st.found as usize, a.len());
         assert!(a.len() > 20);
         assert!(a.iter().all(|p| (p[2] - 5.0).abs() < 0.2 && (p[3] - 2.0).abs() < 0.2 && p[4] > 0.95), "{:?}", &a[..3]);
     }

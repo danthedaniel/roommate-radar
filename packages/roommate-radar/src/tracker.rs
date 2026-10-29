@@ -7,7 +7,7 @@
 //!   1. merge detections of one object (within each other's noise),
 //!   2. predict every track to the frame's capture time,
 //!   3. match tracks to confident detections (Hungarian), then the tracks left over to weak ones (low confidence, or
-//!      seen in one view only): weak ones keep a track going, with more noise, but never start one,
+//!      seen in one view only): weak ones keep a track going, with more noise, but never start one; below LOW, nothing,
 //!   4. unmatched confident detections start tentative tracks, unless they're within an existing track's gate,
 //!   5. tracks that have become indistinguishable are merged; tentative tracks that miss are dropped, confirmed ones
 //!      after missing for MAX_UNSEEN while they should have been seen (`seen`: in view and in range; out of view a
@@ -35,6 +35,7 @@ pub struct Meas {
 }
 
 const HIGH: f32 = 0.5; // detections at least this confident can start tracks (step 3); the rest only extend them
+const LOW: f32 = 0.25; // and below this they don't even do that: a person track walked onto a bicycle at 0.15
 const WEAK_NOISE: f32 = 2.0; // weak detections' position noise (std dev) is this many times what they measured
 const GATE: f32 = 11.34; // chi-square, 3 dof, 99%: max squared Mahalanobis distance for a match
 const BIRTH_GATE: f32 = 16.27; // 99.9%: an unmatched detection this close to a track doesn't start another
@@ -405,7 +406,7 @@ impl Tracker {
             tr.predict(t);
         }
         let (strong, weak): (Vec<usize>, Vec<usize>) =
-            (0..dets.len()).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
+            (0..dets.len()).filter(|&i| dets[i].score >= LOW).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
         let mut matched = vec![false; self.tracks.len()];
         let unused = self.match_dets(&dets, &strong, &mut matched, t);
         self.match_dets(&dets, &weak, &mut matched, t);
@@ -554,7 +555,7 @@ mod tests {
     #[test]
     fn walking_person() {
         // At 1 m/s along x, 3 m away, detected at 4 Hz with stereo-like noise (along the ray): confirmed on the 2nd frame, velocity learned, the last
-        // 4 states kept; then a weak detection extends the track but starts nothing on its own.
+        // 4 states kept; then a weak detection extends the track but starts nothing on its own, and a 0.15 one does neither.
         let mut trk = Tracker::default();
         let mut n = noise_fn(1);
         for i in 0..12 {
@@ -575,8 +576,10 @@ mod tests {
         assert!(tr.history.len() == 4 && tr.history[0].t == 8.0 * 0.25 && tr.history[3].t == 11.0 * 0.25);
 
         let far = Meas { weak: true, ..meas(v3(-3.0, 0.0, -3.0), 0.9) };
-        trk.update(&[meas(v3(1.5, 0.0, -3.0), 0.2), far], 3.0, always);
+        trk.update(&[meas(v3(1.5, 0.0, -3.0), 0.3), far], 3.0, always);
         assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0);
+        trk.update(&[meas(v3(1.75, 0.0, -3.0), 0.15)], 3.25, always);
+        assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0, "below LOW: no match");
     }
 
     #[test]
