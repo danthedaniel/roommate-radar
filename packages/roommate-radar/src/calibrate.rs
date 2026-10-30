@@ -9,8 +9,9 @@
 //! detector matches patches all over the views about once a second (stereo::alignment) and only those numbers are
 //! recorded. "Far" is for a far scene (a hallway, out of a window), whose disparity should be about 0.
 //!
-//! Runs from its own devkit install (deploy.yml's calibrate play) without the app's setup (register.rs) or saved
-//! settings, so the app's own install, driver and autostart are left alone.
+//! Runs from its own devkit install (deploy.yml's calibrate play) without the app's setup (register.rs), so the app's
+//! own install, driver and autostart are left alone. Of the app's saved settings it reads only the rectification
+//! correction (`align`) to start from, and saves nothing.
 use std::sync::atomic::Ordering;
 
 use serde_json::{Map, Value, json};

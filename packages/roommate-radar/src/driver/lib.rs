@@ -113,7 +113,7 @@ unsafe extern "C" fn init(_: *mut Provider, ctx: *mut DriverContext) -> i32 {
     let _ = std::fs::create_dir_all(shm::CALIB_DIR);
     for f in ["xrservice.json", "device_config.json"] {
         if let Err(e) = std::fs::copy(format!("/persist/{f}"), format!("{}/{f}", shm::CALIB_DIR)) {
-            log!("copy /persist/{f}: {e}");
+            log!("copy /persist/{f}: {e}\n");
         }
     }
     *THREADS.lock().unwrap() = vec![std::thread::spawn(camserver::run), std::thread::spawn(autostart::run)];

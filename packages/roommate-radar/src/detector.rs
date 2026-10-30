@@ -2,7 +2,7 @@
 //! each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified stereo pair, calib.rs),
 //! runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views and triangulates
 //! depth from disparity (stereo.rs). Every second run it does the same for the two side cameras, without stereo (Side).
-//! Results (head frame at capture time) go to DETS.
+//! Results (head frame at capture time; the side cameras' in their views' frames, yawed by SIDE_YAW) go to DETS.
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

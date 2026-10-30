@@ -19,7 +19,7 @@ pub struct Settings {
     pub hz: f32,               // YOLO runs per second, one of RATES
     pub autostart: bool,       // start with SteamVR (the driver launches the app, autostart.rs)
     pub gameid: Option<u64>,   // not in the tab: Steam's id for this app (SteamGameId), for the driver to launch it
-    pub warned: bool,          // not in the tab: the first-run warning was acknowledged (main.rs)
+    pub warned: bool,          // the tab's first-run warning was acknowledged (panel.rs)
     pub align: [f32; 3],       // not in the tab: the rectification's correction, rad (selfcal.rs); saved in degrees
     pub path: Option<PathBuf>, // where save() writes; None: nowhere (tests)
 }

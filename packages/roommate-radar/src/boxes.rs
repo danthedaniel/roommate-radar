@@ -1,7 +1,7 @@
-//! The tracks as OpenVR overlays: per confirmed track a box (rounded outline) and a label (class, confidence), upright
-//! sprites turned to face you every compositor frame, in the standing universe. Each box follows its track's filter
-//! states (position and velocity, tracker.rs) played back behind the newest one, so there is always a segment to be
-//! in, and fades in and out rather than popping.
+//! The tracks as OpenVR overlays: per confirmed track a box (rounded outline) and a label (class; confidence in
+//! developer builds), upright sprites turned to face you every compositor frame, in the standing universe. Each box
+//! follows its track's filter states (position and velocity, tracker.rs) played back behind the newest one, so there
+//! is always a segment to be in, and fades in and out rather than popping.
 use std::collections::VecDeque;
 
 use crate::draw;
@@ -106,7 +106,8 @@ impl Boxes {
         let h = position(head);
         let now_s = now as f64 / 1e9;
         let mut log = String::new(); // each shown box relative to the head
-        // In the order they were found, so each keeps its overlay while the others come and go.
+        // In the order they were found: a new track takes the next overlay, and the later ones move up one when one
+        // goes.
         let mut order: Vec<&Track> = tracker.tracks.iter().filter(|t| opacity(t, now_s) > 0.0).collect();
         order.sort_by_key(|t| t.id);
         let mut n = 0;

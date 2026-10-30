@@ -102,7 +102,7 @@ const ROWS: usize = {
 /// Detection Resolution's names for SIZES.
 const SIZE_NAMES: [&str; SIZES.len()] = ["Low", "Medium", "High"];
 
-/// The detection settings are greyed out while Enabled is off.
+/// Everything but Enabled and Start with SteamVR is greyed out while Enabled is off.
 const NEEDS_ENABLED: fn(&Settings) -> bool = |s| !s.enabled;
 
 struct Control {

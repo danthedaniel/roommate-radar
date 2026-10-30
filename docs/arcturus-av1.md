@@ -204,9 +204,8 @@ the headset still):
 - **Rate and slots:** a 2-frame ring at 60.0 fps (16.67 ms every frame); slots 2 and 3 stay unused.
 - **Clock:** the first double in the frame info runs ~2.11 s ahead of `CLOCK_MONOTONIC`, like the V4L2 camera clock,
   so the same offset tracking applies. The second double is ~1 ms earlier, sometimes one frame earlier. (The V4L2
-  timestamps themselves ran ~2.0–2.17 s ahead all day, with or without the add-on, not the ~210 ms noted earlier in
-  `packages/roommate-radar/README.md`. camserver's offset tracking absorbs it and logs "camera clock … from
-  CLOCK_MONOTONIC" once.)
+  timestamps themselves ran ~2.0–2.17 s ahead all day, with or without the add-on; camserver's offset tracking absorbs
+  it.)
 - **Hand-off to the app:** an fd sent with `SCM_RIGHTS` over a Unix socket in `/dev/shm` reaches a process inside
   the Steam Linux Runtime 4 container (`SteamLinuxRuntime_4-arm64/run`). There the container's Mesa imports it as NV12
   UBWC, and the copy-out is the correct frame.

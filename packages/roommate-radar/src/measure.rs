@@ -121,8 +121,10 @@ const CENTER_REL: f32 = 0.03;
 /// A box's bottom edge's noise (px), plus BOTTOM_REL of its height, for floor_depth().
 const BOTTOM_PX: f32 = 1.5;
 const BOTTOM_REL: f32 = 0.02;
-/// Where feet or paws meet the floor relative to the box's bottom edge, as a fraction of the distance.
-const CONTACT_REL: f32 = 0.06; // fitted: it reads 3-9% short beyond 3 m (the box bottom below the feet), 1-6 cm scatter
+/// How short the box's bottom edge reads the floor contact, as a fraction of the distance (the box's bottom is below
+/// the feet or paws), and how far that varies: fitted, 3-9% short beyond 3 m, 1-6 cm scatter.
+const CONTACT_REL: f32 = 0.06;
+const CONTACT_SPREAD: f32 = 0.03;
 /// Floor contact and stereo further apart than this many std devs: not standing on the floor (sitting, behind
 /// furniture, cut off at the view's edge), and floor contact is left out.
 const CONTACT_GATE: f32 = 2.5;
@@ -133,8 +135,8 @@ const VIEW_MARGIN: f32 = 0.04;
 
 /// Depth (head frame) at which the box's bottom edge meets the floor (standing universe y = 0), and its std dev. For
 /// something standing on the floor with its feet in view, a far better range at a distance than stereo's: the
-/// camera's height is a 1.6 m baseline, stereo's is 10.6 cm. None if the bottom edge is cut off by the view, or isn't
-/// looking down onto the floor.
+/// camera's height is a 1.6 m baseline, stereo's is 10.6 cm. Corrected for CONTACT_REL. None if the bottom edge is cut
+/// off by the view, or isn't looking down onto the floor.
 fn floor_depth(o: &Obj, head: &HmdMatrix34_t) -> Option<(f32, f32)> {
     let cam = apply(head, o.origin);
     let dir = apply(head, (o.corners[2] + o.corners[3]) * 0.5) - cam;
@@ -142,11 +144,11 @@ fn floor_depth(o: &Obj, head: &HmdMatrix34_t) -> Option<(f32, f32)> {
     if o.clip[3] || cam.y < 0.5 || down < MIN_DOWN {
         return None;
     }
-    let z = o.dist * cam.y / -dir.y;
+    let z = o.dist * cam.y / -dir.y * (1.0 + CONTACT_REL);
     let h_px = (o.corners[0].y - o.corners[3].y) / o.dist * o.f;
     let sigma_angle = (BOTTOM_PX + BOTTOM_REL * h_px) / o.f;
     // The range is H / tan(a), a the angle below the horizon: dR/da = H / sin^2 a
-    Some((z, cam.y / (down * down) * sigma_angle + CONTACT_REL * z))
+    Some((z, cam.y / (down * down) * sigma_angle + CONTACT_SPREAD * z))
 }
 
 /// The object's depth (head frame), its std dev, and whether it's weak (seen in one view only, depth from the floor):
@@ -388,16 +390,17 @@ mod tests {
     #[test]
     fn floor_contact() {
         let set = Settings { max_dist: 6.0, ..Settings::default() };
-        // Standing 4 m ahead, feet on the floor (1.6 m below the eyes): stereo reading 4.6 m with a 1 m std dev is
-        // pulled to the floor contact's 4 m, and its noise shrinks.
+        // Box bottom on the floor 4 m ahead (1.6 m below the eyes), so the feet are CONTACT_REL farther: stereo reading
+        // 4.6 m with a 1 m std dev is pulled to the floor contact's, and its noise shrinks.
         let standing = |z: f32| obj(0, z, [[-0.3, 0.1, -z], [0.3, 0.1, -z], [0.3, -1.6, -z], [-0.3, -1.6, -z]]);
+        let feet = 4.0 * (1.0 + CONTACT_REL);
         let seen = Obj { sigma_z: 1.0, ..scale(standing(4.0), 4.6) };
         let m = meas(&[seen], &[], &set)[0];
-        assert!((m.p.z + 4.0).abs() < 0.15 && m.sigma_ray < 0.5 && !m.weak, "{m:?}");
+        assert!((m.p.z + feet).abs() < 0.15 && m.sigma_ray < 0.5 && !m.weak, "{m:?}");
         // Seen in one view only (on the 1 m plane): the floor contact's depth alone, weak.
         let one = Obj { stereo: false, sigma_z: 0.0, ..scale(standing(4.0), 1.0) };
         let m = meas(&[one], &[], &set)[0];
-        assert!((m.p.z + 4.0).abs() < 0.01 && m.weak);
+        assert!((m.p.z + feet).abs() < 0.01 && m.weak);
         // Sitting (bottom edge 0.5 m up), stereo good: the floor contact (far behind) is left out.
         let sitting = obj(0, 3.0, [[-0.3, 0.1, -3.0], [0.3, 0.1, -3.0], [0.3, -1.1, -3.0], [-0.3, -1.1, -3.0]]);
         assert!((meas(&[sitting], &[], &set)[0].p.z + 3.0).abs() < 1e-4);

@@ -1,7 +1,8 @@
 //! camserver: publish the newest normal-exposure SLAM and side camera frames to shared memory. Runs on a thread inside vrserver
 //! (lib.rs): pidfd_getfd on XRService needs ptrace rights, which Yama (ptrace_scope=1) only grants to XRService's
 //! ancestors (vrserver is its parent) or CAP_SYS_PTRACE.
-//! Read-only with respect to XRService: VIDIOC_QUERYBUF + mmap of its dmabufs, nothing else.
+//! Read-only with respect to XRService: VIDIOC_G_FMT and VIDIOC_QUERYBUF on its capture queues, mmap and
+//! DMA_BUF_IOCTL_SYNC (read) on its dmabufs, nothing that changes their state.
 use std::collections::HashMap;
 use std::collections::hash_map::Entry;
 use std::fs;
@@ -392,7 +393,6 @@ pub fn run() {
     let mut bufs = Vec::new();
     let mut pidfd: Option<OwnedFd> = None;
     let mut why_last = String::new();
-    let mut clock_warned = false;
     let (mut published, mut last_report) = (0u64, shm::now_ns());
 
     while !QUIT.load(Ordering::Relaxed) {
@@ -453,15 +453,11 @@ pub fn run() {
             if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
                 continue;
             }
-            // The camera clock runs ~210 ms ahead of CLOCK_MONOTONIC. Track the offset as the max of (timestamp -
-            // arrival), over all cameras: the least-delayed observation bounds it best.
+            // The camera clock runs ahead of CLOCK_MONOTONIC (~2 s on the Frame, in the status line below). Track
+            // the offset as the max of (timestamp - arrival), over all cameras: the least-delayed observation bounds
+            // it best.
             let off = bufs[0].ts_ns as i64 - arrival as i64;
             clock_offset_ns = Some(clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
-            // The estimate adapts to any offset; one far from the usual ~210 ms means the camera clock changed.
-            if off.abs() > 1_000_000_000 && !clock_warned {
-                log!("{}: camera clock {} ms from CLOCK_MONOTONIC (was ~210 ms)\n", c.node, off / 1_000_000);
-                clock_warned = true;
-            }
 
             // Newest completed frame that is a normal exposure (not the ~37us controller-LED one).
             for b in &bufs {

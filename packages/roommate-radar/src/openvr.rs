@@ -130,7 +130,8 @@ impl Vr {
 
     // IVRChaperoneSetup
 
-    /// The play area's boundary (standing universe) as its walls' ends on the floor, [x, z]; empty if there's none.
+    /// SteamVR's boundary (the live collision bounds, standing universe; not the play area's rectangle) as its walls'
+    /// ends on the floor, [x, z]; empty if there's none.
     /// Reread from disk: this process's copy is loaded when it connects and SteamVR doesn't update it when the
     /// boundary is redrawn (it sends ChaperoneDataHasChanged/UniverseHasChanged instead).
     pub fn play_area_walls(&self) -> Vec<[[f32; 2]; 2]> {
@@ -160,7 +161,7 @@ impl Vr {
         call!(self.apps, SetApplicationAutoLaunch, c(key).as_ptr() as *mut c_char, on)
     }
 
-    /// A game is starting, loading or running (its intro counts); passthrough itself isn't reported to apps.
+    /// A game is starting, running, waiting or quitting (its intro counts); passthrough itself isn't reported to apps.
     pub fn game_running(&self) -> bool {
         call!(self.apps, GetSceneApplicationState) != EVRSceneApplicationState_None
     }

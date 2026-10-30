@@ -37,7 +37,7 @@ pub struct Obj {
     pub sigma_z: f32,     // its std dev (m); 0 when seen in one view only
     pub f: f32,           // the views' focal length (px)
     pub corners: [V3; 4], // head frame at capture time: TL, TR, BR, BL
-    pub clip: [bool; 4],  // edges x0, y0, x1, y1 cut off by the view's edge (in both views): not the object's
+    pub clip: [bool; 4],  // edges x0, y0, x1, y1 cut off by the view's edge (stereo: in both views): not the object's
     pub stereo: bool,     // false: seen in one view only, corners are on the 1 m plane
     pub origin: V3,       // camera position (head frame) the corners were projected from
     pub disp: Disparity,  // how dist was measured, for the trace
@@ -425,7 +425,8 @@ pub fn match_views(
         };
         right_used[j] = true;
         let (r, rc, p) = (&views[1][j], &clips[1][j], pairs[i][j].as_ref().unwrap());
-        let (hmin, hmax) = heights(l.cls);
+        let ((lo0, hi0), (lo1, hi1)) = (heights(l.cls), heights(r.cls)); // either view's class, as in pair()
+        let (hmin, hmax) = (lo0.min(lo1), hi0.max(hi1));
         let h = (l.y1 - l.y0).max(r.y1 - r.y0);
         // At least what the two sides disagree by: a seated person's sides gave 15 and 29 px when their patches all
         // failed (true: 10), and the edges alone put them at half their distance.

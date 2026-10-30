@@ -16,7 +16,7 @@ const FADE_S: f64 = 0.3; // then fades out over this long
 const TAU_S: f32 = 0.2; // a chevron's position follows its object's sightings with this time constant (s)
 const DIST: f32 = 0.6; // in front of the eyes (m)
 const ANGLE_DEG: f32 = 35.0; // out from straight ahead: in view (SteamVR's view and lens outline both put it past 54)
-const MAX_ELEVATION_DEG: f32 = 30.0; // up or down at most
+const MAX_ELEVATION_DEG: f32 = 30.0; // up or down at most, from straight ahead (~25 deg of elevation at ANGLE_DEG out)
 const WIDTH: f32 = 0.05; // m; the texture is 2:3
 const LINGER_S: f64 = 0.5; // no chevron on a side for this long after a box was there
 const SAME_M: f32 = 1.0; // a sighting of the same class this close (horizontally) to an earlier one is the same object
@@ -80,7 +80,7 @@ impl Hud {
     }
 
     /// The chevron's height (m, head frame) on side k for something at q (head frame): seen from the eyes, at its
-    /// elevation, but in view.
+    /// elevation, but in view (tans: up and down from straight ahead).
     fn height(&self, k: usize, q: V3) -> f32 {
         let b = self.base[k];
         let y = q.y / q.x.hypot(q.z) * b.x.hypot(b.z);
@@ -131,7 +131,7 @@ mod tests {
     use super::*;
 
     fn hud() -> Hud {
-        // Chevrons ~50 deg out, going 45 deg up and down
+        // Chevrons ~50 deg out, going 45 deg up and down from straight ahead (33 deg of elevation)
         Hud::new([0; 2], [v3(-0.7, 0.0, -DIST), v3(0.7, 0.0, -DIST)], [(-1.0, 1.0); 2])
     }
 

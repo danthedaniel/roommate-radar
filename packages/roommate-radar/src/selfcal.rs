@@ -6,7 +6,7 @@
 //! on each camera, so neither view's direction moves by more than half the error):
 //!   - about the head's x and z axes (pitch, roll) from the matches' row offsets, which a rectified pair has none of,
 //!     whatever the scene (pooled over the last POOL_RUNS runs: a plain room leaves too few in one);
-//!   - about y (yaw: an offset in disparity) from the floor, whose distance along each ray below the horizon follows from
+//!   - about y (yaw: an offset in disparity) from the floor, whose depth along each ray below the horizon follows from
 //!     the head pose (SteamVR's floor, y = 0). The floor is the farthest thing such a ray can meet, so the floor's matches
 //!     are the low edge of (measured - floor) disparity, at the offset: FLOOR_EDGE of all the floor samples, per unit of
 //!     1 + x^2 (how a yaw shifts disparity across the view). Fitting that edge per floor distance, with a slope for an
@@ -259,8 +259,8 @@ mod tests {
 
     #[test]
     fn finds_the_misalignment() {
-        // The left view off by 0.66 deg pitch, 1.1 deg yaw, -0.5 deg roll (what the Frame measured): the correction
-        // converges to undo it, to a few hundredths of a degree.
+        // The left view off by 0.66 deg pitch, 1.1 deg yaw, -0.5 deg roll (the Frame's size; its yaw is ~0.75): the
+        // correction converges to undo it, to a few hundredths of a degree.
         let err = [0.66f32, 1.1, -0.5].map(f32::to_radians);
         for view in [(S, F), S640] {
             let w = converge(err, -1.6, view);

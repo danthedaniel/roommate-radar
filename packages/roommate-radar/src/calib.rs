@@ -112,7 +112,7 @@ pub fn rotated(c: &CamCal, w: [f32; 3]) -> CamCal {
 
 // ---------------------------------------------------------------------------------------------
 // Rectification: virtual pinhole camera at the SLAM camera's position, axes aligned with the head
-// (x right, y down, looking along head -z). Both views share orientation -> rectified stereo pair.
+// (x right, y up, looking along head -z). Both views share orientation -> rectified stereo pair.
 
 /// A rectified view's valid region: per row the valid columns [first, last + 1), per column the valid rows; (S, 0)
 /// where there are none. The fisheye's image is convex, so that's all of it.
@@ -133,7 +133,7 @@ impl Valid {
         x - r.0 >= margin && r.1 - x >= margin && y - c.0 >= margin && c.1 - y >= margin
     }
 
-    /// The region's left (right) edge, at its furthest in (out) over rows y0..y1 (px): a box edge there is cut off.
+    /// The region's left (right) edge, at its furthest in over rows y0..y1 (px): a box edge there is cut off.
     pub fn left(&self, y0: f32, y1: f32) -> f32 {
         self.span(&self.rows, y0, y1).0
     }

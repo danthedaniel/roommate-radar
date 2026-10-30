@@ -18,9 +18,9 @@ instead, head-locked (`hud.rs`): seen by a side camera (`upper_left`/`upper_righ
 rectified to level views looking straight left and right, stacked like the SLAM pair; one view, so range from the
 floor only), or at the edge of the SLAM views by one camera only with no box near them. Prior art and the measurements still to take are in
 [docs/detection-tracking-prior-art.md](../../docs/detection-tracking-prior-art.md). Boxes with a controller, or the
-forearm leading to it, inside them (as seen from the camera, at any depth) are your arms and are ignored. Developer
-builds write each detector frame (boxes, objects, measurements, tracks) to `/tmp/roommate-radar-trace.jsonl`
-(`trace.rs`; at 32 MB it moves to `.1` and a new one starts, as /tmp is RAM).
+forearm leading to it, inside them (as seen from the camera, from 40 cm behind the box to 80 cm in front of it) are
+your arms and are ignored. Developer builds write each detector frame (boxes, objects, measurements, tracks) to
+`/tmp/roommate-radar-trace.jsonl` (`trace.rs`; at 32 MB it moves to `.1` and a new one starts, as /tmp is RAM).
 
 - Installed like a Store app (see below): runs in the Steam Linux Runtime 4 container, started by Steam from the
   Library or, when SteamVR starts, by its driver (through Steam, below). Log: `/tmp/roommate-radar.log`.
@@ -86,8 +86,9 @@ dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `hud.rs` (the side chev
   `align` in the settings file for the next start. Measured on the Frame: steady over head angle and across reboots
   (0.1 px), drifting by hundredths of a degree a minute. The `kb_spline` lens model in the calibration only moves
   things by ~0.3 px.
-- Camera timestamps are `TIMESTAMP_MONOTONIC`-flagged but run ~210–230 ms ahead of
-  `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times. `LATENCY_MS` (`detector.rs`) covers the rest.
+- Camera timestamps are `TIMESTAMP_MONOTONIC`-flagged but run ~2.0–2.2 s ahead of
+  `CLOCK_MONOTONIC`; camserver tracks the offset from arrival times and logs it every 5 s. `LATENCY_MS`
+  (`detector.rs`) covers the rest.
 - The rectified views share the head's orientation, so they're a rectified stereo pair with a
   105.6 mm horizontal baseline.
 

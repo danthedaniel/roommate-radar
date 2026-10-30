@@ -24,7 +24,7 @@ struct Plane<const N: usize>(UnsafeCell<[u8; N]>);
 #[repr(C)]
 pub struct Slot<const N: usize = FRAME> {
     seq: AtomicU64,       // odd while the writer is copying
-    t_mono_ns: AtomicU64, // camera timestamp mapped to CLOCK_MONOTONIC (frame arrival)
+    t_mono_ns: AtomicU64, // capture time: the camera timestamp mapped to CLOCK_MONOTONIC (camserver's offset)
     y: Plane<N>,
 }
 

@@ -3,7 +3,7 @@
 // openvr_capi.h (OpenVR SDK v2.15.6) through bindgen 0.73, for openvr.rs: the FnTables of the interfaces roommate-radar
 // uses and the types they take. Regenerate with:
 //   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications|ChaperoneSetup)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
-//     --default-enum-style consts --no-layout-tests --no-doc-comments --no-prepend-enum-name (and these --raw-lines) \
+//     --default-enum-style consts --no-layout-tests --no-doc-comments (and these --raw-lines) \
 //     -- -x c -target aarch64-unknown-linux-gnu -ffreestanding
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code)]
 
