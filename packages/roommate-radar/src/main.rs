@@ -105,10 +105,12 @@ fn spawn_detector() -> Option<std::thread::JoinHandle<()>> {
     }
     Some(std::thread::spawn(|| {
         // Stays up to show the error in the tab
-        if let Err(e) = detector::run_loop() {
+        let r = std::panic::catch_unwind(detector::run_loop)
+            .unwrap_or_else(|_| Err("Detector crashed (see the log)".into()));
+        if let Err(e) = r {
             eprintln!("detector: {e}");
             detector::LOADING.store(0, Ordering::Relaxed);
-            *detector::PROBLEM.lock().unwrap() = e;
+            *detector::PROBLEM.lock().unwrap_or_else(|p| p.into_inner()) = e;
         }
     }))
 }
@@ -201,7 +203,7 @@ fn run() -> i32 {
         }
 
         let d = {
-            let d = detector::DETS.lock().unwrap();
+            let d = detector::DETS.lock().unwrap_or_else(|p| p.into_inner()); // the detector may have crashed
             (d.id != seen_det_id).then(|| d.clone())
         };
         let now = now_ns();
@@ -274,7 +276,7 @@ fn run() -> i32 {
         } else if detector::LOADING.load(Ordering::Relaxed) != 0 && !detector::WAITING.load(Ordering::Relaxed) {
             format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
         } else if detector::WAITING.load(Ordering::Relaxed) || now - last_det_ns > 2_000_000_000 {
-            let p = detector::PROBLEM.lock().unwrap();
+            let p = detector::PROBLEM.lock().unwrap_or_else(|p| p.into_inner());
             if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else if cfg!(feature = "developer") {
             format!("Watching  ·  YOLO {:.0} ms  ·  {n} in view", YOLO_MS.load())

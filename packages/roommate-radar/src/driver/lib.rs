@@ -94,7 +94,8 @@ static THREADS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new()); // camserve
 fn log_line(line: &str) {
     let log = DRIVER_LOG.load(Ordering::Acquire);
     if log.is_null() {
-        eprint!("{line}");
+        // Not eprint!, which panics (aborting vrserver, as it unwinds into C) if stderr fails
+        let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         return;
     }
     let line = CString::new(line.replace('\0', "")).unwrap();

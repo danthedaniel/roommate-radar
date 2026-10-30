@@ -193,7 +193,8 @@ pub fn measurements(
     objs.iter()
         .filter(|o| wanted(o.cls, set))
         .filter_map(|o| {
-            let (z, sigma_z, weak) = depth(o, head)?;
+            // Not finite: stereo's sigma_z is 0 at its least disparity, which fusing with the floor's makes NaN
+            let (z, sigma_z, weak) = depth(o, head).filter(|d| d.0.is_finite() && d.1.is_finite())?;
             let corners = o.corners.map(|c| o.origin + (c - o.origin) * (z / o.dist));
             let o = &Obj { dist: z, sigma_z, corners, ..*o };
             if holds_controller(o, &arms) || (set.hands && own_arm(o)) {

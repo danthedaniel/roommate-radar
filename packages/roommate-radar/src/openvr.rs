@@ -279,20 +279,20 @@ impl Vr {
 
     /// The Vulkan extensions the compositor needs: of the instance (phys = None), or of the device phys.
     pub fn vulkan_extensions(&self, phys: Option<u64>) -> Vec<CString> {
-        let mut buf = [0 as c_char; 4096];
+        let mut buf = [0u8; 4096];
         if let Some(cm) = self.compositor {
             match phys {
-                None => call!(cm, GetVulkanInstanceExtensionsRequired, buf.as_mut_ptr(), buf.len() as u32),
+                None => call!(cm, GetVulkanInstanceExtensionsRequired, buf.as_mut_ptr().cast(), buf.len() as u32),
                 Some(p) => call!(
                     cm,
                     GetVulkanDeviceExtensionsRequired,
                     p as *mut VkPhysicalDevice_T,
-                    buf.as_mut_ptr(),
+                    buf.as_mut_ptr().cast(),
                     buf.len() as u32
                 ),
             };
         }
-        let s = unsafe { CStr::from_ptr(buf.as_ptr()) }.to_string_lossy().into_owned();
+        let s = CStr::from_bytes_until_nul(&buf).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         s.split(' ').filter(|e| !e.is_empty()).map(c).collect()
     }
 }

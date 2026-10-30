@@ -24,6 +24,7 @@ const DMA_BUF_SYNC_END: u64 = 4;
 const DMA_BUF_SYNC_READ: u64 = 1;
 const V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE: u32 = 9;
 const V4L2_BUF_FLAG_QUEUED: u32 = 2;
+const V4L2_MEMORY_DMABUF: u32 = 4;
 const VIDEO_MAX_PLANES: usize = 8;
 
 #[repr(C)]
@@ -295,7 +296,8 @@ fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
             // EINVAL = past last index
             return std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL);
         }
-        if b.flags & V4L2_BUF_FLAG_QUEUED != 0 || b.timestamp.tv_sec == 0 {
+        // Only a dmabuf's planes[0].m is an fd (else an offset, which may name some other file of ours to map)
+        if b.flags & V4L2_BUF_FLAG_QUEUED != 0 || b.timestamp.tv_sec == 0 || b.memory != V4L2_MEMORY_DMABUF {
             continue;
         }
         out.push(Buf {

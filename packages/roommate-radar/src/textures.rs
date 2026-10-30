@@ -59,8 +59,13 @@ impl Textures {
 
     /// Shows the pixels on overlay `ov`.
     pub fn set(&mut self, ov: VROverlayHandle_t, img: &Image) {
-        let shown = self.0.as_mut().is_some_and(|v| unsafe { v.set(ov, img) }.is_ok());
-        if !shown {
+        if let Some(Err(e)) = self.0.as_mut().map(|v| unsafe { v.set(ov, img) }) {
+            // For good: after a failed submit or wait the command buffer and staging buffer may still be in use (the
+            // device lost), and reusing them is undefined. Left as they are, not freed, for the same reason.
+            eprintln!("roommate-radar: Vulkan textures: {e}; using SetOverlayRaw");
+            std::mem::forget(self.0.take());
+        }
+        if self.0.is_none() {
             vr().set_raw(ov, &img.px, img.w as u32, img.h as u32);
         }
     }

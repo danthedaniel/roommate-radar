@@ -73,6 +73,14 @@ pub fn run() {
     if STOP.load(Ordering::Relaxed) || app_running() {
         return;
     }
+    // Steam closing the pipe under the write would SIGPIPE vrserver as a whole: blocked on this thread, the write gets
+    // EPIPE instead (and the pending signal goes with the thread).
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
     // Non-blocking: with no Steam reading the pipe, the open fails instead of waiting for one.
     let pipe =
         fs::OpenOptions::new().write(true).custom_flags(libc::O_NONBLOCK).open(format!("{home}/.steam/steam.pipe"));

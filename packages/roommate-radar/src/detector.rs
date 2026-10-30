@@ -227,6 +227,15 @@ fn stretch(input: &mut [u8]) {
     }
 }
 
+/// Camera `name`'s calibration, if it fits its w x h frames: Rectifier::apply reads within its size.
+fn load_cal(name: &str, w: usize, h: usize) -> Result<calib::CamCal, String> {
+    let c = calib::load(shm::CALIB_DIR, name)?;
+    if !(2..=w).contains(&c.w) || !(2..=h).contains(&c.h) {
+        return Err(format!("calibration: {name} is {}x{}, its frames {w}x{h}", c.w, c.h));
+    }
+    Ok(c)
+}
+
 /// One run at size S, until SIZE changes or quit.
 fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
@@ -239,7 +248,7 @@ fn run(s: usize) -> Result<(), String> {
     };
     LOADING.store(s as i32, Ordering::Relaxed);
     // After the frames: the calibration is the driver's copy of the factory one
-    let cal = [calib::load(shm::CALIB_DIR, shm::CAM_NAMES[0])?, calib::load(shm::CALIB_DIR, shm::CAM_NAMES[1])?];
+    let cal = [load_cal(shm::CAM_NAMES[0], shm::W, shm::H)?, load_cal(shm::CAM_NAMES[1], shm::W, shm::H)?];
     let baseline = cal[1].t[0] - cal[0].t[0]; // right cam is at +x in the head frame
     let origins = cal.map(|c| v3(c.t[0], c.t[1], c.t[2]));
     // The rectifiers with the correction w, half of it on each camera, and the views they make
@@ -253,7 +262,7 @@ fn run(s: usize) -> Result<(), String> {
         (rect, view)
     };
     // The side views: rectifier, camera position in its view's frame, where it has image. None without their calibration
-    let side = match shm::SIDE_NAMES.map(|n| calib::load(shm::CALIB_DIR, n)) {
+    let side = match shm::SIDE_NAMES.map(|n| load_cal(n, shm::SIDE_W, shm::SIDE_H)) {
         [Ok(l), Ok(r)] => Some([(l, 0), (r, 1)].map(|(c, k)| {
             let rect = Rectifier::new(&calib::rotated(&c, [0.0, -SIDE_YAW[k], 0.0]), s, HFOV_DEG, shm::SIDE_W);
             let valid = rect.valid();
@@ -303,7 +312,7 @@ fn run(s: usize) -> Result<(), String> {
             }
         }
         // Both cameras are hardware-synchronized: wait for a pair with the same capture time.
-        if t_ns[0] == 0 || t_ns[0] == last_pair || (t_ns[0] as i64 - t_ns[1] as i64).abs() > 2_000_000 {
+        if t_ns[0] == 0 || t_ns[0] == last_pair || t_ns[0].abs_diff(t_ns[1]) > 2_000_000 {
             *PROBLEM.lock().unwrap() = shm::problem(&hdr);
             WAITING.store(now_ns() - last_pair_ns > 1_000_000_000, Ordering::Relaxed);
             std::thread::sleep(Duration::from_millis(1));
