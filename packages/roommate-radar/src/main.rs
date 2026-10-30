@@ -35,7 +35,7 @@ use std::time::Duration;
 use detector::{QUIT, YOLO_MS};
 use openvr::{HmdMatrix34_t, TrackedDevicePose_t, vr};
 use shm::now_ns;
-use v3::{V3, v3};
+use v3::V3;
 
 // The head moving more than this (m) between two frames is tracking relocalizing: the standing universe moved (6 m
 // and 37 deg on the Frame, when it recognized the room a minute after standby) and the tracks are elsewhere now.
@@ -186,7 +186,7 @@ fn run() -> i32 {
         }
         let (head_now, head_valid) = head_pose(0.0);
         if head_valid {
-            let p = v3(head_now.m[0][3], head_now.m[1][3], head_now.m[2][3]);
+            let p = measure::position(&head_now);
             if last_head.is_some_and(|q| (p - q).len() > POSE_JUMP_M) {
                 tracker.tracks.clear();
             }
@@ -205,6 +205,7 @@ fn run() -> i32 {
             (d.id != seen_det_id).then(|| d.clone())
         };
         let now = now_ns();
+        let now_s = now as f64 / 1e9;
         if let Some(d) = d {
             seen_det_id = d.id;
             last_det_ns = now;
@@ -226,12 +227,11 @@ fn run() -> i32 {
                 for m in ms.iter().filter(|m| m.weak && chevron(m)) {
                     let q = measure::to_head(&head, m.p);
                     if q.x.atan2(-q.z).abs() > EDGE_RAD {
-                        hud.saw((q.x > 0.0) as usize, m.cls, m.score, m.p, now as f64 / 1e9, "edge of view");
+                        hud.saw((q.x > 0.0) as usize, m.cls, m.score, m.p, now_s, "edge of view");
                     }
                 }
                 // and by the side cameras, each at its own capture time
-                for (k, objs) in d.side.iter().flat_map(|s| s.objs.iter().enumerate()) {
-                    let t = d.side.as_ref().unwrap().t_capture_ns[k];
+                for (k, (objs, &t)) in d.side.iter().flat_map(|s| s.objs.iter().zip(&s.t_capture_ns).enumerate()) {
                     let ago = (t as i64 - now as i64) as f32 / 1e9;
                     if let (head, true) = head_pose(ago)
                         && t != 0
@@ -239,7 +239,7 @@ fn run() -> i32 {
                         let ms =
                             measure::measurements(objs, &head, detector::SIDE_YAW[k], &controllers(ago), walls, &set);
                         for m in ms.iter().filter(chevron) {
-                            hud.saw(k, m.cls, m.score, m.p, now as f64 / 1e9, "side camera");
+                            hud.saw(k, m.cls, m.score, m.p, now_s, "side camera");
                         }
                     }
                 }
@@ -258,9 +258,9 @@ fn run() -> i32 {
             }
         }
 
-        let n = boxes.show(&tracker, &head_now, now, now as f64 / 1e9 - lag_s as f64, &mut textures);
+        boxes.show(&tracker, &head_now, now, now_s - lag_s as f64, &mut textures);
+        let n = boxes.drawn.len();
         // The boxes, and the tracks matched lately that aren't boxes yet (tentative) or any more
-        let now_s = now as f64 / 1e9;
         let recent = tracker.tracks.iter().filter(|t| now_s - t.last_seen < tracker::SHOW_S).map(|t| t.p);
         let ahead: Vec<V3> = boxes.drawn.iter().copied().chain(recent).collect();
         hud.show(now_s, &head_now, &ahead, &mut textures);
@@ -271,12 +271,9 @@ fn run() -> i32 {
             "Restart SteamVR to finish setup".into()
         } else if !run {
             "Paused: no game running".into()
-        } else if detector::WAITING.load(Ordering::Relaxed) {
-            let p = detector::PROBLEM.lock().unwrap();
-            if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
-        } else if detector::LOADING.load(Ordering::Relaxed) != 0 {
+        } else if detector::LOADING.load(Ordering::Relaxed) != 0 && !detector::WAITING.load(Ordering::Relaxed) {
             format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
-        } else if now - last_det_ns > 2_000_000_000 {
+        } else if detector::WAITING.load(Ordering::Relaxed) || now - last_det_ns > 2_000_000_000 {
             let p = detector::PROBLEM.lock().unwrap();
             if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else if cfg!(feature = "developer") {

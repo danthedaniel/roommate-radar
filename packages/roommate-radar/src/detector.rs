@@ -52,7 +52,7 @@ impl AtomicF32 {
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone)]
 pub struct DetectionSet {
     pub id: u64,
     pub t_capture_ns: u64,

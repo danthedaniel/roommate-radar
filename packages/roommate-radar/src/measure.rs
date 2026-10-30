@@ -10,7 +10,7 @@ use crate::tracker::Meas;
 use crate::v3::{V3, v3};
 
 /// person, cat, dog
-pub fn wanted(cls: usize, set: &Settings) -> bool {
+fn wanted(cls: usize, set: &Settings) -> bool {
     if cls == 0 { set.people } else { (cls == 15 || cls == 16) && set.pets }
 }
 

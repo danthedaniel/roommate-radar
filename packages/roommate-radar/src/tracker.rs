@@ -110,9 +110,14 @@ fn noise(m: &Meas, scale: f32) -> M3 {
     mat(|i, j| (if i == j { l } else { 0.0 }) + (r - l) * u[i] * u[j])
 }
 
-/// How much noisier than measured a detection is taken to be: weak ones (low confidence, one view) count for less.
-fn noise_scale(m: &Meas) -> f32 {
-    if m.weak || m.score < HIGH { WEAK_NOISE } else { 1.0 }
+/// Whether a detection is strong: confident and seen in both views. Weak ones only extend tracks, and count for less.
+fn strong(m: &Meas) -> bool {
+    !m.weak && m.score >= HIGH
+}
+
+/// A track's motion state started from m alone: at m, still, as uncertain as m (position, position-velocity, velocity).
+fn start(m: &Meas) -> (V3, V3, M3, M3, M3) {
+    (m.p, V3::default(), noise(m, 1.0), diag(0.0), diag(VEL0 * VEL0))
 }
 
 /// Squared Mahalanobis distance between a and b under covariance s, and ln|s|; None if too far apart or singular.
@@ -162,13 +167,14 @@ pub struct Track {
 
 impl Track {
     fn new(id: u64, m: &Meas, t: f64) -> Track {
+        let (p, v, pa, pb, pc) = start(m);
         let mut tr = Track {
             id,
-            p: m.p,
-            v: V3::default(),
-            pa: noise(m, 1.0),
-            pb: diag(0.0),
-            pc: diag(VEL0 * VEL0),
+            p,
+            v,
+            pa,
+            pb,
+            pc,
             w: m.w,
             h: m.h,
             t,
@@ -186,7 +192,6 @@ impl Track {
         tr
     }
 
-    /// The position covariance.
     pub fn cov(&self) -> M3 {
         self.pa
     }
@@ -215,7 +220,7 @@ impl Track {
         let k = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
         let dw = if m.clip_w { 0.0 } else { (m.w * k - self.w).abs() };
         let dh = if m.clip_h { 0.0 } else { (m.h * k - self.h).abs() };
-        add(&noise(m, noise_scale(m)), &diag((dw.max(dh) / 2.0).powi(2)))
+        add(&noise(m, if strong(m) { 1.0 } else { WEAK_NOISE }), &diag((dw.max(dh) / 2.0).powi(2)))
     }
 
     /// Squared Mahalanobis distance of m from the prediction, and ln|S|.
@@ -227,8 +232,7 @@ impl Track {
     fn update(&mut self, m: &Meas, t: f64) {
         if t - self.last_seen > REACQUIRE {
             // Back after a long gap (out of view, occluded): the coasted velocity is a guess, start over from here.
-            (self.p, self.v, self.pa, self.pb, self.pc) =
-                (m.p, V3::default(), noise(m, 1.0), diag(0.0), diag(VEL0 * VEL0));
+            (self.p, self.v, self.pa, self.pb, self.pc) = start(m);
             self.history.clear();
         } else if let Some((si, _)) = inv(&add(&self.pa, &self.meas_noise(m))) {
             let (kp, kv) = (mul(&self.pa, &si), mul(&tr(&self.pb), &si));
@@ -415,8 +419,7 @@ impl Tracker {
         for tr in &mut self.tracks {
             tr.predict(t);
         }
-        let (strong, weak): (Vec<usize>, Vec<usize>) =
-            (0..dets.len()).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
+        let (strong, weak): (Vec<usize>, Vec<usize>) = (0..dets.len()).partition(|&i| strong(&dets[i]));
         let mut matched = vec![false; self.tracks.len()];
         let unused = self.match_dets(&dets, &strong, &mut matched, t, false);
         // Not tentative tracks (ByteTrack): a hand's box and a weak one 0.7 m below it confirmed a track that flew off.

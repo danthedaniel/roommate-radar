@@ -41,13 +41,12 @@ const FLOOR_DEPTH: (f32, f32) = (0.8, 8.0); // and meeting the floor this far aw
 const LOG_NS: u64 = 30_000_000_000; // a status line this often
 
 /// A floor sample: (measured - floor) disparity over 1 + x^2 (px), with the yaw correction in effect when measured.
-#[derive(Clone, Copy, Debug)]
 struct Floor {
     q: f32,
     yaw: f32,
 }
 
-#[derive(Clone, Debug, Default)]
+#[derive(Default)]
 pub struct SelfCal {
     pub omega: [f32; 3], // the correction (rad, about the head's x, y, z): the left view's rotation relative to the right
     pool: VecDeque<(Vec<Match>, [f32; 3])>, // the last POOL_RUNS runs' matches, with the correction applied to each
@@ -105,7 +104,7 @@ impl SelfCal {
         };
         self.update(a, d.correction, head, v.f, v.s, v.origins[0], v.origins[1].x - v.origins[0].x);
         let mut published = detector::CORRECTION.lock().unwrap();
-        if (0..3).any(|k| (self.omega[k] - published[k]).abs() > PUBLISH_RAD) {
+        if self.moved_from(*published) {
             *published = self.omega;
         }
         if d.t_capture_ns > self.last_log_ns + LOG_NS {

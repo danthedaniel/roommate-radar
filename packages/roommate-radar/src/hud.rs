@@ -36,10 +36,10 @@ pub struct Hud {
     made: [Option<usize>; 2],    // the class each overlay's texture is for
     shown: [bool; 2],
     marks: Vec<Mark>,
-    base: [V3; 2],         // each side's chevron at eye level (head frame)
-    tans: [(f32, f32); 2], // how far down and up (tangents, < 0 down) each side's chevron can go and stay in view
-    last_show: f64,        // s
-    boxed_at: [f64; 2],    // when each side last had a box (s)
+    base: [V3; 2],      // each side's chevron at eye level (head frame)
+    max_tan: f32,       // how far down and up (tangent) the chevrons can go and stay in view
+    last_show: f64,     // s
+    boxed_at: [f64; 2], // when each side last had a box (s)
 }
 
 impl Hud {
@@ -51,13 +51,12 @@ impl Hud {
             vr().set_width(*ov, WIDTH);
         }
         let x = ANGLE_DEG.to_radians().tan() * DIST;
-        let e = MAX_ELEVATION_DEG.to_radians().tan();
-        Ok(Hud::new(ovs, [v3(-x, 0.0, -DIST), v3(x, 0.0, -DIST)], [(-e, e); 2]))
+        Ok(Hud::new(ovs, [v3(-x, 0.0, -DIST), v3(x, 0.0, -DIST)], MAX_ELEVATION_DEG.to_radians().tan()))
     }
 
-    fn new(ovs: [VROverlayHandle_t; 2], base: [V3; 2], tans: [(f32, f32); 2]) -> Hud {
+    fn new(ovs: [VROverlayHandle_t; 2], base: [V3; 2], max_tan: f32) -> Hud {
         let boxed_at = [f64::NEG_INFINITY; 2];
-        Hud { ovs, made: [None; 2], shown: [false; 2], marks: Vec::new(), base, tans, last_show: 0.0, boxed_at }
+        Hud { ovs, made: [None; 2], shown: [false; 2], marks: Vec::new(), base, max_tan, last_show: 0.0, boxed_at }
     }
 
     /// Something of class cls on side k (0 left, 1 right), with confidence score, at p (standing universe) at time t
@@ -80,11 +79,12 @@ impl Hud {
     }
 
     /// The chevron's height (m, head frame) on side k for something at q (head frame): seen from the eyes, at its
-    /// elevation, but in view (tans: up and down from straight ahead).
+    /// elevation, but in view (max_tan: up and down from straight ahead).
     fn height(&self, k: usize, q: V3) -> f32 {
         let b = self.base[k];
         let y = q.y / q.x.hypot(q.z) * b.x.hypot(b.z);
-        y.clamp(self.tans[k].0 * -b.z, self.tans[k].1 * -b.z)
+        let lim = self.max_tan * -b.z;
+        y.clamp(-lim, lim)
     }
 
     /// The chevrons at time now (s), for the head pose now; none on a side with a box (`boxes`: the boxes drawn now, and
@@ -132,7 +132,7 @@ mod tests {
 
     fn hud() -> Hud {
         // Chevrons ~50 deg out, going 45 deg up and down from straight ahead (33 deg of elevation)
-        Hud::new([0; 2], [v3(-0.7, 0.0, -DIST), v3(0.7, 0.0, -DIST)], [(-1.0, 1.0); 2])
+        Hud::new([0; 2], [v3(-0.7, 0.0, -DIST), v3(0.7, 0.0, -DIST)], 1.0)
     }
 
     #[test]

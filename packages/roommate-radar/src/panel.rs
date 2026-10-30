@@ -6,8 +6,8 @@ use crate::openvr::{self, VROverlayHandle_t, vr};
 use crate::settings::{MAX_DIST, MIN_DIST, RATES, SIZES, Settings};
 use crate::textures::Textures;
 
-pub const W: usize = 1000;
-pub const H: usize = (TOP + ROWS as f32 * ROW_H + (SECTIONS.len() - 1) as f32 * GAP + 30.0) as usize; // 30 px below
+const W: usize = 1000;
+const H: usize = (TOP + ROWS as f32 * ROW_H + (SECTIONS.len() - 1) as f32 * GAP + 30.0) as usize; // 30 px below
 const PAD: f32 = 48.0;
 const TOP: f32 = 190.0;
 const ROW_H: f32 = 92.0;
@@ -343,7 +343,7 @@ impl Panel {
         textures.set(icon_ov, &icon());
         vr().set_width(dash, 1.5);
         vr().set_mouse_input(dash, W as f32, height(set) as f32);
-        textures.set(dash, &self.render(None, "Starting", set));
+        textures.set(dash, &self.render("Starting", set));
         if !set.warned {
             vr().show_dashboard(DASH_KEY);
         }
@@ -409,11 +409,12 @@ impl Panel {
     pub fn update(&mut self, textures: &mut Textures, status: &str, set: &Settings) {
         if vr().is_visible(self.dash) && self.drawn != status {
             self.drawn = status.to_string();
-            textures.set(self.dash, &self.render(self.hover, status, set));
+            textures.set(self.dash, &self.render(status, set));
         }
     }
 
-    fn render(&self, hover: Option<Target>, status: &str, set: &Settings) -> Image {
+    fn render(&self, status: &str, set: &Settings) -> Image {
+        let hover = self.hover;
         let mut img = Image::new(W, height(set));
         fill_rrect(&mut img, 0.0, 0.0, W as f32, height(set) as f32, 32.0, BG, 0.94);
         if !set.warned {
@@ -471,7 +472,7 @@ mod tests {
         assert_eq!(ack, Some(Target::Ack));
         assert!(WARNING.iter().all(|l| draw::text_width(0, l, WARN_SIZE) as f32 <= W as f32 - 2.0 * PAD));
         assert!(WARN_Y + (WARNING.len() - 1) as f32 * WARN_LINE + 40.0 < ACK_Y0);
-        let mut img = p.render(None, "", &set);
+        let mut img = p.render("", &set);
         assert!(img.at(W / 2, (ACK_Y0 + 4.0) as usize)[0] > 200, "the button");
         p.press(ack, &mut set);
         assert!(set.warned && p.hit(500.0, row_cy(row("Detect People")), &set).is_some());
@@ -509,7 +510,8 @@ mod tests {
             p.press(Some(Target::Step(row("Max Range"), 1)), &mut set);
         }
         assert!(!set.people && set.max_dist == MAX_DIST);
-        let mut img = p.render(Some(Target::Row(row("Detect Cats and Dogs"))), "Watching", &set);
+        p.hover = Some(Target::Row(row("Detect Cats and Dogs")));
+        let mut img = p.render("Watching", &set);
         assert!(img.at(0, 0)[3] == 0 && img.at(500, 5)[3] > 200);
     }
 

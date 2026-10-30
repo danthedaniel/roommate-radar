@@ -68,12 +68,13 @@ impl Textures {
 
 impl Vulkan {
     unsafe fn new() -> Result<Vulkan, String> {
+        let err = |e: vk::Result| e.to_string();
         let entry = unsafe { ash::Entry::load() }.map_err(|e| e.to_string())?;
         let iext = vr().vulkan_extensions(None);
         let iptr: Vec<_> = iext.iter().map(|e| e.as_ptr()).collect();
         let app = vk::ApplicationInfo::default().application_name(c"roommate-radar").api_version(vk::API_VERSION_1_1);
         let ici = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&iptr);
-        let instance = unsafe { entry.create_instance(&ici, None) }.map_err(|e| e.to_string())?;
+        let instance = unsafe { entry.create_instance(&ici, None) }.map_err(err)?;
         let phys = vk::PhysicalDevice::from_raw(vr().output_device(instance.handle().as_raw()));
         if phys.is_null() {
             return Err("no output device".into());
@@ -85,7 +86,6 @@ impl Vulkan {
         let dptr: Vec<_> = dext.iter().map(|e| e.as_ptr()).collect();
         let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(qfam).queue_priorities(&[1.0])];
         let dci = vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&dptr);
-        let err = |e: vk::Result| e.to_string();
         let dev = unsafe { instance.create_device(phys, &dci, None) }.map_err(err)?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         let pci = vk::CommandPoolCreateInfo::default()
@@ -107,7 +107,7 @@ impl Vulkan {
         let i = slot.next;
         slot.next ^= 1;
         if slot.tex[i].w != w || slot.tex[i].h != h {
-            let old = std::mem::take(&mut self.slots.get_mut(&ov).unwrap().tex[i]);
+            let old = std::mem::take(&mut slot.tex[i]);
             unsafe {
                 self.dev.destroy_image(old.image, None);
                 self.dev.free_memory(old.mem, None);

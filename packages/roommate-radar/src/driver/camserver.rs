@@ -55,7 +55,6 @@ struct V4l2Buffer {
 const _: () = assert!(size_of::<V4l2Plane>() == 64 && size_of::<V4l2Buffer>() == 88);
 
 #[repr(C)]
-#[derive(Clone, Copy)]
 struct V4l2PlanePixFormat {
     sizeimage: u32,
     bytesperline: u32,

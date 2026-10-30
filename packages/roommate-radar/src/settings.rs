@@ -6,7 +6,7 @@ pub const RATES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
 pub const MIN_DIST: f32 = 1.5; // max_dist's range (m)
 pub const MAX_DIST: f32 = 6.0; // stereo depth noise grows like distance^2: past this it's too rough to show
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Settings {
     pub enabled: bool,
     pub people: bool,
@@ -48,11 +48,11 @@ impl Default for Settings {
 impl Settings {
     /// The defaults, overridden by what's saved at `path`.
     pub fn load(path: PathBuf) -> Settings {
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
         let mut s = Settings { path: Some(path), ..Settings::default() };
-        let text = std::fs::read_to_string(s.path.as_ref().unwrap()).unwrap_or_default();
         for (k, v) in text.lines().filter_map(|l| l.split_once('=')) {
-            let v = v.trim();
-            if k.trim() == "align" {
+            let (k, v) = (k.trim(), v.trim());
+            if k == "align" {
                 let w: Vec<f32> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
                 if let [x, y, z] = w[..]
                     && [x, y, z].iter().all(|a| a.abs() < 5.0)
@@ -64,7 +64,7 @@ impl Settings {
             let Ok(f) = v.parse::<f32>() else {
                 continue;
             };
-            match k.trim() {
+            match k {
                 "enabled" => s.enabled = f != 0.0,
                 "people" => s.people = f != 0.0,
                 "pets" => s.pets = f != 0.0,

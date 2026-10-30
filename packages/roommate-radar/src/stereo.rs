@@ -19,7 +19,7 @@ use crate::tracker::assign;
 use crate::v3::{V3, v3};
 
 /// A box in one view (px).
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct Det {
     pub x0: f32,
     pub y0: f32,
@@ -117,8 +117,8 @@ fn zncc(
 ) -> Option<f32> {
     let s_ = s as i32;
     let (mut sl, mut sr, mut sll, mut srr, mut slr, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32, 0);
-    for y in (y0.max(dy.max(0))..y1.min(s_ + dy.min(0)).min(s_)).step_by(step) {
-        for x in (x0.max(d.max(0))..x1.min(s_ + d.min(0)).min(s_)).step_by(step) {
+    for y in (y0.max(dy.max(0))..y1.min(s_ + dy.min(0))).step_by(step) {
+        for x in (x0.max(d.max(0))..x1.min(s_ + d.min(0))).step_by(step) {
             let (a, b) = (l[(y * s_ + x) as usize] as f32, r[((y - dy) * s_ + x - d) as usize] as f32);
             (sl, sr, sll, srr, slr) = (sl + a, sr + b, sll + a * a, srr + b * b, slr + a * b);
             n += 1;
@@ -132,16 +132,18 @@ fn zncc(
     Some((slr - sl * sr / nn) / (vl * vr).sqrt())
 }
 
-/// A candidate left/right pair: its cost and the disparity its edges give, with how many edges that's from.
+/// A candidate left/right pair: its cost and the disparity its edges give, with how many edges that's from, and the
+/// disparities the class's heights allow (lo..hi).
 struct Pair {
     cost: f32,
     d: f32,
+    lo: f32,
+    hi: f32,
     edges: usize,
     spread: f32, // how far apart the two sides' disparities are (px), 0 with one
 }
 
 /// Scores pairing left box l with right box r (clip: their cut-off edges); None if they can't be one object.
-#[allow(clippy::too_many_arguments)]
 fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: usize, baseline: f32) -> Option<Pair> {
     let h = (l.y1 - l.y0).max(r.y1 - r.y0).max(1.0);
     // Same rows: the top and bottom edges that are the object's in both views.
@@ -163,7 +165,8 @@ fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: u
     // d = h B / H for what's visible of it, H within the class's range (either view's class).
     let ((lo0, hi0), (lo1, hi1)) = (heights(l.cls), heights(r.cls));
     let (hmin, hmax) = (lo0.min(lo1), hi0.max(hi1));
-    if dx > DX_MAX || d < D_MIN.max(0.8 * h * baseline / hmax) || d > 1.25 * h * baseline / hmin {
+    let (lo, hi) = (D_MIN.max(0.8 * h * baseline / hmax), 1.25 * h * baseline / hmin);
+    if dx > DX_MAX || d < lo || d > hi {
         return None;
     }
     // Alike at that disparity: the box's middle, about 16 x 16 samples, the best of +-2 px.
@@ -178,7 +181,7 @@ fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: u
     let looks = 0.5 * (1.0 - ncc.unwrap_or(0.5)); // too flat to tell: neutral
     let class = if l.cls != r.cls { CLASS_COST } else { 0.0 };
     let spread = dx * h;
-    Some(Pair { cost: 2.0 * dy + dx + looks + class, d, edges: dxs.len(), spread })
+    Some(Pair { cost: 2.0 * dy + dx + looks + class, d, lo, hi, edges: dxs.len(), spread })
 }
 
 /// What became of patch_disparity()'s patches, for the trace: how many it tried, and of those how many were partly
@@ -210,11 +213,20 @@ pub struct AlignStats {
 
 /// The gray level std dev of the region (x0..x1, y0..y1) of img.
 fn std_dev(img: &[u8], s: usize, (x0, y0, x1, y1): (i32, i32, i32, i32)) -> f32 {
-    let v: Vec<f32> = (y0.max(0)..y1.min(s as i32))
-        .flat_map(|y| (x0.max(0)..x1.min(s as i32)).map(move |x| img[y as usize * s + x as usize] as f32))
-        .collect();
-    let m = v.iter().sum::<f32>() / v.len().max(1) as f32;
-    (v.iter().map(|a| (a - m) * (a - m)).sum::<f32>() / v.len().max(1) as f32).sqrt()
+    let (mut sum, mut sq, mut n) = (0f32, 0f32, 0);
+    for y in y0.max(0)..y1.min(s as i32) {
+        for x in x0.max(0)..x1.min(s as i32) {
+            let a = img[y as usize * s + x as usize] as f32;
+            (sum, sq, n) = (sum + a, sq + a * a, n + 1);
+        }
+    }
+    let m = sum / n.max(1) as f32;
+    (sq / n.max(1) as f32 - m * m).max(0.0).sqrt()
+}
+
+/// The sub-sample offset (-0.5..0.5) of the peak of the parabola through scores a, b, c at -1, 0, 1.
+fn vertex(a: f32, b: f32, c: f32) -> f32 {
+    ((a - c) / (2.0 * (a - 2.0 * b + c) - 1e-9)).clamp(-0.5, 0.5)
 }
 
 /// The object's disparity in left box `l` near `d0` (within lo..hi), from a grid of small patches over its middle, each
@@ -244,13 +256,7 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
             st.tried += 1;
             st.contrast += std_dev(imgs[0], s, patch);
             // The whole patch, in both views, or not at all (a partial one would score on fewer pixels).
-            if patch.0 - k1 < 0
-                || patch.2 - k0 > s as i32
-                || patch.0 < 0
-                || patch.2 > s as i32
-                || patch.1 < 0
-                || patch.3 > s as i32
-            {
+            if patch.0 - k1 < 0 || patch.2 - k0 > s as i32 || patch.1 < 0 || patch.3 > s as i32 {
                 st.outside += 1;
                 continue;
             }
@@ -280,9 +286,7 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
                 continue;
             }
             st.matched += 1;
-            let (a, b, c) = (score[best - 1], score[best], score[best + 1]);
-            let sub = ((a - c) / (2.0 * (a - 2.0 * b + c) - 1e-9)).clamp(-0.5, 0.5);
-            ds.push((k0 + best as i32) as f32 + sub);
+            ds.push((k0 + best as i32) as f32 + vertex(score[best - 1], score[best], score[best + 1]));
         }
     }
     st.contrast /= st.tried.max(1) as f32;
@@ -349,9 +353,8 @@ pub fn alignment(l: &[u8], r: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
                 continue;
             }
             st.found += 1;
-            let sub = |a: f32, c: f32| ((a - c) / (2.0 * (a - 2.0 * b + c) - 1e-9)).clamp(-0.5, 0.5);
-            let d = (bj as i32 - 2) as f32 + sub(score[bi][bj - 1], score[bi][bj + 1]);
-            let dy = (bi as i32 - ALIGN_DY) as f32 + sub(score[bi - 1][bj], score[bi + 1][bj]);
+            let d = (bj as i32 - 2) as f32 + vertex(score[bi][bj - 1], b, score[bi][bj + 1]);
+            let dy = (bi as i32 - ALIGN_DY) as f32 + vertex(score[bi - 1][bj], b, score[bi + 1][bj]);
             out.push([cx as f32, cy as f32, d, dy, b]);
         }
     }
@@ -385,7 +388,6 @@ fn nearest_cluster(ds: &mut [f32]) -> Option<(f32, f32)> {
 /// Matches the left view's boxes to the right view's and measures each pair's depth; boxes seen in one view only come
 /// out on the 1 m plane from their camera, stereo false. imgs: the two S x S views; f (px) and baseline (m) of the pair;
 /// origins: the cameras in the head frame; valid: where each view has image.
-#[allow(clippy::too_many_arguments)]
 pub fn match_views(
     views: &[Vec<Det>; 2],
     imgs: [&[u8]; 2],
@@ -425,14 +427,10 @@ pub fn match_views(
         };
         right_used[j] = true;
         let (r, rc, p) = (&views[1][j], &clips[1][j], pairs[i][j].as_ref().unwrap());
-        let ((lo0, hi0), (lo1, hi1)) = (heights(l.cls), heights(r.cls)); // either view's class, as in pair()
-        let (hmin, hmax) = (lo0.min(lo1), hi0.max(hi1));
-        let h = (l.y1 - l.y0).max(r.y1 - r.y0);
         // At least what the two sides disagree by: a seated person's sides gave 15 and 29 px when their patches all
         // failed (true: 10), and the edges alone put them at half their distance.
         let edge_sigma = (EDGE_PX / (p.edges as f32).sqrt()).max(p.spread / 2.0);
-        let (lo, hi) = (D_MIN.max(0.8 * h * baseline / hmax), 1.25 * h * baseline / hmin);
-        let (patches, patch_stats) = patch_disparity(imgs, s, l, p.d, lo, hi);
+        let (patches, patch_stats) = patch_disparity(imgs, s, l, p.d, p.lo, p.hi);
         let (d, sigma_d) = match patches {
             // Both agree: weighted by their noise. Else the patches, unless they're few (the box edges then).
             Some((dp, sp)) => {

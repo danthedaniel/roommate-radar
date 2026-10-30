@@ -94,15 +94,8 @@ impl Boxes {
         })
     }
 
-    /// Shows the tracker's confirmed tracks at playback time t_play (s) to the head at `head`; returns how many.
-    pub fn show(
-        &mut self,
-        tracker: &Tracker,
-        head: &HmdMatrix34_t,
-        now: u64,
-        t_play: f64,
-        textures: &mut Textures,
-    ) -> usize {
+    /// Shows the tracker's confirmed tracks at playback time t_play (s) to the head at `head`.
+    pub fn show(&mut self, tracker: &Tracker, head: &HmdMatrix34_t, now: u64, t_play: f64, textures: &mut Textures) {
         let h = position(head);
         let now_s = now as f64 / 1e9;
         let mut log = String::new(); // each shown box relative to the head
@@ -166,7 +159,6 @@ impl Boxes {
             self.last_log_ns = now;
         }
         self.shown = n;
-        n
     }
 }
 

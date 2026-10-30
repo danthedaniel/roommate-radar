@@ -15,7 +15,7 @@ use crate::openvr::HmdMatrix34_t;
 use crate::tracker::{Meas, Tracker};
 use crate::v3::V3;
 
-pub const PATH: &str = "/tmp/roommate-radar-trace.jsonl";
+const PATH: &str = "/tmp/roommate-radar-trace.jsonl";
 const MAX_BYTES: u64 = 32 << 20;
 
 pub struct Trace {

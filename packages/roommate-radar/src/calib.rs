@@ -5,7 +5,7 @@
 //! plus_x. Camera frames are OpenCV-style (x right, y down, z forward). And the rectification it gives.
 use serde_json::Value;
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Default)]
 pub struct CamCal {
     pub fx: f32,
     pub fy: f32,
@@ -116,7 +116,7 @@ pub fn rotated(c: &CamCal, w: [f32; 3]) -> CamCal {
 
 /// A rectified view's valid region: per row the valid columns [first, last + 1), per column the valid rows; (S, 0)
 /// where there are none. The fisheye's image is convex, so that's all of it.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct Valid {
     pub rows: Vec<(f32, f32)>,
     pub cols: Vec<(f32, f32)>,

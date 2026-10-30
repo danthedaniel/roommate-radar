@@ -63,7 +63,7 @@ enum Button {
     Finish,
 }
 
-#[derive(Clone, Copy, PartialEq, Debug)]
+#[derive(Clone, Copy, PartialEq)]
 enum Phase {
     Idle,
     Ready(u64),     // counting GET_READY_S down from then (ns)
@@ -301,7 +301,7 @@ pub fn run() -> i32 {
         return 1;
     }
     // The app's defaults, without what would drop the person or their controller: nothing saved.
-    let set = Settings { hands: false, play_area: false, max_dist: 10.0, hz: HZ, ..Settings::default() };
+    let set = Settings { hands: false, max_dist: 10.0, ..Settings::default() };
     // Starting from the app's saved rectification correction (read only: nothing here is saved), kept up like the app's
     let home = std::env::var("HOME").unwrap_or_default();
     let saved = Settings::load(format!("{home}/{}", crate::shm::CONF).into());
@@ -345,16 +345,13 @@ pub fn run() -> i32 {
         }
         let now = now_ns();
         match cal.poll() {
-            Some(Button::Finish) => {
+            Some(Button::Start) if cal.phase == Phase::Idle => cal.phase = Phase::Ready(now),
+            Some(b) => {
                 if matches!(cal.phase, Phase::Recording(_)) {
                     event(&mut trace, &cal, "cancel", cal.distance, now);
                 }
-                break;
-            }
-            Some(Button::Start) if cal.phase == Phase::Idle => cal.phase = Phase::Ready(now),
-            Some(Button::Start) => {
-                if matches!(cal.phase, Phase::Recording(_)) {
-                    event(&mut trace, &cal, "cancel", cal.distance, now);
+                if b == Button::Finish {
+                    break;
                 }
                 cal.phase = Phase::Idle;
             }
@@ -426,14 +423,11 @@ pub fn run() -> i32 {
         }
 
         let finished: u32 = cal.done.iter().sum();
-        let status = if detector::WAITING.load(Ordering::Relaxed) {
+        let status = if detector::WAITING.load(Ordering::Relaxed) || (!loading && now - last_det_ns > 2_000_000_000) {
             let p = detector::PROBLEM.lock().unwrap();
             if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else if loading {
             format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
-        } else if now - last_det_ns > 2_000_000_000 {
-            let p = detector::PROBLEM.lock().unwrap();
-            if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else {
             match cal.phase {
                 Phase::Idle => format!("{finished} recorded · {}", cal.live),
