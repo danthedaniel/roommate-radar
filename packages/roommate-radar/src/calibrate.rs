@@ -369,6 +369,8 @@ pub fn run() -> i32 {
             let d = detector::DETS.lock().unwrap();
             (d.id != seen_det_id).then(|| d.clone())
         };
+        // Lost tracking: no head pose to measure with (main.rs's head_pose too)
+        let d = d.filter(|d| crate::head_pose((d.t_capture_ns as i64 - now as i64) as f32 / 1e9).1);
         if let Some(d) = d {
             seen_det_id = d.id;
             last_det_ns = now;

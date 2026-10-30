@@ -200,12 +200,25 @@ impl Vulkan {
             );
         let image = unsafe { self.dev.create_image(&ci, None) }?;
         let mr = unsafe { self.dev.get_image_memory_requirements(image) };
+        let mem = unsafe {
+            self.alloc(mr, vk::MemoryPropertyFlags::DEVICE_LOCAL, |m| self.dev.bind_image_memory(image, m, 0))
+        };
+        // set() tries again every frame: a failure mustn't leak
+        mem.inspect_err(|_| unsafe { self.dev.destroy_image(image, None) }).map(|mem| Texture { image, mem, w, h })
+    }
+
+    /// Memory for `mr`, bound by `bind` (freed again if that fails).
+    unsafe fn alloc(
+        &self,
+        mr: vk::MemoryRequirements,
+        want: vk::MemoryPropertyFlags,
+        bind: impl FnOnce(vk::DeviceMemory) -> Result<(), vk::Result>,
+    ) -> Result<vk::DeviceMemory, vk::Result> {
         let ai = vk::MemoryAllocateInfo::default()
             .allocation_size(mr.size)
-            .memory_type_index(self.memory_type(mr.memory_type_bits, vk::MemoryPropertyFlags::DEVICE_LOCAL)?);
+            .memory_type_index(self.memory_type(mr.memory_type_bits, want)?);
         let mem = unsafe { self.dev.allocate_memory(&ai, None) }?;
-        unsafe { self.dev.bind_image_memory(image, mem, 0) }?;
-        Ok(Texture { image, mem, w, h })
+        bind(mem).inspect_err(|_| unsafe { self.dev.free_memory(mem, None) }).map(|()| mem)
     }
 
     unsafe fn grow_staging(&mut self, size: usize) -> Result<(), vk::Result> {
@@ -219,12 +232,11 @@ impl Vulkan {
         let buf = unsafe { self.dev.create_buffer(&bci, None) }?;
         let mr = unsafe { self.dev.get_buffer_memory_requirements(buf) };
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let ai = vk::MemoryAllocateInfo::default()
-            .allocation_size(mr.size)
-            .memory_type_index(self.memory_type(mr.memory_type_bits, host)?);
-        let mem = unsafe { self.dev.allocate_memory(&ai, None) }?;
-        unsafe { self.dev.bind_buffer_memory(buf, mem, 0) }?;
-        let map = unsafe { self.dev.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }?;
+        let mapped = unsafe { self.alloc(mr, host, |m| self.dev.bind_buffer_memory(buf, m, 0)) }.and_then(|mem| {
+            let map = unsafe { self.dev.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) };
+            map.inspect_err(|_| unsafe { self.dev.free_memory(mem, None) }).map(|map| (mem, map))
+        });
+        let (mem, map) = mapped.inspect_err(|_| unsafe { self.dev.destroy_buffer(buf, None) })?;
         self.staging = Some(Staging { buf, mem, map, size });
         Ok(())
     }

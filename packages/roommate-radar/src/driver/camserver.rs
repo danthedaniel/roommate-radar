@@ -254,6 +254,7 @@ struct Camera {
     maps: HashMap<RawFd, Mapping>, // by XRService's dmabuf fd
     last_published: Option<u32>,   // V4L2 sequence number
     normal_mean: f64,              // running brightness of normal-exposure frames
+    published_ns: u64,             // when it last published (CLOCK_MONOTONIC)
 }
 
 impl Camera {
@@ -384,6 +385,7 @@ pub fn run() {
         maps: HashMap::new(),
         last_published: None,
         normal_mean: 0.0,
+        published_ns: 0,
     });
     // Camera clock - CLOCK_MONOTONIC (at arrival), one for all: they're hardware-synchronized on one clock, and the
     // app pairs their frames by time. Tracked per camera, each one's arrival jitter moved its own, until they were
@@ -449,6 +451,7 @@ pub fn run() {
             if c.last_published.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
                 c.last_published = None;
                 clock_offset_ns = None;
+                c.maps.clear(); // and may have reallocated its buffers under other fd numbers
             }
             if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
                 continue;
@@ -478,6 +481,11 @@ pub fn run() {
                 // brightness heuristic; black level ~16 (~4 raw), controller frames sit right on it
                 let normal = if c.normal_mean == 0.0 { m > 20.0 } else { m > 16.0 + 0.3 * (c.normal_mean - 16.0) };
                 if !normal {
+                    // Nothing for a second (the lights went off, the lens covered): learn the brightness again, or a
+                    // mean from before would reject every frame for good.
+                    if arrival - c.published_ns > 1_000_000_000 {
+                        c.normal_mean = 0.0;
+                    }
                     continue;
                 }
                 c.normal_mean = if c.normal_mean == 0.0 { m } else { 0.9 * c.normal_mean + 0.1 * m };
@@ -487,6 +495,7 @@ pub fn run() {
                     _ => shm::write(&hdr.side[ci - 2], &frame, t),
                 }
                 c.last_published = Some(b.seq);
+                c.published_ns = arrival;
                 published += 1;
                 break;
             }

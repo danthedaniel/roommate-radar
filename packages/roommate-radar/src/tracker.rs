@@ -306,9 +306,10 @@ fn alpha(dt: f64) -> f32 {
 }
 
 /// Detections of one object (a person boxed twice, a person and a dog box on one body), within each other's noise:
-/// only the most confident (seen in both views first) is kept.
+/// only the most confident (seen in both views first) is kept. Those below LOW go first: the tracker ignores them, so
+/// one mustn't win over a stronger one and leave nothing.
 fn merge_detections(dets: &[Meas]) -> Vec<Meas> {
-    let mut order: Vec<&Meas> = dets.iter().collect();
+    let mut order: Vec<&Meas> = dets.iter().filter(|m| m.score >= LOW).collect();
     order.sort_by(|a, b| a.weak.cmp(&b.weak).then(b.score.total_cmp(&a.score)));
     let mut keep: Vec<Meas> = Vec::new();
     for m in order {
@@ -415,7 +416,7 @@ impl Tracker {
             tr.predict(t);
         }
         let (strong, weak): (Vec<usize>, Vec<usize>) =
-            (0..dets.len()).filter(|&i| dets[i].score >= LOW).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
+            (0..dets.len()).partition(|&i| !dets[i].weak && dets[i].score >= HIGH);
         let mut matched = vec![false; self.tracks.len()];
         let unused = self.match_dets(&dets, &strong, &mut matched, t, false);
         // Not tentative tracks (ByteTrack): a hand's box and a weak one 0.7 m below it confirmed a track that flew off.
@@ -435,13 +436,13 @@ impl Tracker {
             self.tracks.push(Track::new(self.next_id, d, t));
             matched.push(true);
         }
-        let gone = self.indistinguishable();
+        let alive: Vec<bool> = (self.tracks.iter().zip(&matched))
+            .map(|(tr, &m)| (tr.hits >= MIN_HITS || m) && tr.unseen <= MAX_UNSEEN && t - tr.last_seen <= MAX_AGE)
+            .collect();
+        let gone = self.indistinguishable(&alive);
         let mut i = 0;
-        self.tracks.retain(|tr| {
-            let keep = !gone[i]
-                && (tr.hits >= MIN_HITS || matched[i])
-                && tr.unseen <= MAX_UNSEEN
-                && t - tr.last_seen <= MAX_AGE;
+        self.tracks.retain(|_| {
+            let keep = alive[i] && !gone[i];
             i += 1;
             keep
         });
@@ -449,14 +450,15 @@ impl Tracker {
 
     /// Tracks that are one object (one started on a depth jump, before its gate grew, and both kept up since): within
     /// each other's uncertainty and moving alike. Of each such pair the one matched last (then more often) stays; the other is marked.
-    fn indistinguishable(&self) -> Vec<bool> {
+    /// Only `alive` ones count: one about to be dropped anyway mustn't take the other with it.
+    fn indistinguishable(&self, alive: &[bool]) -> Vec<bool> {
         let n = self.tracks.len();
         let mut gone = vec![false; n];
         for i in 0..n {
             for j in i + 1..n {
                 let (a, b) = (&self.tracks[i], &self.tracks[j]);
                 let close = mahalanobis(a.p, b.p, &add(&a.pa, &b.pa)).is_some_and(|(d2, _)| d2 < MERGE_GATE);
-                if gone[i] || gone[j] || !close || (a.v - b.v).len() > MERGE_SPEED {
+                if !alive[i] || !alive[j] || gone[i] || gone[j] || !close || (a.v - b.v).len() > MERGE_SPEED {
                     continue;
                 }
                 let a_stays = (a.last_seen, a.hits) >= (b.last_seen, b.hits);
@@ -694,6 +696,12 @@ mod tests {
         (trk.tracks[0].hits, trk.tracks[1].hits) = (5, 3);
         trk.update(&[], 0.1, always);
         assert!(trk.tracks.len() == 1 && trk.tracks[0].id == 1);
+        // A tentative one that missed is dropped, and doesn't take the confirmed one it beat on last_seen with it
+        let tracks = vec![Track::new(1, &m, 0.0), Track::new(2, &meas(v3(0.0, 0.0, -5.5), 0.9), 0.05)];
+        let mut trk = Tracker { tracks, ..Default::default() };
+        (trk.tracks[0].hits, trk.tracks[1].hits) = (5, 1);
+        trk.update(&[], 0.1, always);
+        assert!(trk.tracks.len() == 1 && trk.tracks[0].id == 1);
     }
 
     #[test]
@@ -703,6 +711,8 @@ mod tests {
         assert_eq!(merge_detections(&[a, meas(v3(0.0, 0.0, -6.5), 0.5)]).len(), 1);
         assert_eq!(merge_detections(&[a, meas(v3(0.6, 0.0, -6.0), 0.5)]).len(), 2);
         assert_eq!(merge_detections(&[Meas { weak: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.5)])[0].p.z, -6.5);
+        // but one too weak to be used doesn't hide a strong one
+        assert_eq!(merge_detections(&[Meas { weak: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.1)])[0].p.z, -6.0);
     }
 
     #[test]
