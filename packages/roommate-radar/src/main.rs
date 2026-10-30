@@ -2,7 +2,7 @@
 //! without passthrough. Stereo YOLO detector in detector.rs, at a low size and rate to leave the GPU to the game.
 //!
 //! Per compositor frame: detections (detector.rs) -> measurements (measure.rs) -> tracks (tracker.rs) -> box and label
-//! overlays (boxes.rs). A "Roommate Radar" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows;
+//! overlays (boxes.rs); people and pets beside you, where there's no box, as chevrons (hud.rs). A "Roommate Radar" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows;
 //! settings persist in ~/.config/roommate-radar.conf (settings.rs).
 //! Steam runs bin/roommate-radar (roommate_radar-argv.json) in the Steam Linux Runtime container; it works from the
 //! install directory (models/, NotoSans-Medium.ttf, roommate-radar.vrmanifest), logs to /tmp/roommate-radar.log, and
@@ -12,6 +12,7 @@ mod calib;
 mod calibrate;
 mod detector;
 mod draw;
+mod hud;
 mod measure;
 mod ncnn;
 mod openvr;
@@ -40,6 +41,10 @@ use v3::{V3, v3};
 // and 37 deg on the Frame, when it recognized the room a minute after standby) and the tracks are elsewhere now.
 // The ChaperoneUniverseHasChanged clear below didn't catch it (the trace kept the old track).
 const POSE_JUMP_M: f32 = 0.5;
+
+/// A one-view person or pet this far (rad) off the head's forward is at the edge of the SLAM views: a chevron, as for the side
+/// cameras, unless a box is shown there.
+const EDGE_RAD: f32 = 0.52; // 30 deg; the views reach 50
 
 /// The head's pose (standing universe) seconds_from_now (< 0: in the past), and whether it's valid.
 fn head_pose(seconds_from_now: f32) -> (HmdMatrix34_t, bool) {
@@ -139,7 +144,8 @@ fn run() -> i32 {
     }
     let mut textures = textures::Textures::new();
     let mut panel = panel::Panel::default();
-    let mut boxes = match boxes::Boxes::create().and_then(|b| panel.create(&mut textures, &set).map(|_| b)) {
+    let made = boxes::Boxes::create().and_then(|b| Ok((b, hud::Hud::create()?)));
+    let (mut boxes, mut hud) = match made.and_then(|b| panel.create(&mut textures, &set).map(|_| b)) {
         Ok(b) => b,
         Err(e) => {
             eprintln!("{e}");
@@ -208,11 +214,35 @@ fn run() -> i32 {
             if let (head, true) = head_pose(ago) {
                 let walls: &[_] = if set.play_area { &walls } else { &[] };
                 let ctrl = controllers(ago);
-                let ms = measure::measurements(&d.objs, &head, &ctrl, walls, &set);
+                let ms = measure::measurements(&d.objs, &head, 0.0, &ctrl, walls, &set);
                 // A track missing where the views can't see it, or out of range, isn't gone.
                 let view = d.view.as_deref();
                 let seen = |p| view.is_none_or(|v| measure::observable(v, &head, p, walls, &set));
-                tracker.update(&ms, d.t_capture_ns as f64 / 1e9, seen);
+                let t_capture = d.t_capture_ns as f64 / 1e9;
+                tracker.update(&ms, t_capture, seen);
+                // People and pets seen at the edge of the views only (one view: weak, which doesn't confirm a track); hud.rs
+                // hides any chevron that has a box
+                let chevron = |m: &&tracker::Meas| m.score >= tracker::HIGH && measure::near_by_size(m, &set);
+                for m in ms.iter().filter(|m| m.weak && chevron(m)) {
+                    let q = measure::to_head(&head, m.p);
+                    if q.x.atan2(-q.z).abs() > EDGE_RAD {
+                        hud.saw((q.x > 0.0) as usize, m.cls, m.score, m.p, now as f64 / 1e9, "edge of view");
+                    }
+                }
+                // and by the side cameras, each at its own capture time
+                for (k, objs) in d.side.iter().flat_map(|s| s.objs.iter().enumerate()) {
+                    let t = d.side.as_ref().unwrap().t_capture_ns[k];
+                    let ago = (t as i64 - now as i64) as f32 / 1e9;
+                    if let (head, true) = head_pose(ago)
+                        && t != 0
+                    {
+                        let ms =
+                            measure::measurements(objs, &head, detector::SIDE_YAW[k], &controllers(ago), walls, &set);
+                        for m in ms.iter().filter(chevron) {
+                            hud.saw(k, m.cls, m.score, m.p, now as f64 / 1e9, "side camera");
+                        }
+                    }
+                }
                 let mut extra = serde_json::Map::new();
                 if let Some(a) = &d.align {
                     let r = |v: f32| (v * 100.0).round() / 100.0;
@@ -229,6 +259,11 @@ fn run() -> i32 {
         }
 
         let n = boxes.show(&tracker, &head_now, now, now as f64 / 1e9 - lag_s as f64, &mut textures);
+        // The boxes, and the tracks matched lately that aren't boxes yet (tentative) or any more
+        let now_s = now as f64 / 1e9;
+        let recent = tracker.tracks.iter().filter(|t| now_s - t.last_seen < tracker::SHOW_S).map(|t| t.p);
+        let ahead: Vec<V3> = boxes.drawn.iter().copied().chain(recent).collect();
+        hud.show(now_s, &head_now, &ahead, &mut textures);
 
         let status = if !set.enabled {
             "Off".to_string()

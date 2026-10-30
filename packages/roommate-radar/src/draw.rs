@@ -1,5 +1,5 @@
-//! CPU drawing into straight-alpha RGBA pixels (anti-aliased shapes, text): the box and label textures here, the
-//! dashboard tab in panel.rs.
+//! CPU drawing into straight-alpha RGBA pixels (anti-aliased shapes, text): the box, label and chevron textures here,
+//! the dashboard tab in panel.rs.
 use std::sync::OnceLock;
 
 #[cfg(not(test))]
@@ -137,6 +137,32 @@ pub fn label(name: &str, pct: Option<i32>, cls: usize) -> Image {
     img
 }
 
+/// Distance (px) from p to the segment a-b.
+fn seg_dist(p: [f32; 2], a: [f32; 2], b: [f32; 2]) -> f32 {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy)).clamp(0.0, 1.0);
+    (p[0] - a[0] - t * dx).hypot(p[1] - a[1] - t * dy)
+}
+
+/// A chevron pointing left (or right), w x h (2:3), in the class's color over a dark halo so it shows on any scene.
+pub fn chevron(w: usize, h: usize, left: bool, cls: usize) -> Image {
+    let mut img = Image::new(w, h);
+    let (wf, hf) = (w as f32, h as f32);
+    let (line, halo) = (wf * 0.18, wf * 0.06);
+    let (tip, top, bottom) = ([wf * 0.28, hf / 2.0], [wf * 0.72, hf * 0.12], [wf * 0.72, hf * 0.88]);
+    for y in 0..h {
+        for x in 0..w {
+            let fx = x as f32 + 0.5;
+            let p = [if left { fx } else { wf - fx }, y as f32 + 0.5];
+            let d = seg_dist(p, tip, top).min(seg_dist(p, tip, bottom));
+            let px = img.at(x, y);
+            over(px, [0, 0, 0], 0.5 * (line / 2.0 + halo + 0.5 - d).clamp(0.0, 1.0));
+            over(px, class_rgb(cls), (line / 2.0 + 0.5 - d).clamp(0.0, 1.0));
+        }
+    }
+    img
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -148,6 +174,15 @@ mod tests {
         let white = l.px.chunks(4).filter(|p| p[0] > 230 && p[1] > 230 && p[3] > 230).count();
         assert!(l.h == 64 && l.w > 3 * l.h && white > 200);
         assert!(l.at(0, 0)[3] == 0 && l.at(l.w / 2, 1)[3] > 150 && l.at(64 / 2 - 6 + 7, 64 / 2)[1] == 69);
+    }
+
+    #[test]
+    fn chevron_texture() {
+        // Opaque red at the tip, clear in the corners and the open side; the right one mirrors the left.
+        let mut l = chevron(128, 192, true, 0);
+        let mut r = chevron(128, 192, false, 0);
+        assert!(l.at(36, 96)[3] == 255 && l.at(36, 96)[0] == 255 && l.at(0, 0)[3] == 0 && l.at(110, 96)[3] == 0);
+        assert!((0..192).all(|y| (0..128).all(|x| l.at(x, y)[3] == r.at(127 - x, y)[3])));
     }
 
     #[test]

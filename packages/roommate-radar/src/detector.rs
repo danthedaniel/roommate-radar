@@ -1,12 +1,14 @@
 //! roommate-radar's stereo YOLO detector thread. Reads the two SLAM camera frames published by camserver, rectifies
 //! each into a virtual pinhole camera aligned with the head frame (so the pair is a rectified stereo pair, calib.rs),
 //! runs YOLO11n (ncnn, Vulkan) on both views stacked into one image, matches detections across views and triangulates
-//! depth from disparity (stereo.rs). Results (head frame at capture time) go to DETS.
+//! depth from disparity (stereo.rs). Every second run it does the same for the two side cameras, without stereo (Side).
+//! Results (head frame at capture time) go to DETS.
 use std::sync::atomic::{AtomicBool, AtomicI32, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use crate::calib::{self, Rectifier, Valid};
+use crate::measure::yawed;
 use crate::ncnn;
 use crate::shm::{self, now_ns};
 use crate::stereo::{self, Det, Obj};
@@ -33,6 +35,7 @@ pub static DETS: Mutex<DetectionSet> = Mutex::new(DetectionSet {
     view: None,
     align: None,
     correction: [0.0; 3],
+    side: None,
 });
 
 pub struct AtomicF32(AtomicU32);
@@ -58,7 +61,19 @@ pub struct DetectionSet {
     pub view: Option<Arc<View>>,           // what the views see, for the tracker (measure::observable)
     pub align: Option<Arc<Vec<[f32; 5]>>>, // stereo::alignment()'s matches, every ALIGN_EVERY runs (no images leave here)
     pub correction: [f32; 3],              // CORRECTION as these were rectified with
+    pub side: Option<Arc<Side>>,           // the side cameras' run, when there was one with this set
 }
+
+/// The side cameras' boxes, from every second run (half HZ). Each camera is rectified to a pinhole like the SLAM views
+/// but looking straight left or right: the head frame turned by SIDE_YAW (measure::yawed), level, where a person beside
+/// you is (the cameras themselves look ~25 deg up). Seen by one camera only, so objects on the 1 m plane, as
+/// stereo::match_views makes one-view boxes; measure::measurements gives them a depth from the floor.
+pub struct Side {
+    pub objs: [Vec<Obj>; 2],    // left, right; in their view's frame
+    pub t_capture_ns: [u64; 2], // 0: no frame from that camera yet
+}
+
+pub const SIDE_YAW: [f32; 2] = [std::f32::consts::FRAC_PI_2, -std::f32::consts::FRAC_PI_2];
 
 /// The rectified views' geometry.
 pub struct View {
@@ -231,11 +246,23 @@ fn run(s: usize) -> Result<(), String> {
     let rectify = |w: [f32; 3]| {
         let (l, r) = (w.map(|v| v / 2.0), w.map(|v| -v / 2.0));
         let rect = [
-            Rectifier::new(&calib::rotated(&cal[0], l), s, HFOV_DEG),
-            Rectifier::new(&calib::rotated(&cal[1], r), s, HFOV_DEG),
+            Rectifier::new(&calib::rotated(&cal[0], l), s, HFOV_DEG, shm::STRIDE),
+            Rectifier::new(&calib::rotated(&cal[1], r), s, HFOV_DEG, shm::STRIDE),
         ];
         let view = Arc::new(View { s, f: rect[0].f, origins, valid: [rect[0].valid(), rect[1].valid()] });
         (rect, view)
+    };
+    // The side views: rectifier, camera position in its view's frame, where it has image. None without their calibration
+    let side = match shm::SIDE_NAMES.map(|n| calib::load(shm::CALIB_DIR, n)) {
+        [Ok(l), Ok(r)] => Some([(l, 0), (r, 1)].map(|(c, k)| {
+            let rect = Rectifier::new(&calib::rotated(&c, [0.0, -SIDE_YAW[k], 0.0]), s, HFOV_DEG, shm::SIDE_W);
+            let valid = rect.valid();
+            (rect, yawed(v3(c.t[0], c.t[1], c.t[2]), -SIDE_YAW[k]), valid)
+        })),
+        [l, r] => {
+            println!("detector: no side cameras: {:?} {:?}", l.err(), r.err());
+            None
+        }
     };
     let mut correction = *CORRECTION.lock().unwrap();
     let (mut rect, mut view) = rectify(correction);
@@ -250,10 +277,13 @@ fn run(s: usize) -> Result<(), String> {
     let mut raw = [vec![0u8; shm::FRAME], vec![0u8; shm::FRAME]];
     let mut scratch = vec![0u8; shm::FRAME];
     let mut input = vec![0u8; s * s * 2];
+    let (mut side_raw, mut side_scratch) =
+        ([vec![0u8; shm::SIDE_FRAME], vec![0u8; shm::SIDE_FRAME]], vec![0u8; shm::SIDE_FRAME]);
+    let (mut side_seq, mut side_t, mut side_last) = ([0u64; 2], [0u64; 2], [0u64; 2]);
     let (mut last_seq, mut t_ns, mut last_pair, mut last_pair_ns) = ([0u64; 2], [0u64; 2], 0u64, now_ns());
     let (mut frames, mut stat_t, mut last_run) = (0u64, now_ns(), 0u64);
     let mut runs = 0u64; // for ALIGN_EVERY
-    let (mut t_rect, mut t_net, mut t_post, mut t_align) = (0f64, 0f64, 0f64, 0f64);
+    let (mut t_rect, mut t_net, mut t_post, mut t_align, mut t_side) = (0f64, 0f64, 0f64, 0f64, 0f64);
     let mut why = stereo::AlignStats::default(); // summed over the log's period
 
     while !QUIT.load(Ordering::Relaxed) && SIZE.load(Ordering::Relaxed) == s as i32 {
@@ -329,7 +359,41 @@ fn run(s: usize) -> Result<(), String> {
             why.found += st.found;
             Arc::new(a)
         });
+        // The side cameras, every second run, if either has a new frame
+        let g0 = now_ns();
+        let mut side_set = None;
+        if let Some(side) = &side
+            && runs.is_multiple_of(2)
+        {
+            for k in 0..2 {
+                if let Some(t) = shm::read(&hdr.side[k], &mut side_seq[k], &mut side_scratch) {
+                    std::mem::swap(&mut side_raw[k], &mut side_scratch);
+                    side_t[k] = t;
+                }
+            }
+            if side_t != side_last {
+                side_last = side_t;
+                let (l_img, r_img) = input.split_at_mut(s * s);
+                side[0].0.apply(&side_raw[0], l_img);
+                side[1].0.apply(&side_raw[1], r_img);
+                stretch(&mut input);
+                if let Some(out) = net.run_gray(&input, s, 2 * s) {
+                    let mut views = decode(&out, s);
+                    // One camera each: an empty other view leaves every box one-view, on the 1 m plane
+                    let objs = [0, 1].map(|k| {
+                        nms(&mut views[k]);
+                        let (o, v) = (side[k].1, &side[k].2);
+                        let views = [std::mem::take(&mut views[k]), Vec::new()];
+                        let img: &[u8] = &input;
+                        stereo::match_views(&views, [img, img], s, f, baseline, [o, o], &[v.clone(), v.clone()])
+                    });
+                    let t_capture_ns = side_t.map(|t| if t == 0 { 0 } else { t - (LATENCY_MS * 1e6) as u64 });
+                    side_set = Some(Arc::new(Side { objs, t_capture_ns }));
+                }
+            }
+        }
         let g = now_ns();
+        t_side += (g - g0) as f64 / 1e6;
         {
             let mut d = DETS.lock().unwrap();
             d.id += 1;
@@ -339,18 +403,20 @@ fn run(s: usize) -> Result<(), String> {
             d.view = Some(view.clone());
             d.align = align;
             d.correction = correction;
+            d.side = side_set;
         }
 
         frames += 1;
         t_rect += (b - a) as f64 / 1e6;
         t_net += (c - b) as f64 / 1e6;
         t_post += (e - c) as f64 / 1e6;
-        t_align = t_align.max((g - e) as f64 / 1e6);
+        t_align = t_align.max((g0 - e) as f64 / 1e6);
         let t = now_ns();
         if t - stat_t > 5_000_000_000 {
             let n = frames as f64;
             println!(
-                "detector: {:.1} fps | rectify {:.1} ms, yolo {:.1} ms, match {:.1} ms, align {:.0} ms | {}+{} dets, \
+                "detector: {:.1} fps | rectify {:.1} ms, yolo {:.1} ms, match {:.1} ms, align {:.0} ms, sides {:.1} ms | \
+                 {}+{} dets, \
                  {stereo_n} objects | age {:.0} ms | align patches: {} tried, {} flat, {} weak, {} at dy's end, \
                  {} at d's end, {} unclear, {} found",
                 n / ((t - stat_t) as f64 / 1e9),
@@ -358,6 +424,7 @@ fn run(s: usize) -> Result<(), String> {
                 t_net / n,
                 t_post / n,
                 t_align,
+                t_side / n,
                 views[0].len(),
                 views[1].len(),
                 (t - t_ns[0]) as f64 / 1e6,
@@ -371,7 +438,7 @@ fn run(s: usize) -> Result<(), String> {
             );
             why = stereo::AlignStats::default();
             YOLO_MS.store((t_net / n) as f32);
-            (frames, t_rect, t_net, t_post, t_align, stat_t) = (0, 0.0, 0.0, 0.0, 0.0, t);
+            (frames, t_rect, t_net, t_post, t_align, t_side, stat_t) = (0, 0.0, 0.0, 0.0, 0.0, 0.0, t);
         }
     }
     Ok(())

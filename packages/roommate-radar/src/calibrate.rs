@@ -377,7 +377,7 @@ pub fn run() -> i32 {
             let head = poses[0].mDeviceToAbsoluteTracking;
             let left = vr().left_hand().map(|i| &poses[i as usize]);
             let ctrl = crate::controllers(ago);
-            let ms = measure::measurements(&d.objs, &head, &[], &[], &set);
+            let ms = measure::measurements(&d.objs, &head, 0.0, &[], &[], &set);
             let view = d.view.as_deref();
             tracker.update(&ms, d.t_capture_ns as f64 / 1e9, |p| {
                 view.is_none_or(|v| measure::observable(v, &head, p, &[], &set))

@@ -1,4 +1,4 @@
-//! camserver: publish the newest normal-exposure SLAM camera frames to shared memory. Runs on a thread inside vrserver
+//! camserver: publish the newest normal-exposure SLAM and side camera frames to shared memory. Runs on a thread inside vrserver
 //! (lib.rs): pidfd_getfd on XRService needs ptrace rights, which Yama (ptrace_scope=1) only grants to XRService's
 //! ancestors (vrserver is its parent) or CAP_SYS_PTRACE.
 //! Read-only with respect to XRService: VIDIOC_QUERYBUF + mmap of its dmabufs, nothing else.
@@ -75,35 +75,71 @@ struct V4l2Format {
 }
 const _: () = assert!(size_of::<V4l2Format>() == 208);
 
-/// Where XRService puts slam_left and slam_right, and how. It sends them through the ISP (VFE0/1: NV12, Y stride 1152;
+/// Where XRService puts slam_left, slam_right, upper_left and upper_right, and how. It sends them through the ISP (VFE0/1: NV12, Y stride 1152;
 /// bytesperline says 1056, so the stride is checked through the image size, Y + UV = 1152 x 1536), unless the color
 /// passthrough camera add-on (arcimx616) is connected: that takes VFE0/1, and the SLAM cameras come raw from VFE4/3
 /// (GREY, packed). XRService logs its choice ("TrackingCameraInit: index: 0. video device: ..."; index 0 = slam_right,
 /// 1 = slam_left), and re-sets up its cameras when the add-on is plugged in or out.
 /// (Without the add-on: video0 = og01a1b 4-0036 = slam_right, video3 = og01a1b 4-0060 = slam_left; verified by
 /// rectifying both with the factory calibration: only this assignment gives an upright pair with purely horizontal
-/// disparity.)
+/// disparity.) The side cameras: upper_left is og0ve10 5-0060, upper_right 5-003e (XRService's log, "DeckardCaptureSource:
+/// Found camera"); they're optional, the SLAM ones aren't.
 struct Layout {
-    nodes: [&'static str; shm::NUM_CAMS], // left, right
+    nodes: [&'static str; 4], // slam left, slam right, side left, side right
+    slam: Fmt,
+    side: Fmt,
+}
+
+/// A camera's format as XRService sets it, and where its Y plane goes in shared memory.
+struct Fmt {
+    w: usize,
+    h: usize,
     fourcc: [u8; 4],
     stride: usize,
     sizeimage: usize,
+    out_stride: usize,
 }
 
+const SLAM_NV12: Fmt = Fmt {
+    w: shm::W,
+    h: shm::H,
+    fourcc: *b"NV12",
+    stride: shm::STRIDE,
+    sizeimage: shm::FRAME * 3 / 2,
+    out_stride: shm::STRIDE,
+};
 const LAYOUTS: [Layout; 2] = [
-    // Stock Frame, no add-on: the SLAM cameras get the ISP (VFE0/1); video9/13 are the upper cameras (640x480).
+    // Stock Frame, no add-on: the SLAM cameras get the ISP (VFE0/1); video9/13 are the side cameras (NV12, stride 640).
     Layout {
-        nodes: ["/dev/video3", "/dev/video0"],
-        fourcc: *b"NV12",
-        stride: shm::STRIDE,
-        sizeimage: shm::FRAME * 3 / 2,
+        nodes: ["/dev/video3", "/dev/video0", "/dev/video13", "/dev/video9"],
+        slam: SLAM_NV12,
+        side: Fmt {
+            w: shm::SIDE_W,
+            h: shm::SIDE_H,
+            fourcc: *b"NV12",
+            stride: shm::SIDE_W,
+            sizeimage: shm::SIDE_FRAME * 3 / 2,
+            out_stride: shm::SIDE_W,
+        },
     },
     // Arcturus Vision color passthrough add-on (arcimx616 x2) attached and owned by XRService or the Arcturus app:
-    // video0/3 are the add-on's cameras (2464x2464), the SLAM cameras are raw on VFE4/3, the upper ones on video6/7.
-    Layout { nodes: ["/dev/video13", "/dev/video9"], fourcc: *b"GREY", stride: shm::W, sizeimage: shm::W * shm::H },
+    // video0/3 are the add-on's cameras (2464x2464), the SLAM cameras are raw on VFE4/3, the side ones on video6/7
+    // (GREY, packed).
+    Layout {
+        nodes: ["/dev/video13", "/dev/video9", "/dev/video6", "/dev/video7"],
+        slam: Fmt { fourcc: *b"GREY", stride: shm::W, sizeimage: shm::W * shm::H, ..SLAM_NV12 },
+        side: Fmt {
+            w: shm::SIDE_W,
+            h: shm::SIDE_H,
+            fourcc: *b"GREY",
+            stride: shm::SIDE_W,
+            sizeimage: shm::SIDE_FRAME,
+            out_stride: shm::SIDE_W,
+        },
+    },
 ];
 
-fn check_format(vfd: &OwnedFd, l: &Layout) -> Result<(), String> {
+fn check_format(vfd: &OwnedFd, l: &Fmt) -> Result<(), String> {
     let mut f: V4l2Format = unsafe { std::mem::zeroed() };
     f.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if unsafe { libc::ioctl(vfd.as_raw_fd(), VIDIOC_G_FMT, &mut f) } < 0 {
@@ -111,15 +147,15 @@ fn check_format(vfd: &OwnedFd, l: &Layout) -> Result<(), String> {
     }
     let size = f.plane_fmt[0].sizeimage;
     if (f.width, f.height, f.pixelformat, size)
-        != (shm::W as u32, shm::H as u32, u32::from_le_bytes(l.fourcc), l.sizeimage as u32)
+        != (l.w as u32, l.h as u32, u32::from_le_bytes(l.fourcc), l.sizeimage as u32)
     {
         let fourcc = String::from_utf8_lossy(&f.pixelformat.to_le_bytes()).into_owned();
         return Err(format!(
             "{}x{} {fourcc} {size} B, not {}x{} {} {} B",
             f.width,
             f.height,
-            shm::W,
-            shm::H,
+            l.w,
+            l.h,
             String::from_utf8_lossy(&l.fourcc),
             l.sizeimage
         ));
@@ -147,9 +183,19 @@ fn pidfd_getfd(pidfd: &OwnedFd, fd: RawFd) -> Option<OwnedFd> {
     (r >= 0).then(|| unsafe { OwnedFd::from_raw_fd(r as RawFd) })
 }
 
-/// XRService's pid and pidfd and the layout it uses, with each camera's video fd found and its format checked. Err: why
-/// not (short, it's the tab's status).
-fn attach(cams: &mut [Camera]) -> Result<(i32, OwnedFd, &'static Layout), String> {
+/// Finds XRService's fd for camera c at `node`, checking its format.
+fn find_cam(c: &mut Camera, pid: i32, pidfd: &OwnedFd, node: &'static str, fmt: &'static Fmt) -> Result<(), String> {
+    c.node = node;
+    c.fmt = fmt;
+    c.remote_vfd = find_fd(pid, node).ok_or_else(|| format!("XRService has no {node} open"))?;
+    let vfd = pidfd_getfd(pidfd, c.remote_vfd)
+        .ok_or_else(|| format!("pidfd_getfd {node}: {}", std::io::Error::last_os_error()))?;
+    check_format(&vfd, fmt).map_err(|e| format!("{node}: {e}"))
+}
+
+/// XRService's pid and pidfd, with each camera's video fd found and its format checked (a side camera that isn't is
+/// left out, remote_vfd -1). Err: why not (short, it's the tab's status).
+fn attach(cams: &mut [Camera]) -> Result<(i32, OwnedFd), String> {
     let err = || std::io::Error::last_os_error();
     let pid = find_xrservice().ok_or("XRService not running")?;
     let r = unsafe { libc::syscall(libc::SYS_pidfd_open, pid, 0) };
@@ -159,14 +205,16 @@ fn attach(cams: &mut [Camera]) -> Result<(i32, OwnedFd, &'static Layout), String
     let pidfd = unsafe { OwnedFd::from_raw_fd(r as RawFd) };
     let mut why = Vec::new();
     for l in &LAYOUTS {
-        let r = cams.iter_mut().zip(l.nodes).try_for_each(|(c, node)| {
-            c.node = node;
-            c.remote_vfd = find_fd(pid, node).ok_or_else(|| format!("XRService has no {node} open"))?;
-            let vfd = pidfd_getfd(&pidfd, c.remote_vfd).ok_or_else(|| format!("pidfd_getfd {node}: {}", err()))?;
-            check_format(&vfd, l).map_err(|e| format!("{node}: {e}"))
-        });
-        match r {
-            Ok(()) => return Ok((pid, pidfd, l)),
+        match cams[..2].iter_mut().zip(l.nodes).try_for_each(|(c, node)| find_cam(c, pid, &pidfd, node, &l.slam)) {
+            Ok(()) => {
+                for (c, node) in cams[2..].iter_mut().zip(&l.nodes[2..]) {
+                    if let Err(e) = find_cam(c, pid, &pidfd, node, &l.side) {
+                        log!("no side camera: {e}\n");
+                        c.remote_vfd = -1;
+                    }
+                }
+                return Ok((pid, pidfd));
+            }
             Err(e) => why.push(e),
         }
     }
@@ -189,16 +237,18 @@ struct Mapping {
     fd: OwnedFd, // our dup of the dmabuf
     ino: u64,
     p: *const u8,
+    len: usize,
 }
 
 impl Drop for Mapping {
     fn drop(&mut self) {
-        unsafe { libc::munmap(self.p as *mut libc::c_void, shm::FRAME) };
+        unsafe { libc::munmap(self.p as *mut libc::c_void, self.len) };
     }
 }
 
 struct Camera {
     node: &'static str,
+    fmt: &'static Fmt,
     remote_vfd: RawFd,             // XRService's fd for /dev/videoN
     maps: HashMap<RawFd, Mapping>, // by XRService's dmabuf fd
     last_published: Option<u32>,   // V4L2 sequence number
@@ -225,12 +275,12 @@ struct Buf {
 // capture queue) alive after XRService closes it or exits, and the restarted XRService would get EBUSY on the camera.
 // False when XRService is gone or the fd isn't the camera any more (the format catches a node XRService gave to
 // another camera, as when the passthrough add-on is plugged in).
-fn query(c: &Camera, pidfd: &OwnedFd, l: &Layout, out: &mut Vec<Buf>) -> bool {
+fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
     out.clear();
     let Some(vfd) = pidfd_getfd(pidfd, c.remote_vfd) else {
         return false;
     };
-    if check_format(&vfd, l).is_err() {
+    if check_format(&vfd, c.fmt).is_err() {
         return false;
     }
     for index in 0..64 {
@@ -263,7 +313,8 @@ fn map_buf<'a>(c: &'a mut Camera, pidfd: &OwnedFd, remote_fd: RawFd) -> Option<&
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // The fd number may have been reused for something smaller (a dmabuf's st_size is its size): reading past its end
     // would SIGBUS vrserver.
-    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } < 0 || (st.st_size as usize) < shm::FRAME {
+    let len = c.fmt.stride * c.fmt.h; // the Y plane
+    if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } < 0 || (st.st_size as usize) < len {
         return None;
     }
     let ino = st.st_ino;
@@ -273,19 +324,18 @@ fn map_buf<'a>(c: &'a mut Camera, pidfd: &OwnedFd, remote_fd: RawFd) -> Option<&
     match c.maps.entry(remote_fd) {
         Entry::Occupied(e) => Some(e.into_mut()),
         Entry::Vacant(e) => {
-            let p = unsafe {
-                libc::mmap(std::ptr::null_mut(), shm::FRAME, libc::PROT_READ, libc::MAP_SHARED, fd.as_raw_fd(), 0)
-            };
-            (p != libc::MAP_FAILED).then(|| &*e.insert(Mapping { fd, ino, p: p as *const u8 }))
+            let p =
+                unsafe { libc::mmap(std::ptr::null_mut(), len, libc::PROT_READ, libc::MAP_SHARED, fd.as_raw_fd(), 0) };
+            (p != libc::MAP_FAILED).then(|| &*e.insert(Mapping { fd, ino, p: p as *const u8, len }))
         }
     }
 }
 
-fn sample_mean(y: &[u8]) -> f64 {
+fn sample_mean(y: &[u8], f: &Fmt) -> f64 {
     let (mut s, mut n) = (0u64, 0u64);
-    for r in (32..shm::H - 32).step_by(16) {
-        for x in (32..shm::W - 32).step_by(16) {
-            s += y[r * shm::STRIDE + x] as u64;
+    for r in (32..f.h - 32).step_by(16) {
+        for x in (32..f.w - 32).step_by(16) {
+            s += y[r * f.out_stride + x] as u64;
             n += 1;
         }
     }
@@ -326,21 +376,21 @@ pub fn run() {
     }
     let hdr = unsafe { &*(p as *const shm::Header) };
 
-    let mut cams = shm::CAM_NAMES.map(|_| Camera {
+    let mut cams: [Camera; 4] = std::array::from_fn(|_| Camera {
         node: "",
+        fmt: &SLAM_NV12,
         remote_vfd: -1,
         maps: HashMap::new(),
         last_published: None,
         normal_mean: 0.0,
     });
-    // Camera clock - CLOCK_MONOTONIC (at arrival), one for both: they're hardware-synchronized on one clock, and the
+    // Camera clock - CLOCK_MONOTONIC (at arrival), one for all: they're hardware-synchronized on one clock, and the
     // app pairs their frames by time. Tracked per camera, each one's arrival jitter moved its own, until they were
     // > 2 ms apart and no frames paired.
     let mut clock_offset_ns: Option<i64> = None;
     let mut frame = vec![0u8; shm::FRAME];
     let mut bufs = Vec::new();
     let mut pidfd: Option<OwnedFd> = None;
-    let mut layout = &LAYOUTS[0];
     let mut why_last = String::new();
     let mut clock_warned = false;
     let (mut published, mut last_report) = (0u64, shm::now_ns());
@@ -352,17 +402,18 @@ pub fn run() {
             }
             clock_offset_ns = None; // a restarted XRService may bring a new camera clock: the offset only creeps down
             match attach(&mut cams) {
-                Ok((pid, fd, l)) => {
+                Ok((pid, fd)) => {
                     log!(
-                        "attached to XRService pid {pid} ({}=left, {}=right; {})\n",
+                        "attached to XRService pid {pid} ({}=left, {}=right, sides {} {}; {})\n",
                         cams[0].node,
                         cams[1].node,
+                        if cams[2].remote_vfd < 0 { "-" } else { cams[2].node },
+                        if cams[3].remote_vfd < 0 { "-" } else { cams[3].node },
                         versions()
                     );
                     shm::set_problem(hdr, "");
                     why_last.clear();
                     pidfd = Some(fd);
-                    layout = l;
                 }
                 Err(why) => {
                     if why != why_last {
@@ -378,8 +429,17 @@ pub fn run() {
         let pfd = pidfd.as_ref().unwrap();
         let mut lost = false;
         for (ci, c) in cams.iter_mut().enumerate() {
-            // XRService went away or reset its queue
-            if !query(c, pfd, layout, &mut bufs) {
+            if c.remote_vfd < 0 {
+                continue; // a side camera that isn't there
+            }
+            // XRService went away or reset its queue. Without a side camera the SLAM ones still work, until they're
+            // lost too and everything is attached again.
+            if !query(c, pfd, &mut bufs) {
+                if ci >= 2 {
+                    log!("{}: side camera lost\n", c.node);
+                    c.close_all();
+                    continue;
+                }
                 lost = true;
                 break;
             }
@@ -394,7 +454,7 @@ pub fn run() {
                 continue;
             }
             // The camera clock runs ~210 ms ahead of CLOCK_MONOTONIC. Track the offset as the max of (timestamp -
-            // arrival), over both cameras: the least-delayed observation bounds it best.
+            // arrival), over all cameras: the least-delayed observation bounds it best.
             let off = bufs[0].ts_ns as i64 - arrival as i64;
             clock_offset_ns = Some(clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
             // The estimate adapts to any offset; one far from the usual ~210 ms means the camera clock changed.
@@ -408,23 +468,28 @@ pub fn run() {
                 if c.last_published.is_some_and(|l| b.seq <= l) {
                     break;
                 }
+                let f = c.fmt;
                 let Some(mb) = map_buf(c, pfd, b.remote_fd) else {
                     continue;
                 };
                 dma_buf_sync(&mb.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
-                let src = unsafe { std::slice::from_raw_parts(mb.p, shm::FRAME) };
-                for (dst, row) in frame.chunks_mut(shm::STRIDE).zip(src.chunks(layout.stride)) {
-                    dst[..shm::W].copy_from_slice(&row[..shm::W]);
+                let src = unsafe { std::slice::from_raw_parts(mb.p, mb.len) };
+                for (dst, row) in frame.chunks_mut(f.out_stride).zip(src.chunks(f.stride)).take(f.h) {
+                    dst[..f.w].copy_from_slice(&row[..f.w]);
                 }
                 dma_buf_sync(&mb.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
-                let m = sample_mean(&frame);
+                let m = sample_mean(&frame, f);
                 // brightness heuristic; black level ~16 (~4 raw), controller frames sit right on it
                 let normal = if c.normal_mean == 0.0 { m > 20.0 } else { m > 16.0 + 0.3 * (c.normal_mean - 16.0) };
                 if !normal {
                     continue;
                 }
                 c.normal_mean = if c.normal_mean == 0.0 { m } else { 0.9 * c.normal_mean + 0.1 * m };
-                shm::write(&hdr.slots[ci], &frame, (b.ts_ns as i64 - clock_offset_ns.unwrap()) as u64);
+                let t = (b.ts_ns as i64 - clock_offset_ns.unwrap()) as u64;
+                match ci {
+                    0 | 1 => shm::write(&hdr.slots[ci], &frame, t),
+                    _ => shm::write(&hdr.side[ci - 2], &frame, t),
+                }
                 c.last_published = Some(b.seq);
                 published += 1;
                 break;
@@ -437,11 +502,13 @@ pub fn run() {
         let t = shm::now_ns();
         if t - last_report > 5_000_000_000 {
             log!(
-                "published {:.1} frames/s; clock offset {:.2} ms; mean {:.0} / {:.0}\n",
+                "published {:.1} frames/s; clock offset {:.2} ms; mean {:.0} / {:.0}, sides {:.0} / {:.0}\n",
                 published as f64 / ((t - last_report) as f64 / 1e9),
                 clock_offset_ns.unwrap_or(0) as f64 / 1e6,
                 cams[0].normal_mean,
-                cams[1].normal_mean
+                cams[1].normal_mean,
+                cams[2].normal_mean,
+                cams[3].normal_mean
             );
             published = 0;
             last_report = t;

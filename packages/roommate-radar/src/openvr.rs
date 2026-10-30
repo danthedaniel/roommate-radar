@@ -216,6 +216,17 @@ impl Vr {
         call!(self.overlay(), SetOverlayTransformAbsolute, h, STANDING, m as *const _ as *mut _);
     }
 
+    /// Placed relative to the headset: moves with your head, like a HUD.
+    pub fn set_transform_hmd(&self, h: VROverlayHandle_t, m: &HmdMatrix34_t) {
+        call!(
+            self.overlay(),
+            SetOverlayTransformTrackedDeviceRelative,
+            h,
+            0, /* the HMD */
+            m as *const _ as *mut _
+        );
+    }
+
     pub fn set_alpha(&self, h: VROverlayHandle_t, alpha: f32) {
         call!(self.overlay(), SetOverlayAlpha, h, alpha);
     }

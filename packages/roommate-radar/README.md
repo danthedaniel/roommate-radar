@@ -13,7 +13,10 @@ detections (low confidence, one view) only extend tracks, no new track inside an
 become indistinguishable merge, and missing a track only counts where the views could have seen it. Boxes are drawn
 at a cubic Hermite between the track's filter states (position + velocity), played back one detection period behind
 (~300-350 ms total; drawing at the Kalman prediction for "now" instead looked worse), sized from the box's angular
-size at the filtered distance, fading in and out. Prior art and the measurements still to take are in
+size at the filtered distance, fading in and out. People and pets beside you get a chevron (one per side, the most confident; class-colored, at its elevation) at that edge of your view
+instead, head-locked (`hud.rs`): seen by a side camera (`upper_left`/`upper_right`, YOLO at half the rate on the two
+rectified to level views looking straight left and right, stacked like the SLAM pair; one view, so range from the
+floor only), or at the edge of the SLAM views by one camera only with no box near them. Prior art and the measurements still to take are in
 [docs/detection-tracking-prior-art.md](../../docs/detection-tracking-prior-art.md). Boxes with a controller, or the
 forearm leading to it, inside them (as seen from the camera, at any depth) are your arms and are ignored. Developer
 builds write each detector frame (boxes, objects, measurements, tracks) to `/tmp/roommate-radar-trace.jsonl`
@@ -49,14 +52,14 @@ builds write each detector frame (boxes, objects, measurements, tracks) to `/tmp
 ```
 driver_roommate_radar (camserver  ──/dev/shm/steamframe-cams──▶ detector thread (detector.rs) ──▶  tracker + OpenVR
 thread in vrserver): newest                                     rectify both views to              overlays (measure.rs,
-normal-exposure SLAM L/R frames                                 head-aligned pinholes, YOLO        tracker.rs, boxes.rs)
+normal-exposure SLAM + side frames                                head-aligned pinholes, YOLO        tracker.rs, boxes.rs)
 + capture time (CLOCK_MONOTONIC)                                (ncnn Vulkan) on the stacked
                                                                 pair, stereo-match, depth=fB/d
 ```
 
 Sources (`src/`, one cargo package): `main.rs` (main loop), `detector.rs` (the detector thread; `calib.rs`
 rectification, `stereo.rs` matching and depth), `measure.rs` (detections to tracker measurements, your own arms
-dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
+dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `hud.rs` (the side chevrons), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
 `textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `trace.rs` (developer builds), `v3.rs`; `openvr.rs` and
 `ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs`, and
 `shm.rs` between it and roommate-radar. `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)

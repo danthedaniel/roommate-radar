@@ -1,11 +1,9 @@
-//! SLAM camera calibration from the factory files (/persist, which the driver copies to shm::CALIB_DIR):
+//! Camera calibration (SLAM and side) from the factory files (/persist, which the driver copies to shm::CALIB_DIR):
 //! xrservice.json (per camera: Kannala-Brandt intrinsics, extrinsics) and device_config.json (`head`, and XRService's
 //! `cv/cad_from_cal`), chained into head_from_cam: head <- CAD (`head`) <- cal/cam0 frame (`cad_from_cal`) <- cam
 //! (extrinsics, mm). Every frame there is plus_x / plus_z axes (+ position) in its parent, with plus_y = plus_z x
 //! plus_x. Camera frames are OpenCV-style (x right, y down, z forward). And the rectification it gives.
 use serde_json::Value;
-
-use crate::shm;
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct CamCal {
@@ -16,6 +14,8 @@ pub struct CamCal {
     pub k: [f32; 4],
     pub r: [f32; 9], // head_from_cam rotation, row-major; camera frame is OpenCV (x right, y down, z fwd)
     pub t: [f32; 3], // camera position in head frame (m)
+    pub w: usize,    // image size (px)
+    pub h: usize,
 }
 
 /// parent_from_child: rotation (row-major), translation
@@ -43,7 +43,7 @@ fn inverse(a: &Pose) -> Pose {
     (rt, [0, 1, 2].map(|i| -(0..3).map(|k| rt[i][k] * a.1[k]).sum::<f64>()))
 }
 
-/// Camera `name` (shm::CAM_NAMES) from the calibration files in `dir`.
+/// Camera `name` (shm::CAM_NAMES, shm::SIDE_NAMES) from the calibration files in `dir`.
 pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
     let json = |f: &str| -> Result<Value, String> {
         let text = std::fs::read_to_string(format!("{dir}/{f}")).map_err(|e| format!("{dir}/{f}: {e}"))?;
@@ -76,6 +76,8 @@ pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
         k: [k("k1")?, k("k2")?, k("k3")?, k("k4")?],
         r: std::array::from_fn(|i| r[i / 3][i % 3] as f32),
         t: t.map(|v| v as f32),
+        w: cam["width"].as_u64().ok_or_else(|| bad(&format!("width for {name}")))? as usize,
+        h: cam["height"].as_u64().ok_or_else(|| bad(&format!("height for {name}")))? as usize,
     })
 }
 
@@ -155,12 +157,13 @@ impl Valid {
 
 pub struct Rectifier {
     s: usize,
+    stride: usize, // the camera frames'
     pub f: f32,
     map: Vec<[f32; 2]>, // (src x, src y) per output pixel; x < 0 = outside the fisheye
 }
 
 impl Rectifier {
-    pub fn new(c: &CamCal, size: usize, hfov_deg: f32) -> Rectifier {
+    pub fn new(c: &CamCal, size: usize, hfov_deg: f32, stride: usize) -> Rectifier {
         let s = size as f32;
         let f = (s / 2.0) / (hfov_deg.to_radians() / 2.0).tan();
         let mut map = vec![[-1.0, 0.0]; size * size];
@@ -182,12 +185,12 @@ impl Rectifier {
                 let thd = th * (1.0 + t2 * (c.k[0] + t2 * (c.k[1] + t2 * (c.k[2] + t2 * c.k[3]))));
                 let sc = if rr > 1e-9 { thd / rr } else { 0.0 };
                 let m = [c.fx * x * sc + c.cx, c.fy * y * sc + c.cy];
-                if m[0] >= 0.0 && m[1] >= 0.0 && m[0] <= (shm::W - 2) as f32 && m[1] <= (shm::H - 2) as f32 {
+                if m[0] >= 0.0 && m[1] >= 0.0 && m[0] <= (c.w - 2) as f32 && m[1] <= (c.h - 2) as f32 {
                     map[v * size + u] = m;
                 }
             }
         }
-        Rectifier { s: size, f, map }
+        Rectifier { s: size, stride, f, map }
     }
 
     /// Where the view has image (inside the fisheye and the sensor).
@@ -206,7 +209,7 @@ impl Rectifier {
         Valid { rows, cols }
     }
 
-    /// The S x S rectified view of a camera frame (Y plane, shm::STRIDE).
+    /// The S x S rectified view of a camera frame (Y plane, `stride` as given to new()).
     pub fn apply(&self, src: &[u8], dst: &mut [u8]) {
         for (d, &[sx, sy]) in dst[..self.s * self.s].iter_mut().zip(&self.map) {
             if sx < 0.0 {
@@ -215,10 +218,11 @@ impl Rectifier {
             }
             let (x, y) = (sx as usize, sy as usize);
             let (ax, ay) = (sx - x as f32, sy - y as f32);
-            let p = &src[y * shm::STRIDE + x..];
+            let st = self.stride;
+            let p = &src[y * st + x..];
             let at = |i: usize| p[i] as f32;
             let top = at(0) + ax * (at(1) - at(0));
-            let bot = at(shm::STRIDE) + ax * (at(shm::STRIDE + 1) - at(shm::STRIDE));
+            let bot = at(st) + ax * (at(st + 1) - at(st));
             *d = (top + ay * (bot - top) + 0.5) as u8;
         }
     }
@@ -239,8 +243,9 @@ mod tests {
         let cam = r#"{"plus_x": [1, 0, 0], "plus_z": [0, 0, 1], "position": [10, 0, 0]}"#;
         let kb = r#"{"cameraModel": "kb", "fx": 1, "fy": 2, "cx": 3, "cy": 4, "k1": 5, "k2": 6, "k3": 7, "k4": 8}"#;
         let dev = format!(r#"{{"head": {head}, "cv": {{"cad_from_cal": {ident}}}}}"#);
-        let xrs =
-            format!(r#"{{"cameras": [{{"sourceCamera": "slam_left", "extrinsics": {cam}, "intrinsics": [{kb}]}}]}}"#);
+        let xrs = format!(
+            r#"{{"cameras": [{{"sourceCamera": "slam_left", "width": 1056, "height": 1024, "extrinsics": {cam}, "intrinsics": [{kb}]}}]}}"#
+        );
         std::fs::write(dir.join("device_config.json"), dev).unwrap();
         std::fs::write(dir.join("xrservice.json"), xrs).unwrap();
         let c = load(dir.to_str().unwrap(), "slam_left");
@@ -267,7 +272,7 @@ mod tests {
         // An 8 x 8 view whose left 2 columns and bottom row are outside the image.
         let s = 8;
         let map = (0..s * s).map(|i| if i % s < 2 || i / s == s - 1 { [-1.0, 0.0] } else { [1.0, 1.0] }).collect();
-        let v = Rectifier { s, f: 1.0, map }.valid();
+        let v = Rectifier { s, stride: s, f: 1.0, map }.valid();
         assert!(
             v.rows[0] == (2.0, 8.0) && v.rows[7] == (8.0, 0.0) && v.cols[0] == (8.0, 0.0) && v.cols[4] == (0.0, 7.0)
         );

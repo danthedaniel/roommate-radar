@@ -34,7 +34,7 @@ pub struct Meas {
     pub weak: bool, // seen in one view only (depth from where it meets the floor)
 }
 
-const HIGH: f32 = 0.5; // detections at least this confident can start tracks (step 3); the rest only extend them
+pub const HIGH: f32 = 0.5; // detections at least this confident can start tracks (step 3); the rest only extend them
 const LOW: f32 = 0.25; // and below this they don't even do that: a person track walked onto a bicycle at 0.15
 const WEAK_NOISE: f32 = 2.0; // weak detections' position noise (std dev) is this many times what they measured
 const GATE: f32 = 11.34; // chi-square, 3 dof, 99%: max squared Mahalanobis distance for a match
