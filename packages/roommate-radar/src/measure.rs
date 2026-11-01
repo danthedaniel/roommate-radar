@@ -37,7 +37,7 @@ pub fn position(m: &HmdMatrix34_t) -> V3 {
 /// controller, inside the box: within its rectangle scaled to that point's depth (seen from the camera) and grown by
 /// 15 cm, and from 40 cm behind its depth to 80 cm in front of it (arm boxes measure too far: cut off by the image edge
 /// differently in each view, or merged with what's behind the arm). Box and arms (shoulder, controller) are in the
-/// view's frame (measurements()) at capture time.
+/// head frame at capture time.
 fn holds_controller(o: &Obj, arms: &[(V3, V3)]) -> bool {
     let m = 0.15;
     let (c, b) = (o.origin, &o.corners);
@@ -89,22 +89,6 @@ fn near_play_area(walls: &[[[f32; 2]; 2]], x: f32, z: f32) -> bool {
         }
     }
     inside
-}
-
-/// p turned by yaw (rad) about the vertical: + turns -z (ahead) toward -x (left).
-pub fn yawed(p: V3, yaw: f32) -> V3 {
-    let (s, c) = yaw.sin_cos();
-    v3(c * p.x + s * p.z, p.y, c * p.z - s * p.x)
-}
-
-/// Pose m turned by yaw about its vertical: its -z is m's yawed(-z, yaw).
-fn turned(m: &HmdMatrix34_t, yaw: f32) -> HmdMatrix34_t {
-    let (s, c) = yaw.sin_cos();
-    let mut t = *m;
-    for r in &mut t.m {
-        (r[0], r[2]) = (c * r[0] - s * r[2], s * r[0] + c * r[2]);
-    }
-    t
 }
 
 /// The standing universe's p in the head frame of pose m: R^T (p - t).
@@ -170,12 +154,10 @@ fn depth(o: &Obj, head: &HmdMatrix34_t) -> Option<(f32, f32, bool)> {
 /// depth (stereo, or for one-view boxes where they meet the floor), a wanted class, not around a controller (`ctrl`,
 /// standing universe, at capture), within range, not entirely above MAX_BOTTOM, and near the play area (`walls`: its
 /// boundary when that setting is on, else empty). Each with its noise: stereo's along the viewing ray, far larger than
-/// across it. objs are in the head frame turned by yaw (rad, measure::yawed): 0 for the SLAM pair, +-90 deg for the side
-/// cameras' views (detector.rs), which look along their frame's -z just as the SLAM views do along the head's.
+/// across it. objs are in the head frame.
 pub fn measurements(
     objs: &[Obj],
     head: &HmdMatrix34_t,
-    yaw: f32,
     ctrl: &[V3],
     walls: &[[[f32; 2]; 2]],
     set: &Settings,
@@ -186,10 +168,9 @@ pub fn measurements(
         .map(|&p| {
             let hand = to_head(head, p);
             let shoulder = v3(0.18f32.copysign(hand.x), -0.25, 0.0); // one body size for everyone
-            (yawed(shoulder, -yaw), yawed(hand, -yaw))
+            (shoulder, hand)
         })
         .collect();
-    let head = &turned(head, yaw);
     objs.iter()
         .filter(|o| wanted(o.cls, set))
         .filter_map(|o| {
@@ -229,19 +210,6 @@ pub fn measurements(
             })
         })
         .collect()
-}
-
-/// Whether m's box is big enough, as an angle, to be within the range setting: for the chevrons (hud.rs), where the
-/// range from one camera (from the floor alone) is too rough to go by. Its height, or its width where the view cuts its
-/// height off, against the least its class shows (m) at set.max_dist.
-pub fn near_by_size(m: &Meas, set: &Settings) -> bool {
-    let (h, w) = match m.cls {
-        0 => (1.2, 0.4),
-        15 => (0.25, 0.3),
-        _ => (0.4, 0.5),
-    };
-    let (size, least) = if m.clip_h { (m.w, w) } else { (m.h, h) };
-    size / (m.p - m.eye).len() >= least / set.max_dist
 }
 
 /// Whether something at p (standing universe), with the head at `head`, would have been detected: inside both views'
@@ -293,7 +261,7 @@ mod tests {
     }
 
     fn meas(objs: &[Obj], ctrl: &[V3], set: &Settings) -> Vec<Meas> {
-        measurements(objs, &HEAD, 0.0, ctrl, &[], set)
+        measurements(objs, &HEAD, ctrl, &[], set)
     }
 
     #[test]
@@ -311,29 +279,6 @@ mod tests {
         assert!(m.sigma_ray >= m.sigma_lat && m.sigma_lat < 0.1);
         assert_eq!(meas(&[hand()], &[], &set).len(), 1, "a hand without a controller is kept");
         assert_eq!(meas(&[hand()], &ctrl, &Settings { hands: false, ..set }).len(), 1, "unless ignoring hands is off");
-    }
-
-    #[test]
-    fn small_boxes_are_far() {
-        // A person 1.5 m tall 2 m away is within the 3 m range; a box 30 cm tall there is someone far beyond it.
-        let set = Settings::default();
-        assert!(meas(&[person(0, 2.0, 0.0)], &[], &set).iter().all(|m| near_by_size(m, &set)));
-        let small = obj(0, 2.0, [[-0.1, -0.7, -2.0], [0.1, -0.7, -2.0], [0.1, -1.0, -2.0], [-0.1, -1.0, -2.0]]);
-        let ms = meas(&[small], &[], &set);
-        assert!(ms.len() == 1 && !near_by_size(&ms[0], &set));
-    }
-
-    #[test]
-    fn side_views() {
-        // The left side camera's view (yaw +90 deg): a person 2 m along its -z is 2 m to your left, and your left arm
-        // reaching out to a controller there is dropped.
-        let set = Settings::default();
-        let left = std::f32::consts::FRAC_PI_2;
-        let ms = measurements(&[person(0, 2.0, 0.0)], &HEAD, left, &[], &[], &set);
-        assert!(ms.len() == 1 && (ms[0].p.x + 2.0).abs() < 1e-4 && ms[0].p.z.abs() < 1e-4);
-        let arm = obj(0, 0.55, [[-0.06, -0.2, -0.55], [0.06, -0.2, -0.55], [0.06, -0.3, -0.55], [-0.06, -0.3, -0.55]]);
-        assert!(measurements(&[arm], &HEAD, left, &[v3(-0.6, 1.35, 0.0)], &[], &set).is_empty());
-        assert_eq!(measurements(&[arm], &HEAD, left, &[], &[], &set).len(), 1);
     }
 
     #[test]
@@ -381,7 +326,7 @@ mod tests {
             !near_play_area(&walls, e + 0.1, 0.0) && !near_play_area(&walls, c, c) && near_play_area(&[], 9.0, 9.0)
         );
         let set = Settings::default();
-        let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, 0.0, &[], &walls, &set).len();
+        let ms = |z| measurements(&[person(0, z, 0.0)], &HEAD, &[], &walls, &set).len();
         assert!(
             ms(e - 0.5) == 1 && ms(e + 0.5) == 0,
             "kept half a meter inside the margin, dropped half a meter past it"

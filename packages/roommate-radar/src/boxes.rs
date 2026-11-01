@@ -70,7 +70,6 @@ pub struct Boxes {
     label_text: [String; MAX],
     shown: usize,
     last_log_ns: u64,
-    pub drawn: Vec<V3>, // where the boxes shown now are (standing universe)
 }
 
 impl Boxes {
@@ -90,12 +89,18 @@ impl Boxes {
             label_text: Default::default(),
             shown: 0,
             last_log_ns: 0,
-            drawn: Vec::new(),
         })
     }
 
-    /// Shows the tracker's confirmed tracks at playback time t_play (s) to the head at `head`.
-    pub fn show(&mut self, tracker: &Tracker, head: &HmdMatrix34_t, now: u64, t_play: f64, textures: &mut Textures) {
+    /// Shows the tracker's confirmed tracks at playback time t_play (s) to the head at `head`; how many it shows.
+    pub fn show(
+        &mut self,
+        tracker: &Tracker,
+        head: &HmdMatrix34_t,
+        now: u64,
+        t_play: f64,
+        textures: &mut Textures,
+    ) -> usize {
         let h = position(head);
         let now_s = now as f64 / 1e9;
         let mut log = String::new(); // each shown box relative to the head
@@ -104,12 +109,10 @@ impl Boxes {
         let mut order: Vec<&Track> = tracker.tracks.iter().filter(|t| opacity(t, now_s) > 0.0).collect();
         order.sort_by_key(|t| t.id);
         let mut n = 0;
-        self.drawn.clear();
         for t in order.into_iter().take(MAX) {
             let alpha = opacity(t, now_s);
             let (c, w, ht) = sample_at(&t.history, t_play);
             let (w, ht) = (w.max(0.05), ht.max(0.05));
-            self.drawn.push(c);
             // Bearing from the head's horizontal forward (-z), + = right; height relative to the eyes.
             let (vx, vz, fx, fz) = (c.x - h.x, c.z - h.z, -head.m[0][2], -head.m[2][2]);
             log += &format!(
@@ -159,6 +162,7 @@ impl Boxes {
             self.last_log_ns = now;
         }
         self.shown = n;
+        n
     }
 }
 
