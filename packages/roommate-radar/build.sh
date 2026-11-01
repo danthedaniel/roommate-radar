@@ -11,7 +11,8 @@
 # build.sh --developer (make deploy): with the developer feature (YOLO time in the tab's status, confidence on the labels).
 set -e
 cd "$(dirname "$0")/../.."
-check= features=
+check=
+features=
 [ "$1" = --check ] && check=1
 [ "$1" = --developer ] && features=developer
 
