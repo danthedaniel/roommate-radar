@@ -7,13 +7,13 @@
 //!   1. merge detections of one object (within each other's noise),
 //!   2. predict every track to the frame's capture time,
 //!   3. match tracks to confident detections (Hungarian), then the tracks left over to weak ones (low confidence, or
-//!      seen in one view only): weak ones keep a track going, with more noise, but never start one; below LOW, nothing,
+//!      seen in one view only): weak ones keep a track going, with more noise, but never start one; below MIN_SCORE, nothing,
 //!   4. unmatched confident detections start tentative tracks, unless they're within an existing track's gate,
 //!   5. tracks that have become indistinguishable are merged; tentative tracks that miss are dropped, confirmed ones
-//!      after missing for MAX_UNSEEN while they should have been seen (`seen`: in view and in range; out of view a
-//!      track waits to be found again), or MAX_AGE after their last match in any case.
+//!      after missing for MAX_UNSEEN_S while they should have been seen (`visible`: in view and in range; out of view a
+//!      track waits to be found again), or MAX_AGE_S after their last match in any case.
 //!
-//! Each track keeps its last few filter states (position, velocity, size) for drawing (boxes.rs).
+//! Each track keeps its last few filter states (position, velocity, size) for drawing (outlines.rs).
 use std::collections::VecDeque;
 
 use crate::assign::assign;
@@ -33,24 +33,24 @@ pub struct Meas {
     pub eye: V3,      // head position at capture
     pub clip_w: bool, // the box's width (height) is cut off by the view's edge: it's not the object's
     pub clip_h: bool,
-    pub weak: bool, // seen in one view only (depth from where it meets the floor)
+    pub one_view: bool, // seen in one view only (depth from where it meets the floor)
 }
 
-const HIGH: f32 = 0.5; // detections at least this confident can start tracks (step 4); the rest only extend them
-const LOW: f32 = 0.25; // and below this they don't even do that: a person track walked onto a bicycle at 0.15
+const START_SCORE: f32 = 0.5; // detections at least this confident can start tracks (step 4); the rest only extend them
+const MIN_SCORE: f32 = 0.25; // and below this they don't even do that: a person track walked onto a bicycle at 0.15
 const WEAK_NOISE: f32 = 2.0; // weak detections' position noise (std dev) is this many times what they measured
-const GATE: f32 = 11.34; // chi-square, 3 dof, 99%: max squared Mahalanobis distance for a match
+const MATCH_GATE: f32 = 11.34; // chi-square, 3 dof, 99%: max squared Mahalanobis distance for a match
 const BIRTH_GATE: f32 = 16.27; // 99.9%: an unmatched detection this close to a track doesn't start another
-const MERGE_GATE: f32 = 11.34; // tracks closer than this (squared Mahalanobis under both covariances) are one
-const MAX_DIST: f32 = 4.0; // and nothing matches or merges farther apart than this (m), whatever the noise says
+const TRACK_MERGE_GATE: f32 = 11.34; // tracks closer than this (squared Mahalanobis under both covariances) are one
+const MAX_DIST_M: f32 = 4.0; // and nothing matches or merges farther apart than this (m), whatever the noise says
 const MERGE_SPEED: f32 = 0.8; // nor tracks whose velocities differ by more than this (m/s): two people passing
 pub const MIN_HITS: u32 = 2; // matches before a track is confirmed (shown)
-const MAX_UNSEEN: f64 = 1.0; // drop a track after missing for this long (s) while it should have been seen
-const MAX_AGE: f64 = 5.0; // and this long (s) after its last match in any case: out of view, it can still be found
-pub const SHOW_S: f64 = 0.6; // tracks matched within this long (s) are drawn; boxes.rs fades them out after
-const REACQUIRE: f64 = 0.75; // matched again after this long (s) without: restart its motion from the detection
-const ACCEL: f32 = 2.0; // process noise: std dev of a person's acceleration (m/s^2)
-const VEL0: f32 = 1.0; // a new track's velocity std dev (m/s)
+const MAX_UNSEEN_S: f64 = 1.0; // drop a track after missing for this long (s) while it should have been seen
+const MAX_AGE_S: f64 = 5.0; // and this long (s) after its last match in any case: out of view, it can still be found
+pub const SHOW_S: f64 = 0.6; // tracks matched within this long (s) are drawn; outlines.rs fades them out after
+const REACQUIRE_GAP_S: f64 = 0.75; // matched again after this long (s) without: restart its motion from the detection
+const ACCEL_SIGMA: f32 = 2.0; // process noise: std dev of a person's acceleration (m/s^2)
+const VEL0_SIGMA: f32 = 1.0; // a new track's velocity std dev (m/s)
 const HISTORY: usize = 4; // filter states kept per track, for drawing
 // Size and class: a step is 90% there after this long (s), whatever the detection rate.
 const SETTLE_S: f64 = 1.0;
@@ -74,7 +74,7 @@ fn sub(a: &M3, b: &M3) -> M3 {
     mat(|i, j| a[i][j] - b[i][j])
 }
 
-fn tr(a: &M3) -> M3 {
+fn transpose(a: &M3) -> M3 {
     mat(|i, j| a[j][i])
 }
 
@@ -82,11 +82,11 @@ fn diag(s: f32) -> M3 {
     mat(|i, j| if i == j { s } else { 0.0 })
 }
 
-fn sym(a: &M3) -> M3 {
+fn symmetrize(a: &M3) -> M3 {
     mat(|i, j| (a[i][j] + a[j][i]) / 2.0)
 }
 
-fn mv(a: &M3, v: V3) -> V3 {
+fn mul_vec(a: &M3, v: V3) -> V3 {
     let r = |i: usize| a[i][0] * v.x + a[i][1] * v.y + a[i][2] * v.z;
     v3(r(0), r(1), r(2))
 }
@@ -97,38 +97,38 @@ fn inv(a: &M3) -> Option<(M3, f32)> {
         let (i1, i2, j1, j2) = ((i + 1) % 3, (i + 2) % 3, (j + 1) % 3, (j + 2) % 3);
         a[i1][j1] * a[i2][j2] - a[i1][j2] * a[i2][j1]
     };
-    let det = a[0][0] * c(0, 0) + a[0][1] * c(0, 1) + a[0][2] * c(0, 2);
-    if det.abs() < 1e-12 || !det.is_finite() {
+    let determinant = a[0][0] * c(0, 0) + a[0][1] * c(0, 1) + a[0][2] * c(0, 2);
+    if determinant.abs() < 1e-12 || !determinant.is_finite() {
         return None;
     }
-    Some((mat(|i, j| c(j, i) / det), det))
+    Some((mat(|i, j| c(j, i) / determinant), determinant))
 }
 
 /// The measurement's position covariance: sigma_lat across its ray, sigma_ray along it; times scale^2.
-fn noise(m: &Meas, scale: f32) -> M3 {
+fn ray_cov(m: &Meas, scale: f32) -> M3 {
     let (l, r) = ((m.sigma_lat * scale).powi(2), (m.sigma_ray * scale).powi(2));
     let u = [m.ray.x, m.ray.y, m.ray.z];
     mat(|i, j| (if i == j { l } else { 0.0 }) + (r - l) * u[i] * u[j])
 }
 
 /// Whether a detection is strong: confident and seen in both views. Weak ones only extend tracks, and count for less.
-fn strong(m: &Meas) -> bool {
-    !m.weak && m.score >= HIGH
+fn is_strong(m: &Meas) -> bool {
+    !m.one_view && m.score >= START_SCORE
 }
 
 /// A track's motion state started from m alone: at m, still, as uncertain as m (position, position-velocity, velocity).
 fn start(m: &Meas) -> (V3, V3, M3, M3, M3) {
-    (m.p, V3::default(), noise(m, 1.0), diag(0.0), diag(VEL0 * VEL0))
+    (m.p, V3::default(), ray_cov(m, 1.0), diag(0.0), diag(VEL0_SIGMA * VEL0_SIGMA))
 }
 
 /// Squared Mahalanobis distance between a and b under covariance s, and ln|s|; None if too far apart or singular.
 fn mahalanobis(a: V3, b: V3, s: &M3) -> Option<(f32, f32)> {
     let d = a - b;
-    if d.len() > MAX_DIST {
+    if d.len() > MAX_DIST_M {
         return None;
     }
-    let (si, det) = inv(s)?;
-    Some((d.dot(mv(&si, d)), det.max(1e-30).ln()))
+    let (si, det_s) = inv(s)?;
+    Some((d.dot(mul_vec(&si, d)), det_s.max(1e-30).ln()))
 }
 
 fn class_index(cls: usize) -> usize {
@@ -150,15 +150,15 @@ pub struct Track {
     pub id: u64,
     pub p: V3, // box center position (m) and velocity (m/s)
     pub v: V3,
-    pa: M3, // covariance: position, position-velocity, velocity
-    pb: M3,
-    pc: M3,
+    cov_pp: M3, // covariance: position, position-velocity, velocity
+    cov_pv: M3,
+    cov_vv: M3,
     pub w: f32, // box size (m), smoothed
     pub h: f32,
     pub t: f64,          // time the filter state is at (s)
     pub last_seen: f64,  // time of the last match (s)
-    pub shown_from: f64, // when it was confirmed, or matched again after a gap: boxes.rs fades it in from there
-    unseen: f64,         // time missed while it should have been seen, since the last match (s)
+    pub shown_from: f64, // when it was confirmed, or matched again after a gap: outlines.rs fades it in from there
+    missed_s: f64,       // time missed while it should have been seen, since the last match (s)
     pub hits: u32,
     pub cls: usize,
     class_score: [f32; 3], // per CLASSES, decaying sums of the matched detections' scores
@@ -168,20 +168,20 @@ pub struct Track {
 
 impl Track {
     fn new(id: u64, m: &Meas, t: f64) -> Track {
-        let (p, v, pa, pb, pc) = start(m);
+        let (p, v, cov_pp, cov_pv, cov_vv) = start(m);
         let mut tr = Track {
             id,
             p,
             v,
-            pa,
-            pb,
-            pc,
+            cov_pp,
+            cov_pv,
+            cov_vv,
             w: m.w,
             h: m.h,
             t,
             last_seen: t,
             shown_from: t,
-            unseen: 0.0,
+            missed_s: 0.0,
             hits: 1,
             cls: m.cls,
             class_score: [0.0; 3],
@@ -193,67 +193,67 @@ impl Track {
         tr
     }
 
-    pub fn cov(&self) -> M3 {
-        self.pa
+    pub fn pos_cov(&self) -> M3 {
+        self.cov_pp
     }
 
-    /// Constant velocity to time t, with white-noise acceleration (ACCEL).
+    /// Constant velocity to time t, with white-noise acceleration (ACCEL_SIGMA).
     fn predict(&mut self, t: f64) {
         let dt = (t - self.t).max(0.0) as f32;
-        let q = ACCEL * ACCEL;
-        let (a, b, c) = (&self.pa, &self.pb, &self.pc);
-        let bt = tr(b);
-        self.pa = mat(|i, j| {
+        let q = ACCEL_SIGMA * ACCEL_SIGMA;
+        let (a, b, c) = (&self.cov_pp, &self.cov_pv, &self.cov_vv);
+        let bt = transpose(b);
+        self.cov_pp = mat(|i, j| {
             a[i][j] + dt * (b[i][j] + bt[i][j]) + dt * dt * c[i][j] + if i == j { q * dt.powi(3) / 3.0 } else { 0.0 }
         });
-        self.pb = mat(|i, j| b[i][j] + dt * c[i][j] + if i == j { q * dt * dt / 2.0 } else { 0.0 });
-        self.pc = mat(|i, j| c[i][j] + if i == j { q * dt } else { 0.0 });
-        // Moving at the last velocity for at most REACQUIRE after the last match: a track out of view is looked for
+        self.cov_pv = mat(|i, j| b[i][j] + dt * c[i][j] + if i == j { q * dt * dt / 2.0 } else { 0.0 });
+        self.cov_vv = mat(|i, j| c[i][j] + if i == j { q * dt } else { 0.0 });
+        // Moving at the last velocity for at most REACQUIRE_GAP_S after the last match: a track out of view is looked for
         // around where it was last seen, with the uncertainty growing, not sent off along a guess.
-        let moving = ((self.last_seen + REACQUIRE).min(t) - self.t).max(0.0) as f32;
-        self.p = self.p + self.v * moving;
+        let coast_s = ((self.last_seen + REACQUIRE_GAP_S).min(t) - self.t).max(0.0) as f32;
+        self.p = self.p + self.v * coast_s;
         self.t = self.t.max(t);
     }
 
     /// m's noise for this track. A box that changed size moved its center without the object moving (arms reaching
     /// out widened a seated person's box from 1.2 to 2.4 m, and its depth jumped too), by up to half the change.
-    fn meas_noise(&self, m: &Meas) -> M3 {
-        let k = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
-        let dw = if m.clip_w { 0.0 } else { (m.w * k - self.w).abs() };
-        let dh = if m.clip_h { 0.0 } else { (m.h * k - self.h).abs() };
-        add(&noise(m, if strong(m) { 1.0 } else { WEAK_NOISE }), &diag((dw.max(dh) / 2.0).powi(2)))
+    fn meas_cov(&self, m: &Meas) -> M3 {
+        let range_ratio = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
+        let dw = if m.clip_w { 0.0 } else { (m.w * range_ratio - self.w).abs() };
+        let dh = if m.clip_h { 0.0 } else { (m.h * range_ratio - self.h).abs() };
+        add(&ray_cov(m, if is_strong(m) { 1.0 } else { WEAK_NOISE }), &diag((dw.max(dh) / 2.0).powi(2)))
     }
 
     /// Squared Mahalanobis distance of m from the prediction, and ln|S|.
     fn distance(&self, m: &Meas) -> Option<(f32, f32)> {
-        mahalanobis(m.p, self.p, &add(&self.pa, &self.meas_noise(m)))
+        mahalanobis(m.p, self.p, &add(&self.cov_pp, &self.meas_cov(m)))
     }
 
     /// Kalman update with m (position measured, H = [I 0]); sizes and class smoothed.
     fn update(&mut self, m: &Meas, t: f64) {
-        if t - self.last_seen > REACQUIRE {
+        if t - self.last_seen > REACQUIRE_GAP_S {
             // Back after a long gap (out of view, occluded): the coasted velocity is a guess, start over from here.
-            (self.p, self.v, self.pa, self.pb, self.pc) = start(m);
+            (self.p, self.v, self.cov_pp, self.cov_pv, self.cov_vv) = start(m);
             self.history.clear();
-        } else if let Some((si, _)) = inv(&add(&self.pa, &self.meas_noise(m))) {
-            let (kp, kv) = (mul(&self.pa, &si), mul(&tr(&self.pb), &si));
+        } else if let Some((si, _)) = inv(&add(&self.cov_pp, &self.meas_cov(m))) {
+            let (kp, kv) = (mul(&self.cov_pp, &si), mul(&transpose(&self.cov_pv), &si));
             let y = m.p - self.p;
-            self.p = self.p + mv(&kp, y);
-            self.v = self.v + mv(&kv, y);
-            let (a, b, c) = (self.pa, self.pb, self.pc);
-            self.pa = sym(&sub(&a, &mul(&kp, &a)));
-            self.pb = sub(&b, &mul(&kp, &b));
-            self.pc = sym(&sub(&c, &mul(&kv, &b)));
+            self.p = self.p + mul_vec(&kp, y);
+            self.v = self.v + mul_vec(&kv, y);
+            let (a, b, c) = (self.cov_pp, self.cov_pv, self.cov_vv);
+            self.cov_pp = symmetrize(&sub(&a, &mul(&kp, &a)));
+            self.cov_pv = sub(&b, &mul(&kp, &b));
+            self.cov_vv = symmetrize(&sub(&c, &mul(&kv, &b)));
         }
         let alpha = alpha(t - self.last_seen);
         // Size from the box's angular size at the filtered distance (not the measured one: stereo depth noise would
         // make it breathe), only from sides that aren't cut off by the view's edge.
-        let k = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
+        let range_ratio = (self.p - m.eye).len() / (m.p - m.eye).len().max(0.1);
         if !m.clip_w {
-            self.w += alpha * (m.w * k - self.w);
+            self.w += alpha * (m.w * range_ratio - self.w);
         }
         if !m.clip_h {
-            self.h += alpha * (m.h * k - self.h);
+            self.h += alpha * (m.h * range_ratio - self.h);
         }
         for s in &mut self.class_score {
             *s *= 1.0 - alpha;
@@ -268,7 +268,7 @@ impl Track {
         if self.hits == MIN_HITS || t - self.last_seen > SHOW_S {
             self.shown_from = t;
         }
-        (self.last_seen, self.score, self.unseen) = (t, m.score, 0.0);
+        (self.last_seen, self.score, self.missed_s) = (t, m.score, 0.0);
         self.remember();
     }
 
@@ -299,7 +299,7 @@ impl Track {
             eye: v3(0.0, 1.6, 0.0),
             clip_w: false,
             clip_h: false,
-            weak: false,
+            one_view: false,
         };
         Track::new(1, &m, t)
     }
@@ -311,15 +311,16 @@ fn alpha(dt: f64) -> f32 {
 }
 
 /// Detections of one object (a person boxed twice, a person and a dog box on one body), within each other's noise:
-/// only the most confident (seen in both views first) is kept. Those below LOW go first: the tracker ignores them, so
+/// only the most confident (seen in both views first) is kept. Those below MIN_SCORE go first: the tracker ignores them, so
 /// one mustn't win over a stronger one and leave nothing.
 fn merge_detections(dets: &[Meas]) -> Vec<Meas> {
-    let mut order: Vec<&Meas> = dets.iter().filter(|m| m.score >= LOW).collect();
-    order.sort_by(|a, b| a.weak.cmp(&b.weak).then(b.score.total_cmp(&a.score)));
+    let mut order: Vec<&Meas> = dets.iter().filter(|m| m.score >= MIN_SCORE).collect();
+    order.sort_by(|a, b| a.one_view.cmp(&b.one_view).then(b.score.total_cmp(&a.score)));
     let mut keep: Vec<Meas> = Vec::new();
     for m in order {
-        let close =
-            |k: &Meas| mahalanobis(m.p, k.p, &add(&noise(m, 1.0), &noise(k, 1.0))).is_some_and(|(d2, _)| d2 < GATE);
+        let close = |k: &Meas| {
+            mahalanobis(m.p, k.p, &add(&ray_cov(m, 1.0), &ray_cov(k, 1.0))).is_some_and(|(d2, _)| d2 < MATCH_GATE)
+        };
         if !keep.iter().any(close) {
             keep.push(*m);
         }
@@ -338,36 +339,38 @@ pub struct Tracker {
 }
 
 impl Tracker {
-    /// One detector frame captured at time t (s). seen(p): whether something at p would have been detected then (in
+    /// One detector frame captured at time t (s). visible(p): whether something at p would have been detected then (in
     /// both views, in range): only then does missing it count against its track.
-    pub fn update(&mut self, dets: &[Meas], t: f64, seen: impl Fn(V3) -> bool) {
+    pub fn update(&mut self, dets: &[Meas], t: f64, visible: impl Fn(V3) -> bool) {
         let dets = merge_detections(dets);
         let dts: Vec<f64> = self.tracks.iter().map(|tr| (t - tr.t).max(0.0)).collect();
         for tr in &mut self.tracks {
             tr.predict(t);
         }
-        let (strong, weak): (Vec<usize>, Vec<usize>) = (0..dets.len()).partition(|&i| strong(&dets[i]));
+        let (strong_idx, weak_idx): (Vec<usize>, Vec<usize>) = (0..dets.len()).partition(|&i| is_strong(&dets[i]));
         let mut matched = vec![false; self.tracks.len()];
-        let unused = self.match_dets(&dets, &strong, &mut matched, t, false);
+        let unused = self.match_dets(&dets, &strong_idx, &mut matched, t, false);
         // Not tentative tracks (ByteTrack): a hand's box and a weak one 0.7 m below it confirmed a track that flew off.
-        self.match_dets(&dets, &weak, &mut matched, t, true);
+        self.match_dets(&dets, &weak_idx, &mut matched, t, true);
         for (i, tr) in self.tracks.iter_mut().enumerate() {
-            if !matched[i] && seen(tr.p) {
-                tr.unseen += dts[i];
+            if !matched[i] && visible(tr.p) {
+                tr.missed_s += dts[i];
             }
         }
         for i in unused {
-            let d = &dets[i];
+            let m = &dets[i];
             // Within a track's gate (a second detection of it, or a depth jump the match left over): not a new object.
-            if self.tracks.iter().any(|tr| tr.distance(d).is_some_and(|(d2, _)| d2 < BIRTH_GATE)) {
+            if self.tracks.iter().any(|tr| tr.distance(m).is_some_and(|(d2, _)| d2 < BIRTH_GATE)) {
                 continue;
             }
             self.next_id += 1;
-            self.tracks.push(Track::new(self.next_id, d, t));
+            self.tracks.push(Track::new(self.next_id, m, t));
             matched.push(true);
         }
         let alive: Vec<bool> = (self.tracks.iter().zip(&matched))
-            .map(|(tr, &m)| (tr.hits >= MIN_HITS || m) && tr.unseen <= MAX_UNSEEN && t - tr.last_seen <= MAX_AGE)
+            .map(|(tr, &was_matched)| {
+                (tr.hits >= MIN_HITS || was_matched) && tr.missed_s <= MAX_UNSEEN_S && t - tr.last_seen <= MAX_AGE_S
+            })
             .collect();
         let gone = self.indistinguishable(&alive);
         let mut i = 0;
@@ -387,7 +390,8 @@ impl Tracker {
         for i in 0..n {
             for j in i + 1..n {
                 let (a, b) = (&self.tracks[i], &self.tracks[j]);
-                let close = mahalanobis(a.p, b.p, &add(&a.pa, &b.pa)).is_some_and(|(d2, _)| d2 < MERGE_GATE);
+                let close =
+                    mahalanobis(a.p, b.p, &add(&a.cov_pp, &b.cov_pp)).is_some_and(|(d2, _)| d2 < TRACK_MERGE_GATE);
                 if !alive[i] || !alive[j] || gone[i] || gone[j] || !close || (a.v - b.v).len() > MERGE_SPEED {
                     continue;
                 }
@@ -417,18 +421,18 @@ impl Tracker {
                 which
                     .iter()
                     .map(|&c| match tr.distance(&dets[c]) {
-                        Some((d2, ln_det)) if d2 < GATE => {
-                            let class = if dets[c].cls != tr.cls { CLASS_COST } else { 0.0 };
-                            (d2 + ln_det + COST_OFFSET + class).max(0.0)
+                        Some((d2, ln_det_s)) if d2 < MATCH_GATE => {
+                            let class_penalty = if dets[c].cls != tr.cls { CLASS_COST } else { 0.0 };
+                            (d2 + ln_det_s + COST_OFFSET + class_penalty).max(0.0)
                         }
                         _ => f32::INFINITY,
                     })
                     .collect()
             })
             .collect();
-        let m = assign(&cost, NO_MATCH);
+        let assignment = assign(&cost, NO_MATCH);
         let mut used = vec![false; which.len()];
-        for (r, col) in m.into_iter().enumerate() {
+        for (r, col) in assignment.into_iter().enumerate() {
             let Some(col) = col else {
                 continue;
             };
@@ -459,7 +463,7 @@ mod tests {
             eye: V3::default(),
             clip_w: false,
             clip_h: false,
-            weak: false,
+            one_view: false,
         }
     }
 
@@ -479,10 +483,10 @@ mod tests {
     #[test]
     fn inverse() {
         let a = [[2.0, 0.5, 0.0], [0.5, 1.0, 0.2], [0.0, 0.2, 3.0]];
-        let (ai, det) = inv(&a).unwrap();
+        let (ai, determinant) = inv(&a).unwrap();
         let i = mul(&a, &ai);
         assert!((0..3).all(|r| (0..3).all(|c| (i[r][c] - if r == c { 1.0 } else { 0.0 }).abs() < 1e-5)));
-        assert!((det - (2.0 * (3.0 - 0.04) - 0.5 * 1.5)).abs() < 1e-5);
+        assert!((determinant - (2.0 * (3.0 - 0.04) - 0.5 * 1.5)).abs() < 1e-5);
         assert!(inv(&diag(0.0)).is_none());
     }
 
@@ -509,26 +513,26 @@ mod tests {
         assert!(trk.tracks.len() == 1 && (tr.v.x - 1.0).abs() < 0.35 && tr.v.z.abs() < 0.35, "velocity {:?}", tr.v);
         assert!(tr.history.len() == 4 && tr.history[0].t == 8.0 * 0.25 && tr.history[3].t == 11.0 * 0.25);
 
-        let far = Meas { weak: true, ..meas(v3(-3.0, 0.0, -3.0), 0.9) };
+        let far = Meas { one_view: true, ..meas(v3(-3.0, 0.0, -3.0), 0.9) };
         trk.update(&[meas(v3(1.5, 0.0, -3.0), 0.3), far], 3.0, always);
         assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0);
         trk.update(&[meas(v3(1.75, 0.0, -3.0), 0.15)], 3.25, always);
-        assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0, "below LOW: no match");
+        assert!(trk.tracks.len() == 1 && trk.tracks[0].last_seen == 3.0, "below MIN_SCORE: no match");
     }
 
     #[test]
     fn weak_detections_dont_confirm() {
         let mut trk = Tracker::default();
         trk.update(&[meas(v3(0.0, 0.0, -2.0), 0.8)], 0.0, always);
-        trk.update(&[Meas { weak: true, ..meas(v3(0.0, -0.3, -2.0), 0.8) }], 0.25, always);
+        trk.update(&[Meas { one_view: true, ..meas(v3(0.0, -0.3, -2.0), 0.8) }], 0.25, always);
         assert!(trk.tracks.iter().all(|tr| tr.hits < MIN_HITS));
     }
 
     #[test]
     fn arms_out_dont_move_a_seated_person() {
         // 2.7 m away, still; after 2 s, now and then the box is twice as wide (arms out), its center 0.3 m to the side
-        // (half the change) and 0.4 m farther. Up to 1.5 m/s without meas_noise's size term, 0.9 with it: what's left
-        // is the constant-velocity model believing a jump (ACCEL).
+        // (half the change) and 0.4 m farther. Up to 1.5 m/s without meas_cov's size term, 0.9 with it: what's left
+        // is the constant-velocity model believing a jump (ACCEL_SIGMA).
         let mut trk = Tracker::default();
         for i in 0..30 {
             let arms = i >= 8 && i % 3 == 0;
@@ -579,13 +583,13 @@ mod tests {
             two.update(&[meas(v3(x, 0.0, -2.0), 0.9), meas(v3(-x, 0.0, -2.4), 0.9)], t as f64, always);
         }
         assert!(two.tracks.len() == 2 && two.tracks[0].v.x > 0.5 && two.tracks[1].v.x < -0.5);
-        two.update(&[], 2.75 + MAX_UNSEEN + 0.1, always);
+        two.update(&[], 2.75 + MAX_UNSEEN_S + 0.1, always);
         assert!(two.tracks.is_empty());
     }
 
     #[test]
     fn out_of_view_tracks_wait_to_be_found_again() {
-        // Missing while out of view doesn't count; after MAX_AGE it's dropped anyway. Found again after a while, its
+        // Missing while out of view doesn't count; after MAX_AGE_S it's dropped anyway. Found again after a while, its
         // motion starts over from the new detection.
         let mut trk = Tracker::default();
         for i in 0..4 {
@@ -597,8 +601,8 @@ mod tests {
         trk.update(&[meas(v3(1.0, 0.0, -3.0), 0.9)], 3.25, always);
         let tr = &trk.tracks[0];
         assert!(tr.v == V3::default() && tr.history.len() == 1 && tr.p == v3(1.0, 0.0, -3.0), "restarted");
-        trk.update(&[], 3.25 + MAX_AGE + 0.1, never);
-        assert!(trk.tracks.is_empty(), "dropped after MAX_AGE");
+        trk.update(&[], 3.25 + MAX_AGE_S + 0.1, never);
+        assert!(trk.tracks.is_empty(), "dropped after MAX_AGE_S");
     }
 
     #[test]
@@ -623,9 +627,9 @@ mod tests {
         let a = meas(v3(0.0, 0.0, -6.0), 0.9);
         assert_eq!(merge_detections(&[a, meas(v3(0.0, 0.0, -6.5), 0.5)]).len(), 1);
         assert_eq!(merge_detections(&[a, meas(v3(0.6, 0.0, -6.0), 0.5)]).len(), 2);
-        assert_eq!(merge_detections(&[Meas { weak: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.5)])[0].p.z, -6.5);
+        assert_eq!(merge_detections(&[Meas { one_view: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.5)])[0].p.z, -6.5);
         // but one too weak to be used doesn't hide a strong one
-        assert_eq!(merge_detections(&[Meas { weak: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.1)])[0].p.z, -6.0);
+        assert_eq!(merge_detections(&[Meas { one_view: true, ..a }, meas(v3(0.0, 0.0, -6.5), 0.1)])[0].p.z, -6.0);
     }
 
     #[test]

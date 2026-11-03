@@ -28,22 +28,23 @@ pub fn setup() {
 }
 
 fn register_driver() {
-    let path = format!("{}/.config/openvr/openvrpaths.vrpath", std::env::var("HOME").unwrap_or_default());
-    let Some(paths) = std::fs::read_to_string(&path).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok()) else {
-        return eprintln!("roommate-radar: can't read {path}; driver not registered");
+    let vrpath_file = format!("{}/.config/openvr/openvrpaths.vrpath", std::env::var("HOME").unwrap_or_default());
+    let Some(vrpath) = std::fs::read_to_string(&vrpath_file).ok().and_then(|t| serde_json::from_str::<Value>(&t).ok())
+    else {
+        return eprintln!("roommate-radar: can't read {vrpath_file}; driver not registered");
     };
-    let driver = std::env::current_dir().unwrap_or_default().join("driver").to_string_lossy().into_owned();
-    if paths["external_drivers"].as_array().is_some_and(|d| d.iter().any(|p| *p == driver)) {
+    let driver_dir = std::env::current_dir().unwrap_or_default().join("driver").to_string_lossy().into_owned();
+    if vrpath["external_drivers"].as_array().is_some_and(|drivers| drivers.iter().any(|entry| *entry == driver_dir)) {
         return;
     }
-    let Some(runtime) = paths["runtime"][0].as_str() else {
-        return eprintln!("roommate-radar: no runtime in {path}; driver not registered");
+    let Some(runtime_dir) = vrpath["runtime"][0].as_str() else {
+        return eprintln!("roommate-radar: no runtime in {vrpath_file}; driver not registered");
     };
-    match Command::new(format!("{runtime}/bin/vrpathreg.sh")).args(["adddriver", &driver]).status() {
+    match Command::new(format!("{runtime_dir}/bin/vrpathreg.sh")).args(["adddriver", &driver_dir]).status() {
         Ok(s) if s.success() => {}
-        r => return eprintln!("roommate-radar: vrpathreg.sh adddriver {driver}: {r:?}; driver not registered"),
+        r => return eprintln!("roommate-radar: vrpathreg.sh adddriver {driver_dir}: {r:?}; driver not registered"),
     }
-    println!("roommate-radar: registered {driver} with SteamVR; it loads when SteamVR next starts");
+    println!("roommate-radar: registered {driver_dir} with SteamVR; it loads when SteamVR next starts");
 }
 
 /// The entry Steam generates for a "Launch SteamVR Overlay" app.
@@ -70,23 +71,23 @@ pub fn register_app() -> i32 {
     let Ok(appid) = std::env::var("SteamAppId") else {
         return 0; // not started by Steam
     };
-    let key = &format!("steam.overlay.{appid}");
+    let app_key = &format!("steam.overlay.{appid}");
     if let Err(e) = openvr::init(openvr::EVRApplicationType_VRApplication_Utility) {
         eprintln!("VR_Init: {e}");
         return 1;
     }
-    if !vr().is_dashboard_overlay(key)
+    if !vr().is_dashboard_overlay(app_key)
         && let Ok(path) = std::fs::canonicalize("roommate-radar.vrmanifest")
     {
-        let e = vr().add_manifest(&path.to_string_lossy());
-        println!("roommate-radar: AddApplicationManifest({}): {}", path.display(), vr().app_error_name(e));
+        let add_result = vr().add_manifest(&path.to_string_lossy());
+        println!("roommate-radar: AddApplicationManifest({}): {}", path.display(), vr().app_error_name(add_result));
     }
-    if !vr().is_dashboard_overlay(key) {
-        println!("roommate-radar: {key} isn't a dashboard overlay yet; restart SteamVR");
+    if !vr().is_dashboard_overlay(app_key) {
+        println!("roommate-radar: {app_key} isn't a dashboard overlay yet; restart SteamVR");
     }
-    if vr().auto_launch(key) {
-        let e = vr().set_auto_launch(key, false);
-        println!("roommate-radar: SetApplicationAutoLaunch({key}, false): {}", vr().app_error_name(e));
+    if vr().auto_launch(app_key) {
+        let set_result = vr().set_auto_launch(app_key, false);
+        println!("roommate-radar: SetApplicationAutoLaunch({app_key}, false): {}", vr().app_error_name(set_result));
     }
     openvr::shutdown();
     0

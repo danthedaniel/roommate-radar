@@ -86,7 +86,7 @@ const _: () = assert!(size_of::<V4l2Format>() == 208);
 /// disparity.)
 struct Layout {
     nodes: [&'static str; shm::NUM_CAMS], // left, right
-    slam: Fmt,
+    fmt: Fmt,
 }
 
 /// A camera's format as XRService sets it, and where its Y plane goes in shared memory.
@@ -94,32 +94,32 @@ struct Fmt {
     w: usize,
     h: usize,
     fourcc: [u8; 4],
-    stride: usize,
+    src_stride: usize,
     sizeimage: usize,
-    out_stride: usize,
+    shm_stride: usize,
 }
 
 const SLAM_NV12: Fmt = Fmt {
     w: shm::W,
     h: shm::H,
     fourcc: *b"NV12",
-    stride: shm::STRIDE,
-    sizeimage: shm::FRAME * 3 / 2,
-    out_stride: shm::STRIDE,
+    src_stride: shm::STRIDE,
+    sizeimage: shm::Y_BYTES * 3 / 2,
+    shm_stride: shm::STRIDE,
 };
 const LAYOUTS: [Layout; 2] = [
     // Stock Frame, no add-on: the SLAM cameras get the ISP (VFE0/1); video9/13 are the upper cameras (640x480).
-    Layout { nodes: ["/dev/video3", "/dev/video0"], slam: SLAM_NV12 },
+    Layout { nodes: ["/dev/video3", "/dev/video0"], fmt: SLAM_NV12 },
     // Arcturus Vision color passthrough add-on (arcimx616 x2) attached and owned by XRService or the Arcturus app:
     // video0/3 are the add-on's cameras (2464x2464), the SLAM cameras are raw on VFE4/3 (GREY, packed), the upper ones
     // on video6/7.
     Layout {
         nodes: ["/dev/video13", "/dev/video9"],
-        slam: Fmt { fourcc: *b"GREY", stride: shm::W, sizeimage: shm::W * shm::H, ..SLAM_NV12 },
+        fmt: Fmt { fourcc: *b"GREY", src_stride: shm::W, sizeimage: shm::W * shm::H, ..SLAM_NV12 },
     },
 ];
 
-fn check_format(vfd: &OwnedFd, l: &Fmt) -> Result<(), String> {
+fn check_format(vfd: &OwnedFd, expected: &Fmt) -> Result<(), String> {
     let mut f: V4l2Format = unsafe { std::mem::zeroed() };
     f.type_ = V4L2_BUF_TYPE_VIDEO_CAPTURE_MPLANE;
     if unsafe { libc::ioctl(vfd.as_raw_fd(), VIDIOC_G_FMT, &mut f) } < 0 {
@@ -127,17 +127,17 @@ fn check_format(vfd: &OwnedFd, l: &Fmt) -> Result<(), String> {
     }
     let size = f.plane_fmt[0].sizeimage;
     if (f.width, f.height, f.pixelformat, size)
-        != (l.w as u32, l.h as u32, u32::from_le_bytes(l.fourcc), l.sizeimage as u32)
+        != (expected.w as u32, expected.h as u32, u32::from_le_bytes(expected.fourcc), expected.sizeimage as u32)
     {
         let fourcc = String::from_utf8_lossy(&f.pixelformat.to_le_bytes()).into_owned();
         return Err(format!(
             "{}x{} {fourcc} {size} B, not {}x{} {} {} B",
             f.width,
             f.height,
-            l.w,
-            l.h,
-            String::from_utf8_lossy(&l.fourcc),
-            l.sizeimage
+            expected.w,
+            expected.h,
+            String::from_utf8_lossy(&expected.fourcc),
+            expected.sizeimage
         ));
     }
     Ok(())
@@ -184,8 +184,8 @@ fn attach(cams: &mut [Camera]) -> Result<(i32, OwnedFd), String> {
     }
     let pidfd = unsafe { OwnedFd::from_raw_fd(r as RawFd) };
     let mut why = Vec::new();
-    for l in &LAYOUTS {
-        match cams.iter_mut().zip(l.nodes).try_for_each(|(c, node)| find_cam(c, pid, &pidfd, node, &l.slam)) {
+    for layout in &LAYOUTS {
+        match cams.iter_mut().zip(layout.nodes).try_for_each(|(c, node)| find_cam(c, pid, &pidfd, node, &layout.fmt)) {
             Ok(()) => return Ok((pid, pidfd)),
             Err(e) => why.push(e),
         }
@@ -221,18 +221,18 @@ impl Drop for Mapping {
 struct Camera {
     node: &'static str,
     fmt: &'static Fmt,
-    remote_vfd: RawFd,             // XRService's fd for /dev/videoN
-    maps: HashMap<RawFd, Mapping>, // by XRService's dmabuf fd
-    last_published: Option<u32>,   // V4L2 sequence number
-    normal_mean: f64,              // running brightness of normal-exposure frames
-    published_ns: u64,             // when it last published (CLOCK_MONOTONIC)
+    remote_vfd: RawFd,               // XRService's fd for /dev/videoN
+    maps: HashMap<RawFd, Mapping>,   // by XRService's dmabuf fd
+    last_published_seq: Option<u32>, // V4L2 sequence number
+    normal_mean: f64,                // running brightness of normal-exposure frames
+    last_published_ns: u64,          // when it last published (CLOCK_MONOTONIC)
 }
 
 impl Camera {
-    fn close_all(&mut self) {
+    fn reset(&mut self) {
         self.maps.clear();
         self.remote_vfd = -1;
-        self.last_published = None; // a restarted XRService counts from 0 again
+        self.last_published_seq = None; // a restarted XRService counts from 0 again
         // and may bring a new exposure: the mean only follows frames it accepts
         self.normal_mean = 0.0;
     }
@@ -241,14 +241,14 @@ impl Camera {
 struct Buf {
     seq: u32,
     ts_ns: u64,
-    remote_fd: RawFd,
+    dmabuf_fd: RawFd, // XRService's
 }
 
 // The video fd is dup'd only for the duration of the query: a dup we kept would keep XRService's open file (and its
 // capture queue) alive after XRService closes it or exits, and the restarted XRService would get EBUSY on the camera.
 // False when XRService is gone or the fd isn't the camera any more (the format catches a node XRService gave to
 // another camera, as when the passthrough add-on is plugged in).
-fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
+fn query_bufs(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
     out.clear();
     let Some(vfd) = pidfd_getfd(pidfd, c.remote_vfd) else {
         return false;
@@ -274,7 +274,7 @@ fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
         out.push(Buf {
             seq: b.sequence,
             ts_ns: b.timestamp.tv_sec as u64 * 1_000_000_000 + b.timestamp.tv_usec as u64 * 1000,
-            remote_fd: planes[0].m as i32,
+            dmabuf_fd: planes[0].m as i32,
         });
     }
     true
@@ -282,20 +282,20 @@ fn query(c: &Camera, pidfd: &OwnedFd, out: &mut Vec<Buf>) -> bool {
 
 // The cached mapping is only reused while XRService's fd still names the same dmabuf (each has its own inode): fd
 // numbers come back for new buffers when XRService reallocates, and the old mapping would serve a frozen frame.
-fn map_buf<'a>(c: &'a mut Camera, pidfd: &OwnedFd, remote_fd: RawFd) -> Option<&'a Mapping> {
-    let fd = pidfd_getfd(pidfd, remote_fd)?;
+fn map_buf<'a>(c: &'a mut Camera, pidfd: &OwnedFd, dmabuf_fd: RawFd) -> Option<&'a Mapping> {
+    let fd = pidfd_getfd(pidfd, dmabuf_fd)?;
     let mut st: libc::stat = unsafe { std::mem::zeroed() };
     // The fd number may have been reused for something smaller (a dmabuf's st_size is its size): reading past its end
     // would SIGBUS vrserver.
-    let len = c.fmt.stride * c.fmt.h; // the Y plane
+    let len = c.fmt.src_stride * c.fmt.h; // the Y plane
     if unsafe { libc::fstat(fd.as_raw_fd(), &mut st) } < 0 || (st.st_size as usize) < len {
         return None;
     }
     let ino = st.st_ino;
-    if c.maps.get(&remote_fd).is_some_and(|m| m.ino != ino) {
-        c.maps.remove(&remote_fd);
+    if c.maps.get(&dmabuf_fd).is_some_and(|m| m.ino != ino) {
+        c.maps.remove(&dmabuf_fd);
     }
-    match c.maps.entry(remote_fd) {
+    match c.maps.entry(dmabuf_fd) {
         Entry::Occupied(e) => Some(e.into_mut()),
         Entry::Vacant(e) => {
             let p =
@@ -309,7 +309,7 @@ fn sample_mean(y: &[u8], f: &Fmt) -> f64 {
     let (mut s, mut n) = (0u64, 0u64);
     for r in (32..f.h - 32).step_by(16) {
         for x in (32..f.w - 32).step_by(16) {
-            s += y[r * f.out_stride + x] as u64;
+            s += y[r * f.shm_stride + x] as u64;
             n += 1;
         }
     }
@@ -326,19 +326,20 @@ pub fn stop() {
 
 /// Runs until stop().
 pub fn run() {
-    let file = fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o644).open(shm::PATH);
+    let file =
+        fs::OpenOptions::new().read(true).write(true).create(true).truncate(false).mode(0o644).open(shm::CAMS_PATH);
     let file = match file.and_then(|f| {
         f.set_permissions(fs::Permissions::from_mode(0o644))?;
-        f.set_len(size_of::<shm::Header>() as u64)?;
+        f.set_len(size_of::<shm::Region>() as u64)?;
         Ok(f)
     }) {
         Ok(f) => f,
-        Err(e) => return log!("{}: {e}\n", shm::PATH),
+        Err(e) => return log!("{}: {e}\n", shm::CAMS_PATH),
     };
     let p = unsafe {
         libc::mmap(
             std::ptr::null_mut(),
-            size_of::<shm::Header>(),
+            size_of::<shm::Region>(),
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED,
             file.as_raw_fd(),
@@ -346,33 +347,33 @@ pub fn run() {
         )
     };
     if p == libc::MAP_FAILED {
-        return log!("mmap {}: {}\n", shm::PATH, std::io::Error::last_os_error());
+        return log!("mmap {}: {}\n", shm::CAMS_PATH, std::io::Error::last_os_error());
     }
-    let hdr = unsafe { &*(p as *const shm::Header) };
+    let hdr = unsafe { &*(p as *const shm::Region) };
 
     let mut cams: [Camera; shm::NUM_CAMS] = std::array::from_fn(|_| Camera {
         node: "",
         fmt: &SLAM_NV12,
         remote_vfd: -1,
         maps: HashMap::new(),
-        last_published: None,
+        last_published_seq: None,
         normal_mean: 0.0,
-        published_ns: 0,
+        last_published_ns: 0,
     });
     // Camera clock - CLOCK_MONOTONIC (at arrival), one for both: they're hardware-synchronized on one clock, and the
     // app pairs their frames by time. Tracked per camera, each one's arrival jitter moved its own, until they were
     // > 2 ms apart and no frames paired.
     let mut clock_offset_ns: Option<i64> = None;
-    let mut frame = vec![0u8; shm::FRAME];
+    let mut frame = vec![0u8; shm::Y_BYTES];
     let mut bufs = Vec::new();
     let mut pidfd: Option<OwnedFd> = None;
     let mut why_last = String::new();
-    let (mut published, mut last_report) = (0u64, shm::now_ns());
+    let (mut published_since_report, mut last_report) = (0u64, shm::now_ns());
 
     while !QUIT.load(Ordering::Relaxed) {
         if pidfd.is_none() {
             for c in &mut cams {
-                c.close_all();
+                c.reset();
             }
             clock_offset_ns = None; // a restarted XRService may bring a new camera clock: the offset only creeps down
             match attach(&mut cams) {
@@ -402,59 +403,60 @@ pub fn run() {
         let mut lost = false;
         for (ci, c) in cams.iter_mut().enumerate() {
             // XRService went away or reset its queue
-            if !query(c, pfd, &mut bufs) {
+            if !query_bufs(c, pfd, &mut bufs) {
                 lost = true;
                 break;
             }
-            let arrival = shm::now_ns();
+            let arrival_ns = shm::now_ns();
             bufs.sort_by(|a, b| b.seq.cmp(&a.seq));
             // XRService restarted streaming on the same fd: its sequence counts from 0 again
-            if c.last_published.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
-                c.last_published = None;
+            if c.last_published_seq.is_some_and(|l| bufs.first().is_some_and(|b| b.seq < l)) {
+                c.last_published_seq = None;
                 clock_offset_ns = None;
                 c.maps.clear(); // and may have reallocated its buffers under other fd numbers
             }
-            if bufs.is_empty() || Some(bufs[0].seq) == c.last_published {
+            if bufs.is_empty() || Some(bufs[0].seq) == c.last_published_seq {
                 continue;
             }
             // The camera clock runs ahead of CLOCK_MONOTONIC (~2 s on the Frame, in the status line below). Track
             // the offset as the max of (timestamp - arrival), over both cameras: the least-delayed observation bounds
             // it best.
-            let off = bufs[0].ts_ns as i64 - arrival as i64;
-            clock_offset_ns = Some(clock_offset_ns.map_or(off, |o| (o - 1000).max(off)));
+            let offset_ns = bufs[0].ts_ns as i64 - arrival_ns as i64;
+            clock_offset_ns = Some(clock_offset_ns.map_or(offset_ns, |o| (o - 1000).max(offset_ns)));
 
             // Newest completed frame that is a normal exposure (not the ~37us controller-LED one).
             for b in &bufs {
-                if c.last_published.is_some_and(|l| b.seq <= l) {
+                if c.last_published_seq.is_some_and(|l| b.seq <= l) {
                     break;
                 }
-                let f = c.fmt;
-                let Some(mb) = map_buf(c, pfd, b.remote_fd) else {
+                let fmt = c.fmt;
+                let Some(mapping) = map_buf(c, pfd, b.dmabuf_fd) else {
                     continue;
                 };
-                dma_buf_sync(&mb.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
-                let src = unsafe { std::slice::from_raw_parts(mb.p, mb.len) };
-                for (dst, row) in frame.chunks_mut(f.out_stride).zip(src.chunks(f.stride)).take(f.h) {
-                    dst[..f.w].copy_from_slice(&row[..f.w]);
+                dma_buf_sync(&mapping.fd, DMA_BUF_SYNC_START | DMA_BUF_SYNC_READ);
+                let src = unsafe { std::slice::from_raw_parts(mapping.p, mapping.len) };
+                for (dst, row) in frame.chunks_mut(fmt.shm_stride).zip(src.chunks(fmt.src_stride)).take(fmt.h) {
+                    dst[..fmt.w].copy_from_slice(&row[..fmt.w]);
                 }
-                dma_buf_sync(&mb.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
-                let m = sample_mean(&frame, f);
+                dma_buf_sync(&mapping.fd, DMA_BUF_SYNC_END | DMA_BUF_SYNC_READ);
+                let mean = sample_mean(&frame, fmt);
                 // brightness heuristic; black level ~16 (~4 raw), controller frames sit right on it
-                let normal = if c.normal_mean == 0.0 { m > 20.0 } else { m > 16.0 + 0.3 * (c.normal_mean - 16.0) };
+                let normal =
+                    if c.normal_mean == 0.0 { mean > 20.0 } else { mean > 16.0 + 0.3 * (c.normal_mean - 16.0) };
                 if !normal {
                     // Nothing for a second (the lights went off, the lens covered): learn the brightness again, or a
                     // mean from before would reject every frame for good.
-                    if arrival - c.published_ns > 1_000_000_000 {
+                    if arrival_ns - c.last_published_ns > 1_000_000_000 {
                         c.normal_mean = 0.0;
                     }
                     continue;
                 }
-                c.normal_mean = if c.normal_mean == 0.0 { m } else { 0.9 * c.normal_mean + 0.1 * m };
-                let t = (b.ts_ns as i64 - clock_offset_ns.unwrap()) as u64;
-                shm::write(&hdr.slots[ci], &frame, t);
-                c.last_published = Some(b.seq);
-                c.published_ns = arrival;
-                published += 1;
+                c.normal_mean = if c.normal_mean == 0.0 { mean } else { 0.9 * c.normal_mean + 0.1 * mean };
+                let capture_ns = (b.ts_ns as i64 - clock_offset_ns.unwrap()) as u64;
+                shm::write(&hdr.slots[ci], &frame, capture_ns);
+                c.last_published_seq = Some(b.seq);
+                c.last_published_ns = arrival_ns;
+                published_since_report += 1;
                 break;
             }
         }
@@ -462,19 +464,19 @@ pub fn run() {
             pidfd = None;
         }
 
-        let t = shm::now_ns();
-        if t - last_report > 5_000_000_000 {
+        let now_ns = shm::now_ns();
+        if now_ns - last_report > 5_000_000_000 {
             log!(
                 "published {:.1} frames/s; clock offset {:.2} ms; mean {:.0} / {:.0}\n",
-                published as f64 / ((t - last_report) as f64 / 1e9),
+                published_since_report as f64 / ((now_ns - last_report) as f64 / 1e9),
                 clock_offset_ns.unwrap_or(0) as f64 / 1e6,
                 cams[0].normal_mean,
                 cams[1].normal_mean
             );
-            published = 0;
-            last_report = t;
+            published_since_report = 0;
+            last_report = now_ns;
         }
         std::thread::sleep(Duration::from_millis(1));
     }
-    unsafe { libc::munmap(p, size_of::<shm::Header>()) };
+    unsafe { libc::munmap(p, size_of::<shm::Region>()) };
 }

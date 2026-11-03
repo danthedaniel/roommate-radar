@@ -95,29 +95,29 @@ static THREADS: Mutex<Vec<JoinHandle<()>>> = Mutex::new(Vec::new()); // camserve
 
 /// To vrserver.txt once vrserver gave us its log, else stderr.
 fn log_line(line: &str) {
-    let log = DRIVER_LOG.load(Ordering::Acquire);
-    if log.is_null() {
+    let driver_log = DRIVER_LOG.load(Ordering::Acquire);
+    if driver_log.is_null() {
         // Not eprint!, which panics (aborting vrserver, as it unwinds into C) if stderr fails
         let _ = std::io::Write::write_all(&mut std::io::stderr(), line.as_bytes());
         return;
     }
     let line = CString::new(line.replace('\0', "")).unwrap();
-    unsafe { (*(*log).vtable)(log, line.as_ptr()) };
+    unsafe { (*(*driver_log).vtable)(driver_log, line.as_ptr()) };
 }
 
 unsafe extern "C" fn init(_: *mut Provider, ctx: *mut DriverContext) -> i32 {
     let mut err = 0;
-    let log = unsafe { (*(*ctx).vtable)(ctx, LOG_VERSION.as_ptr(), &mut err) };
-    if log.is_null() {
+    let driver_log = unsafe { (*(*ctx).vtable)(ctx, LOG_VERSION.as_ptr(), &mut err) };
+    if driver_log.is_null() {
         return INIT_ERROR_INTERFACE_NOT_FOUND;
     }
-    DRIVER_LOG.store(log.cast(), Ordering::Release);
+    DRIVER_LOG.store(driver_log.cast(), Ordering::Release);
     // roommate-radar runs in the Steam Runtime container, which doesn't see /persist: copy the factory calibration next
-    // to the frames (calib.rs reads it).
+    // to the frames (rectify.rs reads it).
     let _ = std::fs::create_dir_all(shm::CALIB_DIR);
-    for f in ["xrservice.json", "device_config.json"] {
-        if let Err(e) = std::fs::copy(format!("/persist/{f}"), format!("{}/{f}", shm::CALIB_DIR)) {
-            log!("copy /persist/{f}: {e}\n");
+    for calib_file in ["xrservice.json", "device_config.json"] {
+        if let Err(e) = std::fs::copy(format!("/persist/{calib_file}"), format!("{}/{calib_file}", shm::CALIB_DIR)) {
+            log!("copy /persist/{calib_file}: {e}\n");
         }
     }
     *THREADS.lock().unwrap() = vec![std::thread::spawn(camserver::run), std::thread::spawn(autostart::run)];
@@ -146,10 +146,10 @@ unsafe extern "C" fn noop(_: *mut Provider) {}
 /// vrserver asks for the provider here.
 ///
 /// # Safety
-/// `iface` is a C string, `err` null or writable.
+/// `interface_version` is a C string, `err` null or writable.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn HmdDriverFactory(iface: *const c_char, err: *mut i32) -> *mut c_void {
-    if unsafe { CStr::from_ptr(iface) } == PROVIDER_VERSION {
+pub unsafe extern "C" fn HmdDriverFactory(interface_version: *const c_char, err: *mut i32) -> *mut c_void {
+    if unsafe { CStr::from_ptr(interface_version) } == PROVIDER_VERSION {
         return &PROVIDER as *const Provider as *mut c_void;
     }
     if !err.is_null() {

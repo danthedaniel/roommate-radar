@@ -3,7 +3,7 @@
 //! on their chest: its tracked position is the truth to compare with.
 //!
 //! A "Calibration" dashboard tab picks the distance (and the detection resolution); Start counts GET_READY_S down, then
-//! records for RECORD_S and stops by itself, every detector frame going to PATH (trace.rs) with the recording's number,
+//! records for RECORD_S and stops by itself, every detector frame going to RECORDING_PATH (trace.rs) with the recording's number,
 //! its distance and the left controller's pose. The tab shows the countdown as a progress bar, with what the detector
 //! sees; then it moves on to the next distance. Finish quits. No images are kept: for checking the rectification, the
 //! detector matches patches all over the views about once a second (stereo::alignment) and only those numbers are
@@ -20,7 +20,7 @@ use crate::detector::{self, QUIT};
 use crate::draw::{self, Image, WHITE};
 use crate::measure;
 use crate::openvr::{self, TrackedDevicePose_t, VROverlayHandle_t, vr};
-use crate::panel::{BG, BTN, GREY, LIGHT, TRACK_OFF, fill_circle, fill_rrect, icon};
+use crate::panel::{BG, BTN_FILL, GREY, LIGHT, TRACK_OFF, fill_circle, fill_rrect, icon};
 use crate::settings::{SIZES, Settings};
 use crate::shm::now_ns;
 use crate::textures::Textures;
@@ -28,8 +28,8 @@ use crate::trace::{Trace, xyz};
 use crate::tracker::Tracker;
 use crate::v3::{V3, position};
 
-pub const PATH: &str = "/tmp/roommate-radar-calibration.jsonl";
-pub const LOG: &str = "/tmp/roommate-radar-calibration.log";
+pub const RECORDING_PATH: &str = "/tmp/roommate-radar-calibration.jsonl";
+pub const LOG_PATH: &str = "/tmp/roommate-radar-calibration.log";
 const DISTANCES: [f32; 8] = [1.5, 2.0, 2.5, 3.0, 4.0, 5.0, 6.0, FAR];
 const FAR: f32 = 100.0; // "Far": a far scene, no one in it needed
 const GET_READY_S: f64 = 3.0;
@@ -88,31 +88,31 @@ fn hit(x: f32, y: f32) -> Option<Button> {
     buttons().into_iter().find(|(_, [x0, y0, w, h])| x >= *x0 && x <= x0 + w && y >= *y0 && y <= y0 + h).map(|b| b.0)
 }
 
-fn label(i: usize) -> String {
+fn distance_label(i: usize) -> String {
     if DISTANCES[i] == FAR { "Far".into() } else { format!("{} m", DISTANCES[i]) }
 }
 
 /// Text centered on x, baseline at y.
 fn centered(img: &mut Image, x: f32, y: f32, s: &str, rgb: draw::Rgb, size: f32) {
-    img.text((x - draw::text_width(0, s, size) as f32 / 2.0) as i32, y as i32, s, rgb, size);
+    img.text((x - draw::text_end_x(0, s, size) as f32 / 2.0) as i32, y as i32, s, rgb, size);
 }
 
 struct Calibration {
     dash: VROverlayHandle_t,
-    distance: usize,
-    size: usize,
+    distance_idx: usize,
+    size_idx: usize,
     phase: Phase,
-    done: [u32; DISTANCES.len()], // recordings finished at each distance
-    segment: u32,                 // recordings started
-    frames: u32,                  // detector frames recorded, this recording
-    seen: u32,                    // of which with a person measured
+    recordings_done: [u32; DISTANCES.len()], // at each distance
+    segment: u32,                            // recordings started
+    frames: u32,                             // detector frames recorded, this recording
+    with_person: u32,                        // of which with a person measured
     hover: Option<Button>,
     drawn: String, // what the tab was last drawn for ("" = redraw)
     live: String,  // what the detector sees
 }
 
 impl Calibration {
-    fn create(textures: &mut Textures, size: usize) -> Result<Calibration, String> {
+    fn create(textures: &mut Textures, size_idx: usize) -> Result<Calibration, String> {
         let (dash, icon_ov) = vr()
             .create_dashboard_overlay(DASH_KEY, "Calibration")
             .map_err(|e| format!("CreateDashboardOverlay: {e}"))?;
@@ -122,13 +122,13 @@ impl Calibration {
         vr().show_dashboard(DASH_KEY);
         Ok(Calibration {
             dash,
-            distance: 0,
-            size,
+            distance_idx: 0,
+            size_idx,
             phase: Phase::Idle,
-            done: [0; DISTANCES.len()],
+            recordings_done: [0; DISTANCES.len()],
             segment: 0,
             frames: 0,
-            seen: 0,
+            with_person: 0,
             hover: None,
             drawn: String::new(),
             live: String::new(),
@@ -152,9 +152,9 @@ impl Calibration {
                 self.drawn.clear();
                 match b {
                     // Not while recording: the recording is for the distance and size it started with
-                    Some(Button::Distance(i)) if self.phase == Phase::Idle => self.distance = i,
+                    Some(Button::Distance(i)) if self.phase == Phase::Idle => self.distance_idx = i,
                     Some(Button::Size(i)) if self.phase == Phase::Idle => {
-                        self.size = i;
+                        self.size_idx = i;
                         detector::SIZE.store(SIZES[i], Ordering::Relaxed); // the detector reloads
                     }
                     Some(b @ (Button::Start | Button::Finish)) => pressed = Some(b),
@@ -181,16 +181,16 @@ impl Calibration {
         match self.phase {
             Phase::Ready(t) if now - t > (GET_READY_S * 1e9) as u64 && !loading => {
                 self.segment += 1;
-                (self.frames, self.seen) = (0, 0);
+                (self.frames, self.with_person) = (0, 0);
                 self.phase = Phase::Recording(now);
-                Some(("start", self.distance))
+                Some(("start", self.distance_idx))
             }
             Phase::Recording(t) if now - t > (RECORD_S * 1e9) as u64 => {
-                let d = self.distance;
-                self.done[d] += 1;
-                self.distance = (d + 1) % DISTANCES.len();
+                let finished_idx = self.distance_idx;
+                self.recordings_done[finished_idx] += 1;
+                self.distance_idx = (finished_idx + 1) % DISTANCES.len();
                 self.phase = Phase::Idle;
-                Some(("end", d))
+                Some(("end", finished_idx))
             }
             _ => None,
         }
@@ -201,10 +201,10 @@ impl Calibration {
         // the bar moves in 0.2 s steps
         let key = format!(
             "{status}{:?}{:?}{}{}{}",
-            countdown.map(|(r, left)| (r, (left * 5.0) as u32)),
+            countdown.map(|(r, secs_left)| (r, (secs_left * 5.0) as u32)),
             self.hover,
-            self.distance,
-            self.size,
+            self.distance_idx,
+            self.size_idx,
             self.live
         );
         if vr().is_visible(self.dash) && self.drawn != key {
@@ -230,19 +230,19 @@ impl Calibration {
                     img.text(PAD as i32, 210 + i as i32 * 36, l, LIGHT, 28.0);
                 }
             }
-            Some((ready, left)) => {
+            Some((ready, secs_left)) => {
                 let (text, total, color) = if ready {
-                    (format!("Get ready… {}", left.ceil()), GET_READY_S, GREY)
+                    (format!("Get ready… {}", secs_left.ceil()), GET_READY_S, GREY)
                 } else {
                     (
-                        format!("Recording {} · {} s left", label(self.distance), left.ceil()),
+                        format!("Recording {} · {} s left", distance_label(self.distance_idx), secs_left.ceil()),
                         RECORD_S,
                         draw::class_rgb(0),
                     )
                 };
                 img.text(PAD as i32, 218, &text, WHITE, 44.0);
                 // the bar empties as time runs out
-                let (bw, frac) = (W - 2.0 * PAD, (left / total) as f32);
+                let (bw, frac) = (W - 2.0 * PAD, (secs_left / total) as f32);
                 fill_rrect(&mut img, PAD, 238.0, bw, BAR_H, BAR_H / 2.0, TRACK_OFF, 1.0);
                 fill_rrect(&mut img, PAD, 238.0, (bw * frac).max(BAR_H), BAR_H, BAR_H / 2.0, color, 1.0);
                 img.text(PAD as i32, 300, &self.live, LIGHT, 28.0);
@@ -253,35 +253,35 @@ impl Calibration {
         let idle = self.phase == Phase::Idle;
         for (b, [x0, y0, w, h]) in buttons() {
             let hovered = self.hover == Some(b);
-            let (label, on, fill, size) = match b {
-                Button::Distance(i) => (label(i), i == self.distance, BTN, 34.0),
-                Button::Size(i) => (format!("{} px", SIZES[i]), i == self.size, BTN, 34.0),
-                Button::Start if idle => ("Start".into(), true, BTN, 48.0),
+            let (btn_text, on, fill, size) = match b {
+                Button::Distance(i) => (distance_label(i), i == self.distance_idx, BTN_FILL, 34.0),
+                Button::Size(i) => (format!("{} px", SIZES[i]), i == self.size_idx, BTN_FILL, 34.0),
+                Button::Start if idle => ("Start".into(), true, BTN_FILL, 48.0),
                 Button::Start => ("Cancel".into(), false, RED, 48.0),
-                Button::Finish => ("Finish".into(), false, BTN, 40.0),
+                Button::Finish => ("Finish".into(), false, BTN_FILL, 40.0),
             };
             let fill = if on { draw::class_rgb(0) } else { fill };
             let dimmed = !idle && matches!(b, Button::Distance(_) | Button::Size(_)) && !on;
-            let a = if dimmed {
+            let alpha = if dimmed {
                 0.4
             } else if hovered {
                 1.0
             } else {
                 0.85
             };
-            fill_rrect(&mut img, x0, y0, w, h, h / 2.0, fill, a);
+            fill_rrect(&mut img, x0, y0, w, h, h / 2.0, fill, alpha);
             centered(
                 &mut img,
                 x0 + w / 2.0,
                 y0 + h / 2.0 + size * 0.36,
-                &label,
+                &btn_text,
                 if dimmed { GREY } else { WHITE },
                 size,
             );
             if let Button::Distance(i) = b {
                 // recordings done at this distance: a dot each
-                for k in 0..self.done[i].min(5) {
-                    let cx = x0 + w / 2.0 + (k as f32 - (self.done[i].min(5) as f32 - 1.0) / 2.0) * 18.0;
+                for k in 0..self.recordings_done[i].min(5) {
+                    let cx = x0 + w / 2.0 + (k as f32 - (self.recordings_done[i].min(5) as f32 - 1.0) / 2.0) * 18.0;
                     fill_circle(&mut img, cx, y0 + h + 22.0, 6.0, draw::class_rgb(16), 1.0);
                 }
             }
@@ -290,9 +290,9 @@ impl Calibration {
     }
 }
 
-/// Horizontal distance (m) from the head at h to p.
-fn across_floor(h: V3, p: V3) -> f32 {
-    (p.x - h.x).hypot(p.z - h.z)
+/// Horizontal distance (m) from the head at head_pos to p.
+fn across_floor(head_pos: V3, p: V3) -> f32 {
+    (p.x - head_pos.x).hypot(p.z - head_pos.z)
 }
 
 pub fn run() -> i32 {
@@ -301,35 +301,37 @@ pub fn run() -> i32 {
         return 1;
     }
     // The app's defaults, without what would drop the person or their controller: nothing saved.
-    let set = Settings { hands: false, max_dist: 10.0, ..Settings::default() };
+    let settings = Settings { ignore_hands: false, max_dist: 10.0, ..Settings::default() };
     // Starting from the app's saved rectification correction (read only: nothing here is saved), kept up like the app's
-    let saved = Settings::saved();
-    let mut selfcal = crate::selfcal::SelfCal::new(saved.align);
-    let size = SIZES.iter().position(|&s| s == set.size).unwrap_or(0);
-    detector::SIZE.store(set.size, Ordering::Relaxed);
+    let saved = Settings::load_saved();
+    let mut selfcal = crate::selfcal::SelfCal::new(saved.correction);
+    let size_idx = SIZES.iter().position(|&s| s == settings.size).unwrap_or(0);
+    detector::SIZE.store(settings.size, Ordering::Relaxed);
     detector::HZ.store(HZ);
     let mut textures = Textures::new();
-    let mut cal = match Calibration::create(&mut textures, size) {
+    let mut cal = match Calibration::create(&mut textures, size_idx) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("{e}");
             return 1;
         }
     };
-    let det = crate::spawn_detector();
-    let mut trace = Trace::open(PATH, true);
-    trace.line(&json!({"event": "session", "t": now_ns() as f64 / 1e9}));
-    println!("calibration: recording to {PATH}");
+    let detector_thread = crate::spawn_detector();
+    let mut trace = Trace::open(RECORDING_PATH, true);
+    trace.write_line(&json!({"event": "session", "t": now_ns() as f64 / 1e9}));
+    println!("calibration: recording to {RECORDING_PATH}");
     let mut tracker = Tracker::default();
     let (mut seen_det_id, mut last_det_ns) = (0, 0);
-    let event = |trace: &mut Trace, cal: &Calibration, what: &str, distance: usize, t: u64| {
-        let d = DISTANCES[distance];
-        let size = SIZES[cal.size];
-        trace.line(&json!({"event": what, "t": t as f64 / 1e9, "segment": cal.segment, "distance": d, "size": size,
-            "frames": cal.frames, "seen": cal.seen}));
+    let event = |trace: &mut Trace, cal: &Calibration, what: &str, distance_idx: usize, t: u64| {
+        let distance_m = DISTANCES[distance_idx];
+        let size_px = SIZES[cal.size_idx];
+        trace.write_line(
+            &json!({"event": what, "t": t as f64 / 1e9, "segment": cal.segment, "distance": distance_m, "size": size_px,
+            "frames": cal.frames, "seen": cal.with_person}),
+        );
         println!(
-            "calibration: {what} segment {} at {d} m, {size} px: {} frames, {} with a person",
-            cal.segment, cal.frames, cal.seen
+            "calibration: {what} segment {} at {distance_m} m, {size_px} px: {} frames, {} with a person",
+            cal.segment, cal.frames, cal.with_person
         );
     };
     while !QUIT.load(Ordering::Relaxed) {
@@ -347,7 +349,7 @@ pub fn run() -> i32 {
             Some(Button::Start) if cal.phase == Phase::Idle => cal.phase = Phase::Ready(now),
             Some(b) => {
                 if matches!(cal.phase, Phase::Recording(_)) {
-                    event(&mut trace, &cal, "cancel", cal.distance, now);
+                    event(&mut trace, &cal, "cancel", cal.distance_idx, now);
                 }
                 if b == Button::Finish {
                     break;
@@ -356,90 +358,90 @@ pub fn run() -> i32 {
             }
             _ => {}
         }
-        let loading = detector::LOADING.load(Ordering::Relaxed) != 0;
-        if let Some((what, distance)) = cal.advance(now, loading) {
-            event(&mut trace, &cal, what, distance, now);
+        let loading = detector::LOADING_SIZE.load(Ordering::Relaxed) != 0;
+        if let Some((what, distance_idx)) = cal.advance(now, loading) {
+            event(&mut trace, &cal, what, distance_idx, now);
         }
 
-        let d = {
-            let d = detector::DETS.lock().unwrap();
-            (d.id != seen_det_id).then(|| d.clone())
+        let dets = {
+            let dets = detector::DETECTIONS.lock().unwrap();
+            (dets.id != seen_det_id).then(|| dets.clone())
         };
         // Lost tracking: no head pose to measure with (main.rs's head_pose too)
-        let d = d.filter(|d| crate::head_pose((d.t_capture_ns as i64 - now as i64) as f32 / 1e9).1);
-        if let Some(d) = d {
-            seen_det_id = d.id;
+        let dets = dets.filter(|d| crate::head_pose((d.t_capture_ns as i64 - now as i64) as f32 / 1e9).1);
+        if let Some(dets) = dets {
+            seen_det_id = dets.id;
             last_det_ns = now;
-            let ago = (d.t_capture_ns as i64 - now as i64) as f32 / 1e9;
+            let from_now_s = (dets.t_capture_ns as i64 - now as i64) as f32 / 1e9;
             let mut poses: [TrackedDevicePose_t; openvr::MAX_TRACKED_DEVICES] = unsafe { std::mem::zeroed() };
-            vr().poses(ago, &mut poses);
+            vr().poses(from_now_s, &mut poses);
             let head = poses[0].mDeviceToAbsoluteTracking;
-            let left = vr().left_hand().map(|i| &poses[i as usize]);
-            let ctrl = crate::controllers(ago);
-            let ms = measure::measurements(&d.objs, &head, &[], &[], &set);
-            let view = d.view.as_deref();
-            tracker.update(&ms, d.t_capture_ns as f64 / 1e9, |p| {
-                view.is_none_or(|v| measure::observable(v, &head, p, &[], &set))
+            let left_pose = vr().left_controller().map(|i| &poses[i as usize]);
+            let ctrl = crate::controllers(from_now_s);
+            let meas = measure::measurements(&dets.objs, &head, &[], &[], &settings);
+            let view = dets.view.as_deref();
+            tracker.update(&meas, dets.t_capture_ns as f64 / 1e9, |p| {
+                view.is_none_or(|v| measure::observable(v, &head, p, &[], &settings))
             });
             // What it sees: the person nearest the left controller, and the controller, across the floor
-            let h = position(&head);
-            let truth = left.filter(|p| p.bPoseIsValid).map(|p| position(&p.mDeviceToAbsoluteTracking));
-            let person = ms
+            let head_pos = position(&head);
+            let truth = left_pose.filter(|p| p.bPoseIsValid).map(|p| position(&p.mDeviceToAbsoluteTracking));
+            let person = meas
                 .iter()
                 .filter(|m| m.cls == 0)
                 .min_by(|a, b| {
                     let near = |m: &&crate::tracker::Meas| truth.map_or(0.0, |t| (m.p - t).len());
                     near(a).total_cmp(&near(b))
                 })
-                .map(|m| across_floor(h, m.p));
+                .map(|m| across_floor(head_pos, m.p));
             cal.live = match (person, truth) {
-                (Some(p), Some(t)) => format!("seen {p:.2} m · controller {:.2} m", across_floor(h, t)),
-                (None, Some(t)) => format!("no person · controller {:.2} m", across_floor(h, t)),
+                (Some(p), Some(t)) => format!("seen {p:.2} m · controller {:.2} m", across_floor(head_pos, t)),
+                (None, Some(t)) => format!("no person · controller {:.2} m", across_floor(head_pos, t)),
                 (Some(p), None) => format!("seen {p:.2} m · no controller"),
                 (None, None) => "no person · no controller".into(),
             };
             if let Phase::Recording(_) = cal.phase {
                 cal.frames += 1;
-                cal.seen += person.is_some() as u32;
+                cal.with_person += person.is_some() as u32;
                 let mut extra = Map::new();
                 extra.insert(
                     "calib".into(),
-                    json!({"segment": cal.segment, "distance": DISTANCES[cal.distance], "size": SIZES[cal.size]}),
+                    json!({"segment": cal.segment, "distance": DISTANCES[cal.distance_idx], "size": SIZES[cal.size_idx]}),
                 );
-                let left = left.map_or(Value::Null, |p| {
+                let left_json = left_pose.map_or(Value::Null, |p| {
                     json!({"m": p.mDeviceToAbsoluteTracking.m, "valid": p.bPoseIsValid,
                         "p": xyz(position(&p.mDeviceToAbsoluteTracking))})
                 });
-                extra.insert("left".into(), left);
-                if let Some(a) = &d.align {
+                extra.insert("left".into(), left_json);
+                if let Some(matches) = &dets.align_matches {
                     // rounded: 0.01 px is plenty
                     let r = |v: f32| (v * 100.0).round() / 100.0;
-                    extra.insert("align".into(), json!(a.iter().map(|p| p.map(r)).collect::<Vec<_>>()));
+                    extra.insert("align".into(), json!(matches.iter().map(|p| p.map(r)).collect::<Vec<_>>()));
                 }
-                trace.frame(&d, &head, &ctrl, &ms, &tracker, extra);
+                trace.frame(&dets, &head, &ctrl, &meas, &tracker, extra);
             }
-            selfcal.step(&d, &head);
+            selfcal.step(&dets, &head);
         }
 
-        let finished: u32 = cal.done.iter().sum();
+        let recordings_total: u32 = cal.recordings_done.iter().sum();
         let status = if detector::WAITING.load(Ordering::Relaxed) || (!loading && now - last_det_ns > 2_000_000_000) {
             let p = detector::PROBLEM.lock().unwrap();
             if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
         } else if loading {
-            format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
+            format!("Loading {}px model…", detector::LOADING_SIZE.load(Ordering::Relaxed))
         } else {
             match cal.phase {
-                Phase::Idle => format!("{finished} recorded · {}", cal.live),
+                Phase::Idle => format!("{recordings_total} recorded · {}", cal.live),
                 Phase::Ready(_) => format!("Get ready · {}", cal.live),
-                Phase::Recording(_) => format!("Recording {}… · {}", label(cal.distance), cal.live),
+                Phase::Recording(_) => format!("Recording {}… · {}", distance_label(cal.distance_idx), cal.live),
             }
         };
         cal.update(&mut textures, &status, now);
     }
-    trace.line(&json!({"event": "finish", "t": now_ns() as f64 / 1e9}));
+    trace.write_line(&json!({"event": "finish", "t": now_ns() as f64 / 1e9}));
     QUIT.store(true, Ordering::Relaxed);
-    if let Some(det) = det {
-        let _ = det.join();
+    if let Some(detector_thread) = detector_thread {
+        let _ = detector_thread.join();
     }
     openvr::shutdown();
     crate::ncnn::destroy_gpu_instance();
@@ -469,13 +471,13 @@ mod tests {
     fn calibration() -> Calibration {
         Calibration {
             dash: 0,
-            distance: 2,
-            size: 1,
+            distance_idx: 2,
+            size_idx: 1,
             phase: Phase::Idle,
-            done: [1, 2, 0, 0, 0, 0, 0, 0],
+            recordings_done: [1, 2, 0, 0, 0, 0, 0, 0],
             segment: 0,
             frames: 0,
-            seen: 0,
+            with_person: 0,
             hover: Some(Button::Start),
             drawn: String::new(),
             live: "seen 2.48 m · controller 2.51 m".into(),
@@ -495,7 +497,7 @@ mod tests {
         assert_eq!(c.advance(44 * s, false), None, "30 s");
         assert_eq!(c.advance(44 * s + 1, false), Some(("end", 2)), "then stops by itself");
         assert!(c.phase == Phase::Idle && c.countdown(45 * s).is_none());
-        assert!(c.distance == 3 && c.done[2] == 1, "on to the next distance");
+        assert!(c.distance_idx == 3 && c.recordings_done[2] == 1, "on to the next distance");
     }
 
     #[test]

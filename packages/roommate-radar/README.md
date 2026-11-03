@@ -49,17 +49,17 @@ your arms and are ignored. Developer builds write each detector frame (boxes, ob
 ```
 driver_roommate_radar (camserver  ──/dev/shm/steamframe-cams──▶ detector thread (detector.rs) ──▶  tracker + OpenVR
 thread in vrserver): newest                                     rectify both views to              overlays (measure.rs,
-normal-exposure SLAM frames                                       head-aligned pinholes, YOLO        tracker.rs, boxes.rs)
+normal-exposure SLAM frames                                       head-aligned pinholes, YOLO        tracker.rs, outlines.rs)
 + capture time (CLOCK_MONOTONIC)                                (ncnn Vulkan) on the stacked
                                                                 pair, stereo-match, depth=fB/d
 ```
 
-Sources (`src/`, one cargo package): `main.rs` (main loop), `detector.rs` (the detector thread; `calib.rs`
+Sources (`src/`, one cargo package): `main.rs` (main loop), `detector.rs` (the detector thread; `rectify.rs`
 rectification, `stereo.rs` matching and depth), `measure.rs` (detections to tracker measurements, your own arms
 dropped), `tracker.rs`, `assign.rs` (Hungarian matching, for the tracker and stereo), `selfcal.rs` (the views'
-alignment), `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
+alignment), `outlines.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
 `textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `trace.rs` (developer builds),
-`calibrate.rs` (`--calibrate`: recordings for fitting the noise model), `v3.rs` (vectors, poses); `openvr.rs` and
+`noise_calib.rs` (`--calibrate`: recordings for fitting the noise model), `v3.rs` (vectors, poses); `openvr.rs` and
 `ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs` +
 `driver/autostart.rs`, with `shm.rs` between it and roommate-radar and `settings.rs` (autostart reads the app's). `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)
 (the command is in `panel.rs`). Tests: `cargo test` (build.sh runs them in the SDK); on the Mac,
@@ -74,7 +74,7 @@ alignment), `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.r
   changes.
 
 - Calibration: `/persist/xrservice.json` (factory KB4 intrinsics + extrinsics) and
-  `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `calib.rs` chains
+  `/persist/device_config.json` (`head` and XRService's `cv/cad_from_cal`). `rectify.rs` chains
   them into head_from_cam per SLAM camera. Cam0 = `slam_right`, Cam1 = `slam_left`.
 - The factory extrinsics are about a degree off: XRService refines them online (its log: "Current extrinsics
   differences to factory calibration ... cam0 0.84 deg, cam1 0.53 deg") but doesn't publish the result, and a degree

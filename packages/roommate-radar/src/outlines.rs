@@ -5,18 +5,18 @@
 use std::collections::VecDeque;
 
 use crate::draw;
-use crate::measure::name;
+use crate::measure::class_name;
 use crate::openvr::{HmdMatrix34_t, VROverlayHandle_t, vr};
 use crate::textures::Textures;
 use crate::tracker::{MIN_HITS, SHOW_S, Sample, Track, Tracker};
 use crate::v3::{V3, position};
 
-const MAX: usize = 8; // overlays of each kind
+const MAX_BOXES: usize = 8; // overlays of each kind
 const LABEL_H: f32 = 0.07; // label height (m), just above the box
 
-/// Upright quad at c facing the head position h (overlay +z points at the viewer).
-fn facing(c: V3, h: V3) -> HmdMatrix34_t {
-    let (mut zx, mut zz) = (h.x - c.x, h.z - c.z);
+/// Upright quad at c facing the head at head_pos (overlay +z points at the viewer).
+fn facing(c: V3, head_pos: V3) -> HmdMatrix34_t {
+    let (mut zx, mut zz) = (head_pos.x - c.x, head_pos.z - c.z);
     let n = zx.hypot(zz);
     (zx, zz) = if n < 1e-4 { (0.0, 1.0) } else { (zx / n, zz / n) };
     HmdMatrix34_t { m: [[zz, 0.0, zx, c.x], [0.0, 1.0, 0.0, c.y], [-zx, 0.0, zz, c.z]] }
@@ -54,40 +54,40 @@ fn sample_at(s: &VecDeque<Sample>, t: f64) -> (V3, f32, f32) {
 
 /// How visible a track's box is at time now (s): fading in from when it was confirmed (or found again), out once its
 /// last match is SHOW_S old. 0 for tentative tracks.
-fn opacity(t: &Track, now: f64) -> f32 {
-    if t.hits < MIN_HITS {
+fn opacity(track: &Track, now: f64) -> f32 {
+    if track.hits < MIN_HITS {
         return 0.0;
     }
-    let fade_in = (now - t.shown_from) / FADE_IN_S;
-    let fade_out = 1.0 - (now - t.last_seen - SHOW_S) / FADE_OUT_S;
+    let fade_in = (now - track.shown_from) / FADE_IN_S;
+    let fade_out = 1.0 - (now - track.last_seen - SHOW_S) / FADE_OUT_S;
     fade_in.min(fade_out).clamp(0.0, 1.0) as f32
 }
 
-pub struct Boxes {
-    outlines: [VROverlayHandle_t; MAX],
-    labels: [VROverlayHandle_t; MAX],
-    made: [Option<(usize, usize)>; MAX], // what each box overlay's texture was made for: (height, class)
-    label_text: [String; MAX],
-    shown: usize,
+pub struct Outlines {
+    outlines: [VROverlayHandle_t; MAX_BOXES],
+    labels: [VROverlayHandle_t; MAX_BOXES],
+    outline_key: [Option<(usize, usize)>; MAX_BOXES], // what each box overlay's texture was drawn for: (tex_h, class)
+    label_key: [String; MAX_BOXES],                   // and each label's: class name and confidence
+    shown_count: usize,
     last_log_ns: u64,
 }
 
-impl Boxes {
-    pub fn create() -> Result<Boxes, String> {
-        let create = |kind: &str| -> Result<[VROverlayHandle_t; MAX], String> {
-            let mut ovs = [0; MAX];
+impl Outlines {
+    pub fn create() -> Result<Outlines, String> {
+        let create = |kind: &str| -> Result<[VROverlayHandle_t; MAX_BOXES], String> {
+            let mut ovs = [0; MAX_BOXES];
             for (i, ov) in ovs.iter_mut().enumerate() {
                 let key = format!("steamframe.roommate-radar.{kind}{i}");
                 *ov = vr().create_overlay(&key, "roommate-radar").map_err(|e| format!("CreateOverlay {key}: {e}"))?;
             }
             Ok(ovs)
         };
-        Ok(Boxes {
+        Ok(Outlines {
             outlines: create("box")?,
             labels: create("label")?,
-            made: [None; MAX],
-            label_text: Default::default(),
-            shown: 0,
+            outline_key: [None; MAX_BOXES],
+            label_key: Default::default(),
+            shown_count: 0,
             last_log_ns: 0,
         })
     }
@@ -97,71 +97,71 @@ impl Boxes {
         &mut self,
         tracker: &Tracker,
         head: &HmdMatrix34_t,
-        now: u64,
+        now_ns: u64,
         t_play: f64,
         textures: &mut Textures,
     ) -> usize {
-        let h = position(head);
-        let now_s = now as f64 / 1e9;
+        let head_pos = position(head);
+        let now_s = now_ns as f64 / 1e9;
         let mut log = String::new(); // each shown box relative to the head
         // In the order they were found: a new track takes the next overlay, and the later ones move up one when one
         // goes.
-        let mut order: Vec<&Track> = tracker.tracks.iter().filter(|t| opacity(t, now_s) > 0.0).collect();
-        order.sort_by_key(|t| t.id);
+        let mut order: Vec<&Track> = tracker.tracks.iter().filter(|track| opacity(track, now_s) > 0.0).collect();
+        order.sort_by_key(|track| track.id);
         let mut n = 0;
-        for t in order.into_iter().take(MAX) {
-            let alpha = opacity(t, now_s);
-            let (c, w, ht) = sample_at(&t.history, t_play);
+        for track in order.into_iter().take(MAX_BOXES) {
+            let alpha = opacity(track, now_s);
+            let (c, w, ht) = sample_at(&track.history, t_play);
             let (w, ht) = (w.max(0.05), ht.max(0.05));
             // Bearing from the head's horizontal forward (-z), + = right; height relative to the eyes.
-            let (vx, vz, fx, fz) = (c.x - h.x, c.z - h.z, -head.m[0][2], -head.m[2][2]);
+            let (dx, dz, fx, fz) = (c.x - head_pos.x, c.z - head_pos.z, -head.m[0][2], -head.m[2][2]);
             log += &format!(
                 " | {} {:.0}% {:.1}m {:+.0}deg {:+.1}m",
-                name(t.cls),
-                t.score * 100.0,
-                vx.hypot(vz),
-                (fx * vz - fz * vx).atan2(fx * vx + fz * vz).to_degrees(),
-                c.y - h.y
+                class_name(track.cls),
+                track.score * 100.0,
+                dx.hypot(dz),
+                (fx * dz - fz * dx).atan2(fx * dx + fz * dz).to_degrees(),
+                c.y - head_pos.y
             );
             // 256 texels across; height in steps of 8 so the texture is only redrawn when the aspect really changes
-            let pw = 256;
-            let ph = ((pw as f32 * ht / w / 8.0).round() as usize * 8).clamp(32, 1024);
-            if self.made[n] != Some((ph, t.cls)) {
-                let img = draw::outline(pw, ph, t.cls, (pw as f32 * 0.008 / w).clamp(1.5, 8.0)); // ~8 mm line
+            let tex_w = 256;
+            let tex_h = ((tex_w as f32 * ht / w / 8.0).round() as usize * 8).clamp(32, 1024);
+            if self.outline_key[n] != Some((tex_h, track.cls)) {
+                let img = draw::outline(tex_w, tex_h, track.cls, (tex_w as f32 * 0.008 / w).clamp(1.5, 8.0)); // ~8 mm line
                 textures.set(self.outlines[n], &img);
-                self.made[n] = Some((ph, t.cls));
+                self.outline_key[n] = Some((tex_h, track.cls));
             }
             vr().set_width(self.outlines[n], w);
             vr().set_alpha(self.outlines[n], alpha);
             vr().set_alpha(self.labels[n], alpha);
-            let mut m = facing(c, h);
+            let mut m = facing(c, head_pos);
             vr().set_transform(self.outlines[n], &m);
 
-            let pct = cfg!(feature = "developer").then(|| (t.score * 100.0).round() as i32); // developer builds only
-            let text = format!("{} {pct:?}", name(t.cls));
-            if self.label_text[n] != text {
-                let img = draw::label(name(t.cls), pct, t.cls);
+            let pct = cfg!(feature = "developer").then(|| (track.score * 100.0).round() as i32); // developer builds only
+            let label_key = format!("{} {pct:?}", class_name(track.cls));
+            if self.label_key[n] != label_key {
+                let img = draw::label_pill(class_name(track.cls), pct, track.cls);
                 textures.set(self.labels[n], &img);
                 vr().set_width(self.labels[n], LABEL_H * img.w as f32 / img.h as f32);
-                self.label_text[n] = text;
+                self.label_key[n] = label_key;
             }
             m.m[1][3] += ht / 2.0 + LABEL_H / 2.0 + 0.015; // same sprite plane, just above the box
             vr().set_transform(self.labels[n], &m);
-            if n >= self.shown {
+            if n >= self.shown_count {
                 vr().show(self.outlines[n]);
                 vr().show(self.labels[n]);
             }
             n += 1;
         }
-        for i in n..self.shown {
+        for i in n..self.shown_count {
             vr().hide(self.outlines[i]);
             vr().hide(self.labels[i]);
         }
-        if n != self.shown || (n > 0 && now - self.last_log_ns > 2_000_000_000) {
+        if n != self.shown_count || (n > 0 && now_ns - self.last_log_ns > 2_000_000_000) {
             println!("roommate-radar: showing {n}{log}");
-            self.last_log_ns = now;
+            self.last_log_ns = now_ns;
         }
-        self.shown = n;
+        self.shown_count = n;
         n
     }
 }
@@ -203,10 +203,10 @@ mod tests {
 
     #[test]
     fn fades() {
-        let mut t = Track::for_test(10.0);
-        assert_eq!(opacity(&t, 10.0), 0.0, "tentative");
-        t.hits = MIN_HITS;
-        let at = |dt: f64| opacity(&t, 10.0 + dt);
+        let mut track = Track::for_test(10.0);
+        assert_eq!(opacity(&track, 10.0), 0.0, "tentative");
+        track.hits = MIN_HITS;
+        let at = |dt: f64| opacity(&track, 10.0 + dt);
         assert!(at(0.0) == 0.0 && (at(FADE_IN_S / 2.0) - 0.5).abs() < 1e-5 && at(0.5) == 1.0, "fades in");
         assert!(at(SHOW_S) == 1.0 && at(SHOW_S + FADE_OUT_S / 2.0) < 0.51 && at(SHOW_S + FADE_OUT_S) < 1e-5, "and out");
     }

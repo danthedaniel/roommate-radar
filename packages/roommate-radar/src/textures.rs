@@ -22,13 +22,13 @@ struct Texture {
 #[derive(Default)]
 struct Slot {
     tex: [Texture; 2],
-    next: usize,
+    write_idx: usize,
 }
 
 struct Staging {
     buf: vk::Buffer,
     mem: vk::DeviceMemory,
-    map: *mut c_void,
+    ptr: *mut c_void,
     size: usize,
 }
 
@@ -38,7 +38,7 @@ struct Vulkan {
     phys: vk::PhysicalDevice,
     dev: ash::Device,
     queue: vk::Queue,
-    qfam: u32,
+    queue_family_index: u32,
     cmd: vk::CommandBuffer,
     fence: vk::Fence,
     staging: Option<Staging>,
@@ -75,27 +75,30 @@ impl Vulkan {
     unsafe fn new() -> Result<Vulkan, String> {
         let err = |e: vk::Result| e.to_string();
         let entry = unsafe { ash::Entry::load() }.map_err(|e| e.to_string())?;
-        let iext = vr().vulkan_extensions(None);
-        let iptr: Vec<_> = iext.iter().map(|e| e.as_ptr()).collect();
+        let instance_exts = vr().vulkan_extensions(None);
+        let instance_ext_ptrs: Vec<_> = instance_exts.iter().map(|e| e.as_ptr()).collect();
         let app = vk::ApplicationInfo::default().application_name(c"roommate-radar").api_version(vk::API_VERSION_1_1);
-        let ici = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&iptr);
+        let ici = vk::InstanceCreateInfo::default().application_info(&app).enabled_extension_names(&instance_ext_ptrs);
         let instance = unsafe { entry.create_instance(&ici, None) }.map_err(err)?;
-        let phys = vk::PhysicalDevice::from_raw(vr().output_device(instance.handle().as_raw()));
+        let phys = vk::PhysicalDevice::from_raw(vr().vk_physical_device(instance.handle().as_raw()));
         if phys.is_null() {
             return Err("no output device".into());
         }
-        let qf = unsafe { instance.get_physical_device_queue_family_properties(phys) };
-        let qfam =
-            qf.iter().position(|q| q.queue_flags.contains(vk::QueueFlags::GRAPHICS)).ok_or("no graphics queue")? as u32;
-        let dext = vr().vulkan_extensions(Some(phys.as_raw()));
-        let dptr: Vec<_> = dext.iter().map(|e| e.as_ptr()).collect();
-        let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(qfam).queue_priorities(&[1.0])];
-        let dci = vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&dptr);
+        let queue_family_props = unsafe { instance.get_physical_device_queue_family_properties(phys) };
+        let queue_family_index = queue_family_props
+            .iter()
+            .position(|q| q.queue_flags.contains(vk::QueueFlags::GRAPHICS))
+            .ok_or("no graphics queue")? as u32;
+        let device_exts = vr().vulkan_extensions(Some(phys.as_raw()));
+        let device_ext_ptrs: Vec<_> = device_exts.iter().map(|e| e.as_ptr()).collect();
+        let qci =
+            [vk::DeviceQueueCreateInfo::default().queue_family_index(queue_family_index).queue_priorities(&[1.0])];
+        let dci = vk::DeviceCreateInfo::default().queue_create_infos(&qci).enabled_extension_names(&device_ext_ptrs);
         let dev = unsafe { instance.create_device(phys, &dci, None) }.map_err(err)?;
-        let queue = unsafe { dev.get_device_queue(qfam, 0) };
+        let queue = unsafe { dev.get_device_queue(queue_family_index, 0) };
         let pci = vk::CommandPoolCreateInfo::default()
             .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER)
-            .queue_family_index(qfam);
+            .queue_family_index(queue_family_index);
         let pool = unsafe { dev.create_command_pool(&pci, None) }.map_err(err)?;
         let cai = vk::CommandBufferAllocateInfo::default()
             .command_pool(pool)
@@ -103,21 +106,32 @@ impl Vulkan {
             .command_buffer_count(1);
         let cmd = unsafe { dev.allocate_command_buffers(&cai) }.map_err(err)?[0];
         let fence = unsafe { dev.create_fence(&vk::FenceCreateInfo::default(), None) }.map_err(err)?;
-        Ok(Vulkan { _entry: entry, instance, phys, dev, queue, qfam, cmd, fence, staging: None, slots: HashMap::new() })
+        Ok(Vulkan {
+            _entry: entry,
+            instance,
+            phys,
+            dev,
+            queue,
+            queue_family_index,
+            cmd,
+            fence,
+            staging: None,
+            slots: HashMap::new(),
+        })
     }
 
     unsafe fn set(&mut self, ov: VROverlayHandle_t, img: &Image) -> Result<(), vk::Result> {
         let (w, h) = (img.w as u32, img.h as u32);
         let slot = self.slots.entry(ov).or_default();
-        let i = slot.next;
-        slot.next ^= 1;
+        let i = slot.write_idx;
+        slot.write_idx ^= 1;
         if slot.tex[i].w != w || slot.tex[i].h != h {
             let old = std::mem::take(&mut slot.tex[i]);
             unsafe {
                 self.dev.destroy_image(old.image, None);
                 self.dev.free_memory(old.mem, None);
             }
-            let t = unsafe { self.create(w, h) }?;
+            let t = unsafe { self.create_texture(w, h) }?;
             self.slots.get_mut(&ov).unwrap().tex[i] = t;
         }
         let image = self.slots[&ov].tex[i].image;
@@ -125,7 +139,7 @@ impl Vulkan {
             unsafe { self.grow_staging(img.px.len()) }?;
         }
         let st = self.staging.as_ref().unwrap();
-        unsafe { std::ptr::copy_nonoverlapping(img.px.as_ptr(), st.map.cast::<u8>(), img.px.len()) };
+        unsafe { std::ptr::copy_nonoverlapping(img.px.as_ptr(), st.ptr.cast::<u8>(), img.px.len()) };
 
         let (dev, cmd) = (&self.dev, self.cmd);
         unsafe {
@@ -169,18 +183,18 @@ impl Vulkan {
             m_pPhysicalDevice: self.phys.as_raw() as *mut _,
             m_pInstance: self.instance.handle().as_raw() as *mut _,
             m_pQueue: self.queue.as_raw() as *mut _,
-            m_nQueueFamilyIndex: self.qfam,
+            m_nQueueFamilyIndex: self.queue_family_index,
             m_nWidth: w,
             m_nHeight: h,
             m_nFormat: FORMAT.as_raw() as u32,
             m_nSampleCount: 1,
         };
-        let tex = openvr::Texture_t {
+        let vr_texture = openvr::Texture_t {
             handle: &data as *const _ as *mut c_void,
             eType: openvr::ETextureType_TextureType_Vulkan,
             eColorSpace: openvr::EColorSpace_ColorSpace_Auto, // 8-bit UNORM = gamma, like Raw
         };
-        vr().set_texture(ov, &tex);
+        vr().set_texture(ov, &vr_texture);
         Ok(())
     }
 
@@ -191,7 +205,7 @@ impl Vulkan {
             .ok_or(vk::Result::ERROR_OUT_OF_DEVICE_MEMORY)
     }
 
-    unsafe fn create(&self, w: u32, h: u32) -> Result<Texture, vk::Result> {
+    unsafe fn create_texture(&self, w: u32, h: u32) -> Result<Texture, vk::Result> {
         let ci = vk::ImageCreateInfo::default()
             .image_type(vk::ImageType::TYPE_2D)
             .format(FORMAT)
@@ -237,12 +251,12 @@ impl Vulkan {
         let buf = unsafe { self.dev.create_buffer(&bci, None) }?;
         let mr = unsafe { self.dev.get_buffer_memory_requirements(buf) };
         let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
-        let mapped = unsafe { self.alloc(mr, host, |m| self.dev.bind_buffer_memory(buf, m, 0)) }.and_then(|mem| {
-            let map = unsafe { self.dev.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) };
-            map.inspect_err(|_| unsafe { self.dev.free_memory(mem, None) }).map(|map| (mem, map))
+        let mem_ptr = unsafe { self.alloc(mr, host, |m| self.dev.bind_buffer_memory(buf, m, 0)) }.and_then(|mem| {
+            let ptr = unsafe { self.dev.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) };
+            ptr.inspect_err(|_| unsafe { self.dev.free_memory(mem, None) }).map(|ptr| (mem, ptr))
         });
-        let (mem, map) = mapped.inspect_err(|_| unsafe { self.dev.destroy_buffer(buf, None) })?;
-        self.staging = Some(Staging { buf, mem, map, size });
+        let (mem, ptr) = mem_ptr.inspect_err(|_| unsafe { self.dev.destroy_buffer(buf, None) })?;
+        self.staging = Some(Staging { buf, mem, ptr, size });
         Ok(())
     }
 

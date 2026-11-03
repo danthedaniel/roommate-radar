@@ -6,7 +6,7 @@
 //! disparity at both sides), whether that disparity is plausible for the box's height (a box h px tall on something H m
 //! tall has d = h B / H, H within its class's range: rules out pairing two people side by side the wrong way round, and
 //! people in small pictures), and how alike the two views look there (ZNCC); then the best overall assignment
-//! (Hungarian, OC Stereo's recipe with geometry added). Box edges cut off by a view's edge (calib::Valid) aren't the
+//! (Hungarian, OC Stereo's recipe with geometry added). Box edges cut off by a view's edge (rectify::ValidRegion) aren't the
 //! object's, and are left out of all of it.
 //!
 //! Depth (patch_disparity): a box is half background, so instead of one window over all of it, a grid of small patches
@@ -15,12 +15,12 @@
 //! silhouette's, noisier but never the background's) when the two agree. Each depth comes with its std dev for the
 //! tracker: stereo error grows like z^2 / (f B).
 use crate::assign::assign;
-use crate::calib::Valid;
+use crate::rectify::ValidRegion;
 use crate::v3::{V3, v3};
 
 /// A box in one view (px).
 #[derive(Clone, Copy, Debug)]
-pub struct Det {
+pub struct Detection {
     pub x0: f32,
     pub y0: f32,
     pub x1: f32,
@@ -33,18 +33,18 @@ pub struct Det {
 pub struct Obj {
     pub cls: usize,
     pub score: f32,
-    pub dist: f32,        // depth (along head -z) of the box's plane (m)
+    pub depth: f32,       // depth (along head -z) of the box's plane (m)
     pub sigma_z: f32,     // its std dev (m); 0 when seen in one view only
-    pub f: f32,           // the views' focal length (px)
+    pub focal_px: f32,    // the views' focal length (px)
     pub corners: [V3; 4], // head frame at capture time: TL, TR, BR, BL
     pub clip: [bool; 4],  // edges x0, y0, x1, y1 cut off by the view's edge (stereo: in both views): not the object's
     pub stereo: bool,     // false: seen in one view only, corners are on the 1 m plane
     pub origin: V3,       // camera position (head frame) the corners were projected from
-    pub disp: Disparity,  // how dist was measured, for the trace
+    pub disp: Disparity,  // how depth was measured, for the trace
 }
 
 /// A stereo object's disparities (px): from its box edges and from the patches (NaN: too few matched), with their std
-/// devs, and the one dist comes from. All NaN for one-view objects.
+/// devs, and the one depth comes from. All NaN for one-view objects.
 #[derive(Clone, Copy, Debug)]
 pub struct Disparity {
     pub edges: f32,
@@ -64,17 +64,17 @@ pub const NO_DISPARITY: Disparity = Disparity {
     patch_stats: PatchStats { tried: 0, outside: 0, flat: 0, weak: 0, unclear: 0, matched: 0, contrast: 0.0 },
 };
 
-const EDGE: f32 = 2.0; // a box edge within this (px) of the view's valid region's edge is cut off by it
-const DY_MAX: f32 = 0.12; // max row mismatch of a pair's top and bottom edges (fraction of box height)
-const DX_MAX: f32 = 0.25; // max mismatch of the disparities at a pair's two sides (fraction of box height)
+const CLIP_MARGIN_PX: f32 = 2.0; // a box edge within this (px) of the view's valid region's edge is cut off by it
+const ROW_MISMATCH_MAX: f32 = 0.12; // max row mismatch of a pair's top and bottom edges (fraction of box height)
+const SIDE_MISMATCH_MAX: f32 = 0.25; // max mismatch of the disparities at a pair's two sides (fraction of box height)
 const NCC_MIN: f32 = 0.0; // pairs that look less alike than this at their disparity aren't one object
 const CLASS_COST: f32 = 0.3; // the views disagreeing on the class (cat/dog) still pair, at this extra cost
 const MATCH_GATE: f32 = 1.5; // max pair cost
 const D_MIN: f32 = 0.3; // min disparity (px): ~50 m at 320
 const PATCH_NCC: f32 = 0.7; // patches matching worse than this are left out
 const PATCH_TEXTURE: f32 = 25.0; // nor are patches flatter than this (gray level variance)
-// Fitted to calibration recordings (calibrate.rs) of a person standing still at 1.5-6 m, at 320, 480 and 640:
-const EDGE_PX: f32 = 1.2; // a box edge's disparity error (px): 0.4-0.9 px scatter, biases to +-0.9 px, any box width
+// Fitted to calibration recordings (noise_calib.rs) of a person standing still at 1.5-6 m, at 320, 480 and 640:
+const EDGE_SIGMA_PX: f32 = 1.2; // a box edge's disparity error (px): 0.4-0.9 px scatter, biases to +-0.9 px, any box width
 // What depth is really good to, as disparity: frame-to-frame scatter is a tenth of a pixel, but a pose's bias (which
 // part of the body the patches find, the box's cut) is 0.1-0.35 px at 480, about the same angle at every resolution.
 const SIGMA_D_MIN_RAD: f32 = 0.002;
@@ -84,7 +84,7 @@ const PATCH_SIGMA_MIN: f32 = 0.12; // the patches' disparity is never taken as b
 
 /// Plausible heights (m) of what's visible of each class in a box: low ends allow for occlusion (a head and shoulders
 /// above a couch, a cat behind a chair).
-fn heights(cls: usize) -> (f32, f32) {
+fn class_heights(cls: usize) -> (f32, f32) {
     match cls {
         0 => (0.3, 2.2),
         15 => (0.1, 0.6),
@@ -92,23 +92,23 @@ fn heights(cls: usize) -> (f32, f32) {
     }
 }
 
-/// Which edges (x0, y0, x1, y1) of d lie on the edge of the view's valid region.
-pub fn clipped(d: &Det, v: &Valid) -> [bool; 4] {
+/// Which edges (x0, y0, x1, y1) of det lie on the edge of the view's valid region.
+pub fn clipped(det: &Detection, v: &ValidRegion) -> [bool; 4] {
     // Along the middle 80% of each edge: a box's corner can be outside the fisheye's circle while its edges are fine.
-    let (my, mx) = (0.1 * (d.y1 - d.y0), 0.1 * (d.x1 - d.x0));
+    let (my, mx) = (0.1 * (det.y1 - det.y0), 0.1 * (det.x1 - det.x0));
     [
-        d.x0 <= v.left(d.y0 + my, d.y1 - my) + EDGE,
-        d.y0 <= v.top(d.x0 + mx, d.x1 - mx) + EDGE,
-        d.x1 >= v.right(d.y0 + my, d.y1 - my) - EDGE,
-        d.y1 >= v.bottom(d.x0 + mx, d.x1 - mx) - EDGE,
+        det.x0 <= v.left(det.y0 + my, det.y1 - my) + CLIP_MARGIN_PX,
+        det.y0 <= v.top(det.x0 + mx, det.x1 - mx) + CLIP_MARGIN_PX,
+        det.x1 >= v.right(det.y0 + my, det.y1 - my) - CLIP_MARGIN_PX,
+        det.y1 >= v.bottom(det.x0 + mx, det.x1 - mx) - CLIP_MARGIN_PX,
     ]
 }
 
 /// ZNCC of the left view's region (x0..x1, y0..y1, every `step` px) with the right view's at disparity d (and dy rows
 /// up: 0 in a rectified pair); None if the region is too flat or too little of it is inside both views.
 fn zncc(
-    l: &[u8],
-    r: &[u8],
+    l_img: &[u8],
+    r_img: &[u8],
     s: usize,
     (x0, y0, x1, y1): (i32, i32, i32, i32),
     step: usize,
@@ -119,7 +119,7 @@ fn zncc(
     let (mut sl, mut sr, mut sll, mut srr, mut slr, mut n) = (0f32, 0f32, 0f32, 0f32, 0f32, 0);
     for y in (y0.max(dy.max(0))..y1.min(s_ + dy.min(0))).step_by(step) {
         for x in (x0.max(d.max(0))..x1.min(s_ + d.min(0))).step_by(step) {
-            let (a, b) = (l[(y * s_ + x) as usize] as f32, r[((y - dy) * s_ + x - d) as usize] as f32);
+            let (a, b) = (l_img[(y * s_ + x) as usize] as f32, r_img[((y - dy) * s_ + x - d) as usize] as f32);
             (sl, sr, sll, srr, slr) = (sl + a, sr + b, sll + a * a, srr + b * b, slr + a * b);
             n += 1;
         }
@@ -136,20 +136,28 @@ fn zncc(
 /// disparities the class's heights allow (lo..hi).
 struct Pair {
     cost: f32,
-    d: f32,
+    edge_d: f32,
     lo: f32,
     hi: f32,
-    edges: usize,
+    sides: usize,
     spread: f32, // how far apart the two sides' disparities are (px), 0 with one
 }
 
 /// Scores pairing left box l with right box r (clip: their cut-off edges); None if they can't be one object.
-fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: usize, baseline: f32) -> Option<Pair> {
+fn pair(
+    l: &Detection,
+    r: &Detection,
+    lc: &[bool; 4],
+    rc: &[bool; 4],
+    imgs: [&[u8]; 2],
+    s: usize,
+    baseline: f32,
+) -> Option<Pair> {
     let h = (l.y1 - l.y0).max(r.y1 - r.y0).max(1.0);
     // Same rows: the top and bottom edges that are the object's in both views.
     let dys: Vec<f32> =
         [(l.y0 - r.y0, 1), (l.y1 - r.y1, 3)].iter().filter(|e| !lc[e.1] && !rc[e.1]).map(|e| e.0).collect();
-    let dy = if dys.is_empty() {
+    let row_mismatch = if dys.is_empty() {
         ((l.y0 + l.y1) - (r.y0 + r.y1)).abs() / 2.0 // cut off top and bottom: the centers, for lack of better
     } else {
         dys.iter().map(|d| d.abs()).sum::<f32>() / dys.len() as f32
@@ -157,16 +165,16 @@ fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: u
     // The same disparity at both sides, from the sides that are the object's in both views.
     let dxs: Vec<f32> =
         [(l.x0 - r.x0, 0), (l.x1 - r.x1, 2)].iter().filter(|e| !lc[e.1] && !rc[e.1]).map(|e| e.0).collect();
-    if dy > DY_MAX || dxs.is_empty() {
+    if row_mismatch > ROW_MISMATCH_MAX || dxs.is_empty() {
         return None;
     }
     let d = dxs.iter().sum::<f32>() / dxs.len() as f32;
-    let dx = if dxs.len() == 2 { (dxs[0] - dxs[1]).abs() / h } else { 0.0 };
+    let side_mismatch = if dxs.len() == 2 { (dxs[0] - dxs[1]).abs() / h } else { 0.0 };
     // d = h B / H for what's visible of it, H within the class's range (either view's class).
-    let ((lo0, hi0), (lo1, hi1)) = (heights(l.cls), heights(r.cls));
+    let ((lo0, hi0), (lo1, hi1)) = (class_heights(l.cls), class_heights(r.cls));
     let (hmin, hmax) = (lo0.min(lo1), hi0.max(hi1));
     let (lo, hi) = (D_MIN.max(0.8 * h * baseline / hmax), 1.25 * h * baseline / hmin);
-    if dx > DX_MAX || d < lo || d > hi {
+    if side_mismatch > SIDE_MISMATCH_MAX || d < lo || d > hi {
         return None;
     }
     // Alike at that disparity: the box's middle, about 16 x 16 samples, the best of +-2 px.
@@ -180,8 +188,8 @@ fn pair(l: &Det, r: &Det, lc: &[bool; 4], rc: &[bool; 4], imgs: [&[u8]; 2], s: u
     }
     let looks = 0.5 * (1.0 - ncc.unwrap_or(0.5)); // too flat to tell: neutral
     let class = if l.cls != r.cls { CLASS_COST } else { 0.0 };
-    let spread = dx * h;
-    Some(Pair { cost: 2.0 * dy + dx + looks + class, d, lo, hi, edges: dxs.len(), spread })
+    let spread = side_mismatch * h;
+    Some(Pair { cost: 2.0 * row_mismatch + side_mismatch + looks + class, edge_d: d, lo, hi, sides: dxs.len(), spread })
 }
 
 /// What became of patch_disparity()'s patches, for the trace: how many it tried, and of those how many were partly
@@ -205,8 +213,8 @@ pub struct AlignStats {
     pub tried: u32,
     pub flat: u32,
     pub weak: u32,
-    pub edge_dy: u32,
-    pub edge_d: u32,
+    pub dy_at_limit: u32,
+    pub d_at_limit: u32,
     pub unclear: u32,
     pub found: u32,
 }
@@ -232,7 +240,14 @@ fn vertex(a: f32, b: f32, c: f32) -> f32 {
 /// The object's disparity in left box `l` near `d0` (within lo..hi), from a grid of small patches over its middle, each
 /// matched along its row by ZNCC: the nearest cluster holding at least half as many patches as the largest one, its
 /// median, and that median's std dev; None if too few patches matched. And what became of the patches.
-fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f32) -> (Option<(f32, f32)>, PatchStats) {
+fn patch_disparity(
+    imgs: [&[u8]; 2],
+    s: usize,
+    l: &Detection,
+    d0: f32,
+    lo: f32,
+    hi: f32,
+) -> (Option<(f32, f32)>, PatchStats) {
     let (w, h) = (l.x1 - l.x0, l.y1 - l.y0);
     // A person's head and torso (not the gaps by the arms, or the legs' background); a pet's middle.
     let (fx, fy) = if l.cls == 0 { ([0.3, 0.7], [0.08, 0.6]) } else { ([0.2, 0.8], [0.2, 0.8]) };
@@ -247,7 +262,7 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
         return (None, st);
     }
     let mut ds = Vec::new();
-    let mut score = vec![0f32; (k1 - k0 + 1) as usize];
+    let mut ncc = vec![0f32; (k1 - k0 + 1) as usize];
     for gy in 0..ny {
         for gx in 0..nx {
             let cx = (rx0 + (gx as f32 + 0.5) * (rx1 - rx0) / nx as f32) as i32;
@@ -263,7 +278,7 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
             let mut flat = false;
             for (i, k) in (k0..=k1).enumerate() {
                 match zncc(imgs[0], imgs[1], s, patch, 1, k, 0) {
-                    Some(c) => score[i] = c,
+                    Some(c) => ncc[i] = c,
                     None => {
                         flat = true;
                         break;
@@ -274,19 +289,19 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
                 st.flat += 1;
                 continue;
             }
-            let best = (0..score.len()).max_by(|&a, &b| score[a].total_cmp(&score[b])).unwrap();
+            let best = (0..ncc.len()).max_by(|&a, &b| ncc[a].total_cmp(&ncc[b])).unwrap();
             // A clear peak, inside the search range: nothing 2+ steps away nearly as good (repetitive texture)
-            let unique = (0..score.len()).filter(|&i| i.abs_diff(best) >= 2).all(|i| score[i] < score[best] - 0.1);
-            if score[best] < PATCH_NCC {
+            let unique = (0..ncc.len()).filter(|&i| i.abs_diff(best) >= 2).all(|i| ncc[i] < ncc[best] - 0.1);
+            if ncc[best] < PATCH_NCC {
                 st.weak += 1;
                 continue;
             }
-            if best == 0 || best == score.len() - 1 || !unique {
+            if best == 0 || best == ncc.len() - 1 || !unique {
                 st.unclear += 1;
                 continue;
             }
             st.matched += 1;
-            ds.push((k0 + best as i32) as f32 + vertex(score[best - 1], score[best], score[best + 1]));
+            ds.push((k0 + best as i32) as f32 + vertex(ncc[best - 1], ncc[best], ncc[best + 1]));
         }
     }
     st.contrast /= st.tried.max(1) as f32;
@@ -298,7 +313,7 @@ fn patch_disparity(imgs: [&[u8]; 2], s: usize, l: &Det, d0: f32, lo: f32, hi: f3
 /// anywhere, and no disparity for anything far away, so what's left is how the views are misaligned. Per patch found
 /// clearly: its center (px), disparity and row offset (px, sub-pixel) and ZNCC. And why the others weren't (for the log):
 /// AlignStats.
-pub fn alignment(l: &[u8], r: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
+pub fn alignment(l_img: &[u8], r_img: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
     const R: i32 = 4; // 9 x 9
     const STEP: usize = 24;
     let (ds, dys) = (-2..=ALIGN_D, -ALIGN_DY..=ALIGN_DY);
@@ -308,41 +323,41 @@ pub fn alignment(l: &[u8], r: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
             let (cx, cy) = (cx as i32, cy as i32);
             let patch = (cx - R, cy - R, cx + R + 1, cy + R + 1);
             st.tried += 1;
-            if std_dev(l, s, patch) < 8.0 {
+            if std_dev(l_img, s, patch) < 8.0 {
                 st.flat += 1;
                 continue; // flat: nothing to find
             }
-            // score[dy][d]; None outside the right view or flat there
-            let score: Vec<Vec<f32>> = dys
+            // ncc[dy][d]; -1 outside the right view or flat there
+            let ncc: Vec<Vec<f32>> = dys
                 .clone()
                 .map(|dy| {
                     ds.clone()
                         .map(|d| {
                             let inside =
                                 cx - R - d >= 0 && cx + R - d < s as i32 && cy - R - dy >= 0 && cy + R - dy < s as i32;
-                            if inside { zncc(l, r, s, patch, 1, d, dy).unwrap_or(-1.0) } else { -1.0 }
+                            if inside { zncc(l_img, r_img, s, patch, 1, d, dy).unwrap_or(-1.0) } else { -1.0 }
                         })
                         .collect()
                 })
                 .collect();
             let (mut bi, mut bj) = (0, 0);
-            for (i, row) in score.iter().enumerate() {
+            for (i, row) in ncc.iter().enumerate() {
                 for (j, &v) in row.iter().enumerate() {
-                    if v > score[bi][bj] {
+                    if v > ncc[bi][bj] {
                         (bi, bj) = (i, j);
                     }
                 }
             }
-            let b = score[bi][bj];
-            let clear = score.iter().enumerate().all(|(i, row)| {
-                row.iter().enumerate().all(|(j, &v)| (i.abs_diff(bi) < 2 && j.abs_diff(bj) < 2) || v < b - 0.1)
+            let best_ncc = ncc[bi][bj];
+            let clear = ncc.iter().enumerate().all(|(i, row)| {
+                row.iter().enumerate().all(|(j, &v)| (i.abs_diff(bi) < 2 && j.abs_diff(bj) < 2) || v < best_ncc - 0.1)
             });
-            let rejected = if b < 0.8 {
+            let rejected = if best_ncc < 0.8 {
                 Some(&mut st.weak)
-            } else if bi == 0 || bi == score.len() - 1 {
-                Some(&mut st.edge_dy)
-            } else if bj == 0 || bj == score[0].len() - 1 {
-                Some(&mut st.edge_d)
+            } else if bi == 0 || bi == ncc.len() - 1 {
+                Some(&mut st.dy_at_limit)
+            } else if bj == 0 || bj == ncc[0].len() - 1 {
+                Some(&mut st.d_at_limit)
             } else if !clear {
                 Some(&mut st.unclear)
             } else {
@@ -353,9 +368,9 @@ pub fn alignment(l: &[u8], r: &[u8], s: usize) -> (Vec<[f32; 5]>, AlignStats) {
                 continue;
             }
             st.found += 1;
-            let d = (bj as i32 - 2) as f32 + vertex(score[bi][bj - 1], b, score[bi][bj + 1]);
-            let dy = (bi as i32 - ALIGN_DY) as f32 + vertex(score[bi - 1][bj], b, score[bi + 1][bj]);
-            out.push([cx as f32, cy as f32, d, dy, b]);
+            let d = (bj as i32 - 2) as f32 + vertex(ncc[bi][bj - 1], best_ncc, ncc[bi][bj + 1]);
+            let dy = (bi as i32 - ALIGN_DY) as f32 + vertex(ncc[bi - 1][bj], best_ncc, ncc[bi + 1][bj]);
+            out.push([cx as f32, cy as f32, d, dy, best_ncc]);
         }
     }
     (out, st)
@@ -389,13 +404,13 @@ fn nearest_cluster(ds: &mut [f32]) -> Option<(f32, f32)> {
 /// out on the 1 m plane from their camera, stereo false. imgs: the two S x S views; f (px) and baseline (m) of the pair;
 /// origins: the cameras in the head frame; valid: where each view has image.
 pub fn match_views(
-    views: &[Vec<Det>; 2],
+    boxes: &[Vec<Detection>; 2],
     imgs: [&[u8]; 2],
     s: usize,
     f: f32,
     baseline: f32,
     origins: [V3; 2],
-    valid: &[Valid; 2],
+    valid: &[ValidRegion; 2],
 ) -> Vec<Obj> {
     let half = s as f32 / 2.0;
     let make_obj = |o: V3, cls, score, z: f32, sigma_z, b: [f32; 4], clip, disp: Option<Disparity>| {
@@ -403,13 +418,13 @@ pub fn match_views(
         let corner = |k: usize| o + v3((us[k] - half) / f * z, -(vs[k] - half) / f * z, -z);
         let corners = [corner(0), corner(1), corner(2), corner(3)];
         let (stereo, disp) = (disp.is_some(), disp.unwrap_or(NO_DISPARITY));
-        Obj { cls, score, dist: z, sigma_z, f, corners, clip, stereo, origin: o, disp }
+        Obj { cls, score, depth: z, sigma_z, focal_px: f, corners, clip, stereo, origin: o, disp }
     };
-    let clips: [Vec<[bool; 4]>; 2] = [0, 1].map(|v| views[v].iter().map(|d| clipped(d, &valid[v])).collect());
-    let pairs: Vec<Vec<Option<Pair>>> = (0..views[0].len())
+    let clips: [Vec<[bool; 4]>; 2] = [0, 1].map(|v| boxes[v].iter().map(|d| clipped(d, &valid[v])).collect());
+    let pairs: Vec<Vec<Option<Pair>>> = (0..boxes[0].len())
         .map(|i| {
-            (0..views[1].len())
-                .map(|j| pair(&views[0][i], &views[1][j], &clips[0][i], &clips[1][j], imgs, s, baseline))
+            (0..boxes[1].len())
+                .map(|j| pair(&boxes[0][i], &boxes[1][j], &clips[0][i], &clips[1][j], imgs, s, baseline))
                 .collect()
         })
         .collect();
@@ -418,38 +433,38 @@ pub fn match_views(
     let assigned = assign(&cost, MATCH_GATE);
 
     let mut objs = Vec::new();
-    let mut right_used = vec![false; views[1].len()];
+    let mut right_used = vec![false; boxes[1].len()];
     for (i, m) in assigned.iter().enumerate() {
-        let (l, lc) = (&views[0][i], &clips[0][i]);
+        let (l, lc) = (&boxes[0][i], &clips[0][i]);
         let Some(j) = *m else {
             objs.push(make_obj(origins[0], l.cls, l.score, 1.0, 0.0, [l.x0, l.y0, l.x1, l.y1], *lc, None));
             continue;
         };
         right_used[j] = true;
-        let (r, rc, p) = (&views[1][j], &clips[1][j], pairs[i][j].as_ref().unwrap());
+        let (r, rc, p) = (&boxes[1][j], &clips[1][j], pairs[i][j].as_ref().unwrap());
         // At least what the two sides disagree by: a seated person's sides gave 15 and 29 px when their patches all
         // failed (true: 10), and the edges alone put them at half their distance.
-        let edge_sigma = (EDGE_PX / (p.edges as f32).sqrt()).max(p.spread / 2.0);
-        let (patches, patch_stats) = patch_disparity(imgs, s, l, p.d, p.lo, p.hi);
+        let edge_sigma = (EDGE_SIGMA_PX / (p.sides as f32).sqrt()).max(p.spread / 2.0);
+        let (patches, patch_stats) = patch_disparity(imgs, s, l, p.edge_d, p.lo, p.hi);
         let (d, sigma_d) = match patches {
             // Both agree: weighted by their noise. Else the patches, unless they're few (the box edges then).
             Some((dp, sp)) => {
                 let (wp, we) = (1.0 / (sp * sp), 1.0 / (edge_sigma * edge_sigma));
-                if (dp - p.d).abs() < 3.0 * (sp * sp + edge_sigma * edge_sigma).sqrt() {
-                    ((wp * dp + we * p.d) / (wp + we), (wp + we).sqrt().recip())
+                if (dp - p.edge_d).abs() < 3.0 * (sp * sp + edge_sigma * edge_sigma).sqrt() {
+                    ((wp * dp + we * p.edge_d) / (wp + we), (wp + we).sqrt().recip())
                 } else {
                     (dp, sp)
                 }
             }
-            None => (p.d, edge_sigma),
+            None => (p.edge_d, edge_sigma),
         };
         let d = d.max(D_MIN);
         // z = fB/d is convex in d: noise makes it read far, by a factor 1 + (sigma_d / d)^2 on average.
         let z = f * baseline / d / (1.0 + (sigma_d / d).powi(2));
         // How much farther it reads with d one sigma less: z^2 sigma_d / (f B) for a small sigma_d, and the far side's
         // much longer reach when it isn't (22 +- 7 px read 1.0 m for a person 2.1 m away).
-        let sd = sigma_d.max(SIGMA_D_MIN_RAD * f);
-        let sigma_z = f * baseline / (d - sd).max(D_MIN) - f * baseline / d;
+        let sigma_d_floored = sigma_d.max(SIGMA_D_MIN_RAD * f);
+        let sigma_z = f * baseline / (d - sigma_d_floored).max(D_MIN) - f * baseline / d;
         // One box in the left view: the two views' edges (the right one's shifted by d), each from the views where it
         // isn't cut off.
         let edge = |a: f32, ac: bool, b: f32, bc: bool| match (ac, bc) {
@@ -464,14 +479,20 @@ pub fn match_views(
             edge(l.x1, lc[2], r.x1 + d, rc[2]),
             edge(l.y1, lc[3], r.y1, rc[3]),
         ];
-        let top = if l.score >= r.score { l } else { r };
+        let best = if l.score >= r.score { l } else { r };
         let score = (l.score + r.score) / 2.0;
         let (dp, sp) = patches.unwrap_or((f32::NAN, f32::NAN));
-        let disp =
-            Disparity { edges: p.d, sigma_edges: edge_sigma, patches: dp, sigma_patches: sp, used: d, patch_stats };
-        objs.push(make_obj(origins[0], top.cls, score, z, sigma_z, e.map(|e| e.0), e.map(|e| e.1), Some(disp)));
+        let disp = Disparity {
+            edges: p.edge_d,
+            sigma_edges: edge_sigma,
+            patches: dp,
+            sigma_patches: sp,
+            used: d,
+            patch_stats,
+        };
+        objs.push(make_obj(origins[0], best.cls, score, z, sigma_z, e.map(|e| e.0), e.map(|e| e.1), Some(disp)));
     }
-    for (j, r) in views[1].iter().enumerate().filter(|(j, _)| !right_used[*j]) {
+    for (j, r) in boxes[1].iter().enumerate().filter(|(j, _)| !right_used[*j]) {
         objs.push(make_obj(origins[1], r.cls, r.score, 1.0, 0.0, [r.x0, r.y0, r.x1, r.y1], clips[1][j], None));
     }
     objs
@@ -514,12 +535,12 @@ mod tests {
         (l, r)
     }
 
-    fn all_valid() -> Valid {
-        Valid { rows: vec![(0.0, S as f32); S], cols: vec![(0.0, S as f32); S] }
+    fn all_valid() -> ValidRegion {
+        ValidRegion { rows: vec![(0.0, S as f32); S], cols: vec![(0.0, S as f32); S] }
     }
 
-    fn det(x0: f32, y0: f32, x1: f32, y1: f32) -> Det {
-        Det { x0, y0, x1, y1, score: 0.8, cls: 0 }
+    fn det(x0: f32, y0: f32, x1: f32, y1: f32) -> Detection {
+        Detection { x0, y0, x1, y1, score: 0.8, cls: 0 }
     }
 
     #[test]
@@ -527,12 +548,12 @@ mod tests {
         // A person-sized box at 8 px disparity (about 0.9 m at this resolution) with background at 2 px filling the
         // box's sides; the box's edges are 1.5 px off.
         let (l, r) = scene(2, 8, (60, 40, 90, 120));
-        let views = [vec![det(55.0, 38.0, 95.0, 122.0)], vec![det(48.5, 38.0, 88.5, 122.0)]];
-        let objs = match_views(&views, [&l, &r], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()]);
+        let boxes = [vec![det(55.0, 38.0, 95.0, 122.0)], vec![det(48.5, 38.0, 88.5, 122.0)]];
+        let objs = match_views(&boxes, [&l, &r], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()]);
         assert_eq!(objs.len(), 1);
         let o = &objs[0];
         let z = F * B / 8.0;
-        assert!(o.stereo && (o.dist - z).abs() < 0.03 * z, "{} vs {z}", o.dist);
+        assert!(o.stereo && (o.depth - z).abs() < 0.03 * z, "{} vs {z}", o.depth);
         assert!(o.sigma_z > 0.0 && o.sigma_z < 0.05 * z);
     }
 
@@ -540,15 +561,15 @@ mod tests {
     fn edges_that_disagree_are_uncertain() {
         // Nothing to match patches on, so depth is the box edges': the sides' disparities 8 and 18 px, then 13 and 13.
         let img = vec![0u8; S * S];
-        let sigma = |r: Det| {
-            let views = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![r]];
-            let o = &match_views(&views, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
+        let sigma = |r: Detection| {
+            let boxes = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![r]];
+            let o = &match_views(&boxes, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
             assert!(o.stereo && o.disp.patches.is_nan());
             o.disp.sigma_edges
         };
         assert_eq!(sigma(det(22.0, 40.0, 52.0, 120.0)), 5.0);
-        let views = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![det(22.0, 40.0, 52.0, 120.0)]];
-        let o = &match_views(&views, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
+        let boxes = [vec![det(30.0, 40.0, 70.0, 120.0)], vec![det(22.0, 40.0, 52.0, 120.0)]];
+        let o = &match_views(&boxes, [&img, &img], S, F, B, [V3::default(); 2], &[all_valid(), all_valid()])[0];
         assert!((o.sigma_z - (F * B / 8.0 - F * B / 13.0)).abs() < 1e-4, "the far side: {}", o.sigma_z);
         assert!(sigma(det(17.0, 40.0, 57.0, 120.0)) < 1.0);
     }
@@ -566,9 +587,9 @@ mod tests {
         assert_eq!(stereo.len(), 2);
         // 80 px tall at 6 px: 1.4 m; crosswise 46 px would be 0.18 m tall.
         assert!(
-            stereo.iter().all(|o| (o.dist - F * B / 6.0).abs() < 0.3),
+            stereo.iter().all(|o| (o.depth - F * B / 6.0).abs() < 0.3),
             "{:?}",
-            stereo.iter().map(|o| o.dist).collect::<Vec<_>>()
+            stereo.iter().map(|o| o.depth).collect::<Vec<_>>()
         );
     }
 
@@ -577,19 +598,19 @@ mod tests {
         // The left box is cut off by the view's left edge (x0 = 0); its x1 gives the disparity.
         let valid = all_valid();
         let (l, r) = scene(2, 6, (0, 40, 30, 120));
-        let views = [vec![det(0.0, 40.0, 30.0, 120.0)], vec![det(0.0, 40.0, 24.0, 120.0)]];
-        assert_eq!(clipped(&views[0][0], &valid), [true, false, false, false]);
-        let objs = match_views(&views, [&l, &r], S, F, B, [V3::default(); 2], &[valid.clone(), valid]);
-        assert!(objs[0].stereo && (objs[0].dist - F * B / 6.0).abs() < 0.1 && objs[0].clip[0] && !objs[0].clip[2]);
+        let boxes = [vec![det(0.0, 40.0, 30.0, 120.0)], vec![det(0.0, 40.0, 24.0, 120.0)]];
+        assert_eq!(clipped(&boxes[0][0], &valid), [true, false, false, false]);
+        let objs = match_views(&boxes, [&l, &r], S, F, B, [V3::default(); 2], &[valid.clone(), valid]);
+        assert!(objs[0].stereo && (objs[0].depth - F * B / 6.0).abs() < 0.1 && objs[0].clip[0] && !objs[0].clip[2]);
     }
 
     #[test]
     fn one_view_boxes_come_out_direction_only() {
         let img = texture(4, S * S);
-        let views = [vec![det(10.0, 40.0, 40.0, 120.0)], vec![det(100.0, 20.0, 130.0, 60.0)]];
+        let boxes = [vec![det(10.0, 40.0, 40.0, 120.0)], vec![det(100.0, 20.0, 130.0, 60.0)]];
         let objs =
-            match_views(&views, [&img, &img], S, F, B, [V3::default(), v3(B, 0.0, 0.0)], &[all_valid(), all_valid()]);
-        assert!(objs.len() == 2 && objs.iter().all(|o| !o.stereo && o.dist == 1.0));
+            match_views(&boxes, [&img, &img], S, F, B, [V3::default(), v3(B, 0.0, 0.0)], &[all_valid(), all_valid()]);
+        assert!(objs.len() == 2 && objs.iter().all(|o| !o.stereo && o.depth == 1.0));
         assert_eq!(objs[1].origin, v3(B, 0.0, 0.0));
     }
 

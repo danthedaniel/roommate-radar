@@ -45,13 +45,13 @@ impl Mul<f32> for V3 {
     }
 }
 
-/// The point p moved by the pose m.
-pub fn apply(m: &HmdMatrix34_t, p: V3) -> V3 {
-    let r = |i: usize| m.m[i][0] * p.x + m.m[i][1] * p.y + m.m[i][2] * p.z + m.m[i][3];
+/// The point moved by the pose.
+pub fn transform(pose: &HmdMatrix34_t, point: V3) -> V3 {
+    let r = |i: usize| pose.m[i][0] * point.x + pose.m[i][1] * point.y + pose.m[i][2] * point.z + pose.m[i][3];
     v3(r(0), r(1), r(2))
 }
 
-/// The pose m's origin.
-pub fn position(m: &HmdMatrix34_t) -> V3 {
-    v3(m.m[0][3], m.m[1][3], m.m[2][3])
+/// The pose's origin.
+pub fn position(pose: &HmdMatrix34_t) -> V3 {
+    v3(pose.m[0][3], pose.m[1][3], pose.m[2][3])
 }

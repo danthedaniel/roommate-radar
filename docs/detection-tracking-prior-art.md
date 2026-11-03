@@ -144,7 +144,7 @@ A person is usually the nearest large cluster in their box. Cost is about 20k MA
 
 **Resolution.** σ_z ∝ 1/f. YOLO can stay at 320 while matching happens on a separately rectified *box ROI*.
 
-- Use the existing KB4 map in `calib.rs` with a larger f, up to ≈ 270–330.
+- Use the existing KB4 map in `rectify.rs` with a larger f, up to ≈ 270–330.
 - Choose f per box so that the expected disparity is at least about 5 px. This is Gallup et al.'s
   [variable baseline/resolution stereo](https://www.cvlibs.net/projects/autonomous_vision_survey/literature/Gallup2008CVPR.pdf)
   idea: far boxes get high resolution.
@@ -299,7 +299,7 @@ Cost for ≤ 20 boxes per view: well under 1 ms.
   - Matching is Hungarian on Euclidean 3D center distance, under a fixed **0.7 m** gate: high-confidence detections
     (≥ 0.5) first, then low ones.
   - Birth needs 2 hits; a track dies 1 s after its last match.
-- **Duplicates** are hidden at draw time (`boxes.rs` + `detector::duplicate`): a track whose angular box overlaps one
+- **Duplicates** are hidden at draw time (`outlines.rs` + `detector::duplicate`): a track whose angular box overlaps one
   already drawn is skipped.
 
 ### Root cause of the duplicates (analysis)

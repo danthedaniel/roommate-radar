@@ -2,22 +2,22 @@
 //! without passthrough. Stereo YOLO detector in detector.rs, at a low size and rate to leave the GPU to the game.
 //!
 //! Per compositor frame: detections (detector.rs) -> measurements (measure.rs) -> tracks (tracker.rs) -> box and label
-//! overlays (boxes.rs). A "Roommate Radar" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows;
+//! overlays (outlines.rs). A "Roommate Radar" tab in the SteamVR dashboard (panel.rs) toggles it and what it shows;
 //! settings persist in ~/.config/roommate-radar.conf (settings.rs).
 //! Steam runs bin/roommate-radar (roommate_radar-argv.json) in the Steam Linux Runtime container; it works from the
 //! install directory (models/, NotoSans-Medium.ttf, roommate-radar.vrmanifest), logs to /tmp/roommate-radar.log, and
 //! first does the setup an installer would (register.rs).
 mod assign;
-mod boxes;
-mod calib;
-mod calibrate;
 mod detector;
 mod draw;
 mod measure;
 mod ncnn;
+mod noise_calib;
 mod openvr;
 mod openvr_sys;
+mod outlines;
 mod panel;
+mod rectify;
 mod register;
 mod selfcal;
 mod settings;
@@ -34,7 +34,6 @@ use std::time::Duration;
 
 use detector::{QUIT, YOLO_MS};
 use openvr::{HmdMatrix34_t, TrackedDevicePose_t, vr};
-use shm::now_ns;
 use v3::V3;
 
 // The head moving more than this (m) between two frames is tracking relocalizing: the standing universe moved (6 m
@@ -44,9 +43,9 @@ const POSE_JUMP_M: f32 = 0.5;
 
 /// The head's pose (standing universe) seconds_from_now (< 0: in the past), and whether it's valid.
 fn head_pose(seconds_from_now: f32) -> (HmdMatrix34_t, bool) {
-    let mut p: [TrackedDevicePose_t; 1] = unsafe { std::mem::zeroed() };
-    vr().poses(seconds_from_now, &mut p);
-    (p[0].mDeviceToAbsoluteTracking, p[0].bPoseIsValid)
+    let mut pose: [TrackedDevicePose_t; 1] = unsafe { std::mem::zeroed() };
+    vr().poses(seconds_from_now, &mut pose);
+    (pose[0].mDeviceToAbsoluteTracking, pose[0].bPoseIsValid)
 }
 
 /// Positions (standing universe) of the tracked controllers, seconds_from_now.
@@ -105,8 +104,8 @@ fn spawn_detector() -> Option<std::thread::JoinHandle<()>> {
             .unwrap_or_else(|_| Err("Detector crashed (see the log)".into()));
         if let Err(e) = r {
             eprintln!("detector: {e}");
-            detector::LOADING.store(0, Ordering::Relaxed);
-            *detector::PROBLEM.lock().unwrap_or_else(|p| p.into_inner()) = e;
+            detector::LOADING_SIZE.store(0, Ordering::Relaxed);
+            *detector::PROBLEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = e;
         }
     }))
 }
@@ -115,8 +114,8 @@ fn run() -> i32 {
     match std::env::args().nth(1).as_deref() {
         Some("--register") => return register::register_app(),
         Some("--calibrate") => {
-            start(calibrate::LOG); // its own install: no setup (calibrate.rs)
-            return calibrate::run();
+            start(noise_calib::LOG_PATH); // its own install: no setup (noise_calib.rs)
+            return noise_calib::run();
         }
         _ => {}
     }
@@ -124,16 +123,16 @@ fn run() -> i32 {
     register::setup();
     let mut tracker = tracker::Tracker::default();
     let mut trace = trace::Trace::new();
-    let mut set = settings::Settings::saved();
+    let mut settings = settings::Settings::load_saved();
     // How the driver starts the app with SteamVR (driver/autostart.rs)
     if let Some(gameid) = std::env::var("SteamGameId").ok().and_then(|g| g.parse().ok())
-        && set.gameid != Some(gameid)
+        && settings.gameid != Some(gameid)
     {
-        set.gameid = Some(gameid);
-        set.save();
+        settings.gameid = Some(gameid);
+        settings.save();
     }
-    detector::SIZE.store(set.size, Ordering::Relaxed);
-    detector::HZ.store(set.hz);
+    detector::SIZE.store(settings.size, Ordering::Relaxed);
+    detector::HZ.store(settings.hz);
 
     if let Err(e) = openvr::init(openvr::EVRApplicationType_VRApplication_Overlay) {
         eprintln!("VR_Init: {e}");
@@ -141,25 +140,26 @@ fn run() -> i32 {
     }
     let mut textures = textures::Textures::new();
     let mut panel = panel::Panel::default();
-    let mut boxes = match boxes::Boxes::create().and_then(|b| panel.create(&mut textures, &set).map(|_| b)) {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
+    let mut outlines =
+        match outlines::Outlines::create().and_then(|b| panel.create(&mut textures, &settings).map(|_| b)) {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("{e}");
+                return 1;
+            }
+        };
     let mut in_game = vr().game_running();
-    let mut walls = vr().play_area_walls();
+    let mut walls = vr().boundary_walls();
 
-    let mut selfcal = selfcal::SelfCal::new(set.align); // before the detector starts
-    let mut saved_align_ns = now_ns();
-    let det = spawn_detector();
-    let setup_pending = det.is_none();
+    let mut selfcal = selfcal::SelfCal::new(settings.correction); // before the detector starts
+    let mut saved_correction_ns = shm::now_ns();
+    let detector_thread = spawn_detector();
+    let setup_pending = detector_thread.is_none();
 
     let (mut seen_det_id, mut last_det_ns) = (0, 0);
     // Playback runs this far behind now: detection age (capture -> here) plus one detection period, smoothed.
-    let mut lag_s = 1.0 / set.hz + 0.1;
-    let mut last_head: Option<V3> = None;
+    let mut lag_s = 1.0 / settings.hz + 0.1;
+    let mut last_head_pos: Option<V3> = None;
     while !QUIT.load(Ordering::Relaxed) {
         // Once per compositor frame; sleep instead if there's no frame to sync to.
         if !vr().wait_frame_sync(100) {
@@ -176,83 +176,87 @@ fn run() -> i32 {
             if ev.eventType == openvr::EVREventType_VREvent_ChaperoneDataHasChanged
                 || ev.eventType == openvr::EVREventType_VREvent_ChaperoneUniverseHasChanged
             {
-                walls = vr().play_area_walls();
+                walls = vr().boundary_walls();
                 tracker.tracks.clear(); // in the standing universe, which may have moved
             }
         }
         let (head_now, head_valid) = head_pose(0.0);
         if head_valid {
-            let p = v3::position(&head_now);
-            if last_head.is_some_and(|q| (p - q).len() > POSE_JUMP_M) {
+            let head_pos = v3::position(&head_now);
+            if last_head_pos.is_some_and(|last| (head_pos - last).len() > POSE_JUMP_M) {
                 tracker.tracks.clear();
             }
-            last_head = Some(p);
+            last_head_pos = Some(head_pos);
         }
-        panel.poll(&mut set);
-        let run = set.warned && set.enabled && (in_game || !set.games_only); // the tab's first-run warning first
+        panel.poll(&mut settings);
+        let detecting = settings.warning_acked && settings.enabled && (in_game || !settings.games_only); // the tab's first-run warning first
 
-        detector::PAUSED.store(!run, Ordering::Relaxed);
-        if !run {
+        detector::PAUSED.store(!detecting, Ordering::Relaxed);
+        if !detecting {
             tracker.tracks.clear();
         }
 
         let d = {
-            let d = detector::DETS.lock().unwrap_or_else(|p| p.into_inner()); // the detector may have crashed
+            let d = detector::DETECTIONS.lock().unwrap_or_else(|poisoned| poisoned.into_inner()); // the detector may have crashed
             (d.id != seen_det_id).then(|| d.clone())
         };
-        let now = now_ns();
-        let now_s = now as f64 / 1e9;
+        let now_ns = shm::now_ns();
+        let now_s = now_ns as f64 / 1e9;
         if let Some(d) = d {
             seen_det_id = d.id;
-            last_det_ns = now;
+            last_det_ns = now_ns;
             // Negative prediction = head pose in the past, at capture time.
-            let ago = (d.t_capture_ns as i64 - now as i64) as f32 / 1e9;
-            lag_s += (-ago + 1.0 / set.hz - lag_s) * 0.1;
-            if let (head, true) = head_pose(ago) {
-                let walls: &[_] = if set.play_area { &walls } else { &[] };
-                let ctrl = controllers(ago);
-                let ms = measure::measurements(&d.objs, &head, &ctrl, walls, &set);
+            let from_now_s = (d.t_capture_ns as i64 - now_ns as i64) as f32 / 1e9;
+            lag_s += (-from_now_s + 1.0 / settings.hz - lag_s) * 0.1;
+            if let (head_at_capture, true) = head_pose(from_now_s) {
+                let active_walls: &[_] = if settings.play_area_only { &walls } else { &[] };
+                let ctrl = controllers(from_now_s);
+                let meas = measure::measurements(&d.objs, &head_at_capture, &ctrl, active_walls, &settings);
                 // A track missing where the views can't see it, or out of range, isn't gone.
                 let view = d.view.as_deref();
-                let seen = |p| view.is_none_or(|v| measure::observable(v, &head, p, walls, &set));
-                tracker.update(&ms, d.t_capture_ns as f64 / 1e9, seen);
+                let seen =
+                    |p| view.is_none_or(|v| measure::observable(v, &head_at_capture, p, active_walls, &settings));
+                tracker.update(&meas, d.t_capture_ns as f64 / 1e9, seen);
                 let mut extra = serde_json::Map::new();
-                if let Some(a) = &d.align {
+                if let Some(matches) = &d.align_matches {
                     let r = |v: f32| (v * 100.0).round() / 100.0;
-                    extra.insert("align".into(), serde_json::json!(a.iter().map(|p| p.map(r)).collect::<Vec<_>>()));
+                    extra.insert(
+                        "align".into(),
+                        serde_json::json!(matches.iter().map(|m| m.map(r)).collect::<Vec<_>>()),
+                    );
                 }
-                trace.frame(&d, &head, &ctrl, &ms, &tracker, extra);
-                selfcal.step(&d, &head);
+                trace.frame(&d, &head_at_capture, &ctrl, &meas, &tracker, extra);
+                selfcal.step(&d, &head_at_capture);
                 // saved at most once a minute, for the next start
-                if selfcal.moved_from(set.align) && now - saved_align_ns > 60_000_000_000 {
-                    (set.align, saved_align_ns) = (selfcal.omega, now);
-                    set.save();
+                if selfcal.moved_from(settings.correction) && now_ns - saved_correction_ns > 60_000_000_000 {
+                    (settings.correction, saved_correction_ns) = (selfcal.correction, now_ns);
+                    settings.save();
                 }
             }
         }
 
-        let n = boxes.show(&tracker, &head_now, now, now_s - lag_s as f64, &mut textures);
+        let shown = outlines.show(&tracker, &head_now, now_ns, now_s - lag_s as f64, &mut textures);
 
-        let status = if !set.enabled {
+        let status = if !settings.enabled {
             "Off".to_string()
         } else if setup_pending {
             "Restart SteamVR to finish setup".into()
-        } else if !run {
+        } else if !detecting {
             "Paused: no game running".into()
-        } else if detector::LOADING.load(Ordering::Relaxed) != 0 && !detector::WAITING.load(Ordering::Relaxed) {
-            format!("Loading {}px model…", detector::LOADING.load(Ordering::Relaxed))
-        } else if detector::WAITING.load(Ordering::Relaxed) || now - last_det_ns > 2_000_000_000 {
-            let p = detector::PROBLEM.lock().unwrap_or_else(|p| p.into_inner());
-            if p.is_empty() { "Waiting for camera frames".into() } else { p.clone() }
+        } else if detector::LOADING_SIZE.load(Ordering::Relaxed) != 0 && !detector::WAITING.load(Ordering::Relaxed) {
+            format!("Loading {}px model…", detector::LOADING_SIZE.load(Ordering::Relaxed))
+        } else if detector::WAITING.load(Ordering::Relaxed) || now_ns - last_det_ns > 2_000_000_000 {
+            let problem = detector::PROBLEM.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+            if problem.is_empty() { "Waiting for camera frames".into() } else { problem.clone() }
         } else if cfg!(feature = "developer") {
-            format!("Watching  ·  YOLO {:.0} ms  ·  {n} in view", YOLO_MS.load())
+            format!("Watching  ·  YOLO {:.0} ms  ·  {shown} in view", YOLO_MS.load())
         } else {
-            format!("Watching  ·  {n} in view")
+            format!("Watching  ·  {shown} in view")
         };
-        panel.update(&mut textures, &status, &set);
+        panel.update(&mut textures, &status, &settings);
     }
-    if let Some(det) = det {
-        let _ = det.join();
+    if let Some(detector_thread) = detector_thread {
+        let _ = detector_thread.join();
     }
     openvr::shutdown();
     ncnn::destroy_gpu_instance();

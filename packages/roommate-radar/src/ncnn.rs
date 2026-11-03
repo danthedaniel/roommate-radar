@@ -47,8 +47,8 @@ pub fn destroy_gpu_instance() {
 pub struct Net(ncnn_net_t);
 
 impl Net {
-    /// `model`.param and `model`.bin, on the GPU; no GPU is an error, as the CPU is far too slow.
-    pub fn load(model: &str) -> Result<Net, String> {
+    /// `model_path`.param and `model_path`.bin, on the GPU; no GPU is an error, as the CPU is far too slow.
+    pub fn load(model_path: &str) -> Result<Net, String> {
         if unsafe { ncnn_get_gpu_count() } == 0 {
             return Err("ncnn: no Vulkan GPU".into());
         }
@@ -61,10 +61,12 @@ impl Net {
             ncnn_option_set_use_sgemm_convolution(opt, 0);
             ncnn_option_set_use_winograd63_convolution(opt, 0);
         }
-        let (param, bin) =
-            (CString::new(format!("{model}.param")).unwrap(), CString::new(format!("{model}.bin")).unwrap());
-        if unsafe { ncnn_net_load_param(net.0, param.as_ptr()) != 0 || ncnn_net_load_model(net.0, bin.as_ptr()) != 0 } {
-            return Err(format!("failed to load model {model} (see prep_model.py)"));
+        let (param_path, bin_path) =
+            (CString::new(format!("{model_path}.param")).unwrap(), CString::new(format!("{model_path}.bin")).unwrap());
+        if unsafe {
+            ncnn_net_load_param(net.0, param_path.as_ptr()) != 0 || ncnn_net_load_model(net.0, bin_path.as_ptr()) != 0
+        } {
+            return Err(format!("failed to load model {model_path} (see prep_model.py)"));
         }
         Ok(net)
     }
@@ -82,11 +84,11 @@ impl Net {
                 w as c_int,
                 std::ptr::null_mut(),
             ));
-            let mut out = std::ptr::null_mut();
+            let mut out_ptr = std::ptr::null_mut();
             let ok = ncnn_extractor_input(ex, c"in0".as_ptr(), input.0) == 0
-                && ncnn_extractor_extract(ex, c"out0".as_ptr(), &mut out) == 0;
+                && ncnn_extractor_extract(ex, c"out0".as_ptr(), &mut out_ptr) == 0;
             ncnn_extractor_destroy(ex);
-            let out = (!out.is_null()).then_some(Mat(out));
+            let out = (!out_ptr.is_null()).then_some(Mat(out_ptr));
             if ok { out } else { None }
         }
     }

@@ -5,7 +5,7 @@
 //! asks for until it has, then runs it a few milliseconds before its UI can answer the launch's first step
 //! (ShowInterstitials), and it hangs at "Launching…" for good. So this waits for Steam's login (config/loginusers.vdf
 //! written since the running Steam, the pid in ~/.steam/steam.pid, started: at boot SteamVR can start before Steam has
-//! rewritten that file), then a margin, then asks Steam itself: steam://rungameid on ~/.steam/steam.pipe, as
+//! rewritten that file), then LOGIN_DELAY, then asks Steam itself: steam://rungameid on ~/.steam/steam.pipe, as
 //! `steam <url>` does.
 use std::fs;
 use std::io::Write;
@@ -16,7 +16,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use crate::settings::Settings;
 
 static STOP: AtomicBool = AtomicBool::new(false);
-const MARGIN: Duration = Duration::from_secs(10); // after the login; Steam's UI is ready ~0.1 s after it
+const LOGIN_DELAY: Duration = Duration::from_secs(10); // after the login; Steam's UI is ready ~0.1 s after it
 
 /// The app's launch URL, if it should start with SteamVR and has recorded its game id.
 fn launch_url(s: &Settings) -> Option<String> {
@@ -27,14 +27,14 @@ fn launch_url(s: &Settings) -> Option<String> {
 }
 
 /// When process `pid` started; None if there's no such process.
-fn started(pid: u32) -> Option<SystemTime> {
+fn process_start_time(pid: u32) -> Option<SystemTime> {
     // starttime: field 22 of /proc/<pid>/stat, in clock ticks since boot (the fields after the parenthesized name are 3+)
     let stat = fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-    let ticks: u64 = stat.rsplit(')').next()?.split_whitespace().nth(19)?.parse().ok()?;
-    let boot: u64 =
+    let start_ticks: u64 = stat.rsplit(')').next()?.split_whitespace().nth(19)?.parse().ok()?;
+    let boot_time_s: u64 =
         fs::read_to_string("/proc/stat").ok()?.lines().find_map(|l| l.strip_prefix("btime "))?.parse().ok()?;
-    let hz = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
-    Some(UNIX_EPOCH + Duration::from_secs(boot) + Duration::from_millis(ticks * 1000 / hz))
+    let ticks_per_s = unsafe { libc::sysconf(libc::_SC_CLK_TCK) } as u64;
+    Some(UNIX_EPOCH + Duration::from_secs(boot_time_s) + Duration::from_millis(start_ticks * 1000 / ticks_per_s))
 }
 
 fn app_running() -> bool {
@@ -50,20 +50,23 @@ pub fn stop() {
 
 /// Waits for Steam (until stop()), then launches the app unless it's running already.
 pub fn run() {
-    let Some(url) = launch_url(&Settings::saved()) else {
+    let Some(url) = launch_url(&Settings::load_saved()) else {
         return;
     };
     let home = std::env::var("HOME").unwrap_or_default();
     let logged_in = || -> Option<bool> {
-        let steam = started(fs::read_to_string(format!("{home}/.steam/steam.pid")).ok()?.trim().parse().ok()?)?;
-        Some(fs::metadata(format!("{home}/.steam/root/config/loginusers.vdf")).ok()?.modified().ok()? > steam)
+        let steam_start_time =
+            process_start_time(fs::read_to_string(format!("{home}/.steam/steam.pid")).ok()?.trim().parse().ok()?)?;
+        Some(
+            fs::metadata(format!("{home}/.steam/root/config/loginusers.vdf")).ok()?.modified().ok()? > steam_start_time,
+        )
     };
-    let mut due = None;
+    let mut launch_at = None;
     while !STOP.load(Ordering::Relaxed) {
-        if due.is_none() && logged_in() == Some(true) {
-            due = Some(Instant::now() + MARGIN);
+        if launch_at.is_none() && logged_in() == Some(true) {
+            launch_at = Some(Instant::now() + LOGIN_DELAY);
         }
-        if due.is_some_and(|t| Instant::now() >= t) {
+        if launch_at.is_some_and(|t| Instant::now() >= t) {
             break;
         }
         std::thread::sleep(Duration::from_millis(200));
@@ -74,10 +77,10 @@ pub fn run() {
     // Steam closing the pipe under the write would SIGPIPE vrserver as a whole: blocked on this thread, the write gets
     // EPIPE instead (and the pending signal goes with the thread).
     unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPIPE);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        let mut signals: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut signals);
+        libc::sigaddset(&mut signals, libc::SIGPIPE);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &signals, std::ptr::null_mut());
     }
     // Non-blocking: with no Steam reading the pipe, the open fails instead of waiting for one.
     let pipe =
@@ -92,10 +95,10 @@ pub fn run() {
 mod tests {
     #[test]
     fn process_start_time() {
-        let t = super::started(std::process::id()).unwrap();
+        let t = super::process_start_time(std::process::id()).unwrap();
         let age = std::time::SystemTime::now().duration_since(t).unwrap();
         assert!(age.as_secs() < 60, "this test started {age:?} ago");
-        assert!(super::started(u32::MAX).is_none());
+        assert!(super::process_start_time(u32::MAX).is_none());
     }
 
     #[test]

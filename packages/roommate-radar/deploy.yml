@@ -39,7 +39,7 @@
       register: restart
       changed_when: restart.stdout == "restarted"
 
-# The calibration app (roommate-radar --calibrate, src/calibrate.rs) as a devkit game of its own, "roommate_radar_calibrate"
+# The calibration app (roommate-radar --calibrate, src/noise_calib.rs) as a devkit game of its own, "roommate_radar_calibrate"
 # in the Library: the same build, in its own directory, so it never touches the app's install. Only on request
 # (make deploy-calibrate: --tags calibrate).
 - hosts: frame

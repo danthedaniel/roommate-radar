@@ -73,7 +73,7 @@ macro_rules! call {
     };
 }
 
-fn c(s: &str) -> CString {
+fn cstring(s: &str) -> CString {
     CString::new(s).unwrap()
 }
 
@@ -97,7 +97,7 @@ impl Vr {
     }
 
     /// The left hand's controller, if there is one.
-    pub fn left_hand(&self) -> Option<u32> {
+    pub fn left_controller(&self) -> Option<u32> {
         let i = call!(
             self.system,
             GetTrackedDeviceIndexForControllerRole,
@@ -106,8 +106,8 @@ impl Vr {
         ((i as usize) < MAX_TRACKED_DEVICES).then_some(i)
     }
 
-    pub fn device_class(&self, i: u32) -> ETrackedDeviceClass {
-        call!(self.system, GetTrackedDeviceClass, i)
+    pub fn device_class(&self, device_index: u32) -> ETrackedDeviceClass {
+        call!(self.system, GetTrackedDeviceClass, device_index)
     }
 
     pub fn poll_event(&self) -> Option<VREvent_t> {
@@ -115,8 +115,8 @@ impl Vr {
         call!(self.system, PollNextEvent, &mut ev, size_of::<VREvent_t>() as u32).then_some(ev)
     }
 
-    pub fn haptic_pulse(&self, device: u32, us: u16) {
-        call!(self.system, TriggerHapticPulse, device, 0, us)
+    pub fn haptic_pulse(&self, device_index: u32, duration_us: u16) {
+        call!(self.system, TriggerHapticPulse, device_index, 0, duration_us)
     }
 
     pub fn acknowledge_quit(&self) {
@@ -124,10 +124,10 @@ impl Vr {
     }
 
     /// The VkPhysicalDevice (raw handle) the compositor renders with, for this VkInstance.
-    pub fn output_device(&self, instance: u64) -> u64 {
-        let mut dev = 0;
-        call!(self.system, GetOutputDevice, &mut dev, ETextureType_TextureType_Vulkan, instance as *mut VkInstance_T);
-        dev
+    pub fn vk_physical_device(&self, instance: u64) -> u64 {
+        let mut phys = 0;
+        call!(self.system, GetOutputDevice, &mut phys, ETextureType_TextureType_Vulkan, instance as *mut VkInstance_T);
+        phys
     }
 
     // IVRChaperone, IVRChaperoneSetup
@@ -138,16 +138,16 @@ impl Vr {
     /// boundary is redrawn (it sends ChaperoneDataHasChanged/UniverseHasChanged instead). Both copies: IVRChaperone's
     /// holds the standing origin the poses use (left stale, a process started before the boundary was drawn put the
     /// head 8 m from where a new one did), IVRChaperoneSetup's the walls.
-    pub fn play_area_walls(&self) -> Vec<[[f32; 2]; 2]> {
-        let (Some(live), Some(t)) = (self.chaperone, self.chaperone_setup) else {
+    pub fn boundary_walls(&self) -> Vec<[[f32; 2]; 2]> {
+        let (Some(chaperone), Some(setup)) = (self.chaperone, self.chaperone_setup) else {
             return vec![];
         };
-        call!(live, ReloadInfo);
-        call!(t, ReloadFromDisk, EChaperoneConfigFile_Live);
+        call!(chaperone, ReloadInfo);
+        call!(setup, ReloadFromDisk, EChaperoneConfigFile_Live);
         let mut n = 0;
-        call!(t, GetLiveCollisionBoundsInfo, std::ptr::null_mut(), &mut n); // just the count
+        call!(setup, GetLiveCollisionBoundsInfo, std::ptr::null_mut(), &mut n); // just the count
         let mut quads: Vec<HmdQuad_t> = vec![unsafe { std::mem::zeroed() }; n as usize];
-        if !call!(t, GetLiveCollisionBoundsInfo, quads.as_mut_ptr(), &mut n) {
+        if !call!(setup, GetLiveCollisionBoundsInfo, quads.as_mut_ptr(), &mut n) {
             return vec![];
         }
         quads.truncate(n as usize);
@@ -160,11 +160,11 @@ impl Vr {
     // IVRApplications
 
     pub fn auto_launch(&self, key: &str) -> bool {
-        call!(self.apps, GetApplicationAutoLaunch, c(key).as_ptr() as *mut c_char)
+        call!(self.apps, GetApplicationAutoLaunch, cstring(key).as_ptr() as *mut c_char)
     }
 
     pub fn set_auto_launch(&self, key: &str, on: bool) -> EVRApplicationError {
-        call!(self.apps, SetApplicationAutoLaunch, c(key).as_ptr() as *mut c_char, on)
+        call!(self.apps, SetApplicationAutoLaunch, cstring(key).as_ptr() as *mut c_char, on)
     }
 
     /// A game is starting, running, waiting or quitting (its intro counts); passthrough itself isn't reported to apps.
@@ -175,11 +175,11 @@ impl Vr {
     pub fn is_dashboard_overlay(&self, key: &str) -> bool {
         let mut err = 0;
         let prop = EVRApplicationProperty_VRApplicationProperty_IsDashboardOverlay_Bool;
-        call!(self.apps, GetApplicationPropertyBool, c(key).as_ptr() as *mut c_char, prop, &mut err)
+        call!(self.apps, GetApplicationPropertyBool, cstring(key).as_ptr() as *mut c_char, prop, &mut err)
     }
 
     pub fn add_manifest(&self, path: &str) -> EVRApplicationError {
-        call!(self.apps, AddApplicationManifest, c(path).as_ptr() as *mut c_char, false)
+        call!(self.apps, AddApplicationManifest, cstring(path).as_ptr() as *mut c_char, false)
     }
 
     pub fn app_error_name(&self, e: EVRApplicationError) -> String {
@@ -191,7 +191,13 @@ impl Vr {
 
     pub fn create_overlay(&self, key: &str, name: &str) -> Result<VROverlayHandle_t, EVROverlayError> {
         let mut h = 0;
-        let e = call!(self.overlay(), CreateOverlay, c(key).as_ptr() as *mut _, c(name).as_ptr() as *mut _, &mut h);
+        let e = call!(
+            self.overlay(),
+            CreateOverlay,
+            cstring(key).as_ptr() as *mut _,
+            cstring(name).as_ptr() as *mut _,
+            &mut h
+        );
         if e == 0 { Ok(h) } else { Err(e) }
     }
 
@@ -201,17 +207,17 @@ impl Vr {
         key: &str,
         name: &str,
     ) -> Result<(VROverlayHandle_t, VROverlayHandle_t), EVROverlayError> {
-        let (mut h, mut icon) = (0, 0);
-        let (key, name) = (c(key), c(name));
+        let (mut tab, mut icon) = (0, 0);
+        let (key, name) = (cstring(key), cstring(name));
         let e = call!(
             self.overlay(),
             CreateDashboardOverlay,
             key.as_ptr() as *mut _,
             name.as_ptr() as *mut _,
-            &mut h,
+            &mut tab,
             &mut icon
         );
-        if e == 0 { Ok((h, icon)) } else { Err(e) }
+        if e == 0 { Ok((tab, icon)) } else { Err(e) }
     }
 
     pub fn set_width(&self, h: VROverlayHandle_t, meters: f32) {
@@ -244,15 +250,15 @@ impl Vr {
     }
 
     /// RGBA pixels, copied.
-    pub fn set_raw(&self, h: VROverlayHandle_t, px: &[u8], w: u32, ht: u32) {
-        assert!(px.len() >= w as usize * ht as usize * 4);
-        call!(self.overlay(), SetOverlayRaw, h, px.as_ptr() as *mut c_void, w, ht, 4);
+    pub fn set_raw(&self, h: VROverlayHandle_t, px: &[u8], width: u32, height: u32) {
+        assert!(px.len() >= width as usize * height as usize * 4);
+        call!(self.overlay(), SetOverlayRaw, h, px.as_ptr() as *mut c_void, width, height, 4);
     }
 
-    /// Mouse events in texture pixels (w x ht).
-    pub fn set_mouse_input(&self, h: VROverlayHandle_t, w: f32, ht: f32) {
+    /// Mouse events in texture pixels (width x height).
+    pub fn set_mouse_input(&self, h: VROverlayHandle_t, width: f32, height: f32) {
         call!(self.overlay(), SetOverlayInputMethod, h, VROverlayInputMethod_Mouse);
-        call!(self.overlay(), SetOverlayMouseScale, h, &mut HmdVector2_t { v: [w, ht] });
+        call!(self.overlay(), SetOverlayMouseScale, h, &mut HmdVector2_t { v: [width, height] });
     }
 
     pub fn poll_overlay_event(&self, h: VROverlayHandle_t) -> Option<VREvent_t> {
@@ -262,7 +268,7 @@ impl Vr {
 
     /// Opens the dashboard on the dashboard overlay `key`.
     pub fn show_dashboard(&self, key: &str) {
-        call!(self.overlay(), ShowDashboard, c(key).as_ptr() as *mut _);
+        call!(self.overlay(), ShowDashboard, cstring(key).as_ptr() as *mut _);
     }
 
     /// Blocks until the compositor's next frame; false if there is none to sync to within timeout_ms.
@@ -272,23 +278,26 @@ impl Vr {
 
     // IVRCompositor
 
-    /// The Vulkan extensions the compositor needs: of the instance (phys = None), or of the device phys.
-    pub fn vulkan_extensions(&self, phys: Option<u64>) -> Vec<CString> {
+    /// The Vulkan extensions the compositor needs: of the instance (physical_device = None), or of the device
+    /// physical_device (a raw VkPhysicalDevice).
+    pub fn vulkan_extensions(&self, physical_device: Option<u64>) -> Vec<CString> {
         let mut buf = [0u8; 4096];
-        if let Some(cm) = self.compositor {
-            match phys {
-                None => call!(cm, GetVulkanInstanceExtensionsRequired, buf.as_mut_ptr().cast(), buf.len() as u32),
-                Some(p) => call!(
-                    cm,
+        if let Some(compositor) = self.compositor {
+            match physical_device {
+                None => {
+                    call!(compositor, GetVulkanInstanceExtensionsRequired, buf.as_mut_ptr().cast(), buf.len() as u32)
+                }
+                Some(phys) => call!(
+                    compositor,
                     GetVulkanDeviceExtensionsRequired,
-                    p as *mut VkPhysicalDevice_T,
+                    phys as *mut VkPhysicalDevice_T,
                     buf.as_mut_ptr().cast(),
                     buf.len() as u32
                 ),
             };
         }
-        let s = CStr::from_bytes_until_nul(&buf).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-        s.split(' ').filter(|e| !e.is_empty()).map(c).collect()
+        let ext_list = CStr::from_bytes_until_nul(&buf).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+        ext_list.split(' ').filter(|ext| !ext.is_empty()).map(cstring).collect()
     }
 }
 

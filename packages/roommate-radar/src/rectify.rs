@@ -28,7 +28,7 @@ fn vec3(v: &Value) -> Option<[f64; 3]> {
     Some([a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?])
 }
 
-fn frame(d: &Value, scale: f64) -> Option<Pose> {
+fn pose_from_json(d: &Value, scale: f64) -> Option<Pose> {
     let (x, z, p) = (vec3(&d["plus_x"])?, vec3(&d["plus_z"])?, vec3(&d["position"])?);
     let y = [z[1] * x[2] - z[2] * x[1], z[2] * x[0] - z[0] * x[2], z[0] * x[1] - z[1] * x[0]];
     Some(([0, 1, 2].map(|i| [x[i], y[i], z[i]]), p.map(|v| v * scale)))
@@ -61,21 +61,22 @@ pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
         .as_array()
         .and_then(|i| i.iter().find(|i| i["cameraModel"] == "kb"))
         .ok_or_else(|| bad(&format!("kb intrinsics for {name}")))?;
-    let head_from_cad = inverse(&frame(&dev["head"], 1.0).ok_or_else(|| bad("head"))?);
-    let cad_from_cal = frame(&dev["cv"]["cad_from_cal"], 1.0).ok_or_else(|| bad("cv/cad_from_cal"))?;
-    let cal_from_cam = frame(&cam["extrinsics"], 1e-3).ok_or_else(|| bad(&format!("extrinsics for {name}")))?;
+    let head_from_cad = inverse(&pose_from_json(&dev["head"], 1.0).ok_or_else(|| bad("head"))?);
+    let cad_from_cal = pose_from_json(&dev["cv"]["cad_from_cal"], 1.0).ok_or_else(|| bad("cv/cad_from_cal"))?;
+    let cal_from_cam =
+        pose_from_json(&cam["extrinsics"], 1e-3).ok_or_else(|| bad(&format!("extrinsics for {name}")))?;
     let (r, t) = compose(&compose(&head_from_cad, &cad_from_cal), &cal_from_cam);
     let dot = |i: usize, j: usize| (0..3).map(|k| r[i][k] * r[j][k]).sum::<f64>();
     if (0..3).any(|i| (0..3).any(|j| (dot(i, j) - if i == j { 1.0 } else { 0.0 }).abs() > 1e-3)) {
         return Err(format!("calibration: {name} rotation not orthonormal"));
     }
-    let k = |n: &str| kb[n].as_f64().map(|v| v as f32).ok_or_else(|| bad(&format!("{n} for {name}")));
+    let intrinsic = |n: &str| kb[n].as_f64().map(|v| v as f32).ok_or_else(|| bad(&format!("{n} for {name}")));
     Ok(CamCal {
-        fx: k("fx")?,
-        fy: k("fy")?,
-        cx: k("cx")?,
-        cy: k("cy")?,
-        k: [k("k1")?, k("k2")?, k("k3")?, k("k4")?],
+        fx: intrinsic("fx")?,
+        fy: intrinsic("fy")?,
+        cx: intrinsic("cx")?,
+        cy: intrinsic("cy")?,
+        k: [intrinsic("k1")?, intrinsic("k2")?, intrinsic("k3")?, intrinsic("k4")?],
         r: std::array::from_fn(|i| r[i / 3][i % 3] as f32),
         t: t.map(|v| v as f32),
         w: cam["width"].as_u64().ok_or_else(|| bad(&format!("width for {name}")))? as usize,
@@ -83,14 +84,14 @@ pub fn load(dir: &str, name: &str) -> Result<CamCal, String> {
     })
 }
 
-/// The rotation by w (rad: axis times angle, Rodrigues), row-major.
-pub fn rotation(w: [f32; 3]) -> [f32; 9] {
-    let t = (w[0] * w[0] + w[1] * w[1] + w[2] * w[2]).sqrt();
-    if t < 1e-12 {
+/// The rotation by rotvec (rad: axis times angle, Rodrigues), row-major.
+pub fn rodrigues(rotvec: [f32; 3]) -> [f32; 9] {
+    let angle = (rotvec[0] * rotvec[0] + rotvec[1] * rotvec[1] + rotvec[2] * rotvec[2]).sqrt();
+    if angle < 1e-12 {
         return [1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0];
     }
-    let (x, y, z) = (w[0] / t, w[1] / t, w[2] / t);
-    let (s, c) = t.sin_cos();
+    let (x, y, z) = (rotvec[0] / angle, rotvec[1] / angle, rotvec[2] / angle);
+    let (s, c) = angle.sin_cos();
     let k = 1.0 - c;
     [
         c + x * x * k,
@@ -105,9 +106,9 @@ pub fn rotation(w: [f32; 3]) -> [f32; 9] {
     ]
 }
 
-/// The camera turned by w (rad, head frame axes): what it sees moves by w in its rectified view.
-pub fn rotated(c: &CamCal, w: [f32; 3]) -> CamCal {
-    let r = rotation(w);
+/// The camera turned by rotvec (rad, head frame axes): what it sees moves by it in its rectified view.
+pub fn rotated(c: &CamCal, rotvec: [f32; 3]) -> CamCal {
+    let r = rodrigues(rotvec);
     let m = |i: usize, j: usize| (0..3).map(|k| r[i * 3 + k] * c.r[k * 3 + j]).sum::<f32>();
     CamCal { r: std::array::from_fn(|n| m(n / 3, n % 3)), ..*c }
 }
@@ -119,12 +120,12 @@ pub fn rotated(c: &CamCal, w: [f32; 3]) -> CamCal {
 /// A rectified view's valid region: per row the valid columns [first, last + 1), per column the valid rows; (S, 0)
 /// where there are none. The fisheye's image is convex, so that's all of it.
 #[derive(Clone)]
-pub struct Valid {
+pub struct ValidRegion {
     pub rows: Vec<(f32, f32)>,
     pub cols: Vec<(f32, f32)>,
 }
 
-impl Valid {
+impl ValidRegion {
     /// Whether (x, y) (px) is at least `margin` px inside the region.
     pub fn inside(&self, x: f32, y: f32, margin: f32) -> bool {
         let s = self.rows.len() as f32;
@@ -158,16 +159,16 @@ impl Valid {
 }
 
 pub struct Rectifier {
-    s: usize,
-    pub f: f32,
-    map: Vec<[f32; 2]>, // (src x, src y) per output pixel; x < 0 = outside the fisheye
+    size_px: usize,
+    pub focal_px: f32,
+    src_xy: Vec<[f32; 2]>, // (src x, src y) per output pixel; x < 0 = outside the fisheye
 }
 
 impl Rectifier {
     pub fn new(c: &CamCal, size: usize, hfov_deg: f32) -> Rectifier {
         let s = size as f32;
         let f = (s / 2.0) / (hfov_deg.to_radians() / 2.0).tan();
-        let mut map = vec![[-1.0, 0.0]; size * size];
+        let mut src_xy = vec![[-1.0, 0.0]; size * size];
         for v in 0..size {
             for u in 0..size {
                 // Ray in head frame for virtual pixel center (u, v).
@@ -187,19 +188,19 @@ impl Rectifier {
                 let sc = if rr > 1e-9 { thd / rr } else { 0.0 };
                 let m = [c.fx * x * sc + c.cx, c.fy * y * sc + c.cy];
                 if m[0] >= 0.0 && m[1] >= 0.0 && m[0] <= (c.w - 2) as f32 && m[1] <= (c.h - 2) as f32 {
-                    map[v * size + u] = m;
+                    src_xy[v * size + u] = m;
                 }
             }
         }
-        Rectifier { s: size, f, map }
+        Rectifier { size_px: size, focal_px: f, src_xy }
     }
 
     /// Where the view has image (inside the fisheye and the sensor).
-    pub fn valid(&self) -> Valid {
-        let s = self.s;
+    pub fn valid(&self) -> ValidRegion {
+        let s = self.size_px;
         let none: (f32, f32) = (s as f32, 0.0);
         let (mut rows, mut cols) = (vec![none; s], vec![none; s]);
-        for (i, m) in self.map.iter().enumerate() {
+        for (i, m) in self.src_xy.iter().enumerate() {
             let (u, v) = (i % s, i / s);
             if m[0] >= 0.0 {
                 let (r, c) = (&mut rows[v], &mut cols[u]);
@@ -207,12 +208,12 @@ impl Rectifier {
                 (c.0, c.1) = (c.0.min(v as f32), c.1.max(v as f32 + 1.0));
             }
         }
-        Valid { rows, cols }
+        ValidRegion { rows, cols }
     }
 
     /// The S x S rectified view of a camera frame (Y plane, shm::STRIDE).
     pub fn apply(&self, src: &[u8], dst: &mut [u8]) {
-        for (d, &[sx, sy]) in dst[..self.s * self.s].iter_mut().zip(&self.map) {
+        for (d, &[sx, sy]) in dst[..self.size_px * self.size_px].iter_mut().zip(&self.src_xy) {
             if sx < 0.0 {
                 *d = 0;
                 continue;
@@ -261,9 +262,9 @@ mod tests {
     fn rotations() {
         // 90 deg about z takes x to y; a turned camera's content moves the same way: the rectified pixel that saw the
         // camera's ray h now sees R^T h.
-        let r = rotation([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
+        let r = rodrigues([0.0, 0.0, std::f32::consts::FRAC_PI_2]);
         assert!((r[3] - 1.0).abs() < 1e-6 && r[0].abs() < 1e-6 && (r[8] - 1.0).abs() < 1e-6);
-        let c = CamCal { r: rotation([0.1, 0.2, 0.3]), ..Default::default() };
+        let c = CamCal { r: rodrigues([0.1, 0.2, 0.3]), ..Default::default() };
         let back = rotated(&rotated(&c, [0.01, -0.02, 0.03]), [-0.01, 0.02, -0.03]);
         assert!(back.r.iter().zip(&c.r).all(|(a, b)| (a - b).abs() < 1e-6));
     }
@@ -272,8 +273,8 @@ mod tests {
     fn valid_region() {
         // An 8 x 8 view whose left 2 columns and bottom row are outside the image.
         let s = 8;
-        let map = (0..s * s).map(|i| if i % s < 2 || i / s == s - 1 { [-1.0, 0.0] } else { [1.0, 1.0] }).collect();
-        let v = Rectifier { s, f: 1.0, map }.valid();
+        let src_xy = (0..s * s).map(|i| if i % s < 2 || i / s == s - 1 { [-1.0, 0.0] } else { [1.0, 1.0] }).collect();
+        let v = Rectifier { size_px: s, focal_px: 1.0, src_xy }.valid();
         assert!(
             v.rows[0] == (2.0, 8.0) && v.rows[7] == (8.0, 0.0) && v.cols[0] == (8.0, 0.0) && v.cols[4] == (0.0, 7.0)
         );

@@ -9,14 +9,17 @@ pub fn assign(cost: &[Vec<f32>], gate: f32) -> Vec<Option<usize>> {
     if n == 0 || m == 0 {
         return matched;
     }
-    let flip = n > m; // the algorithm wants rows <= columns
-    let (rows, cols) = if flip { (m, n) } else { (n, m) };
+    let transposed = n > m; // the algorithm wants rows <= columns
+    // the solver's rows and columns: the caller's columns and rows when transposed
+    let (rows, cols) = if transposed { (m, n) } else { (n, m) };
     // 1-based; over-gate (and NaN) pairs get a large finite cost so they're picked last; a NaN would never compare
     // below `delta` and the search below would loop forever
-    let a = |i: usize, j: usize| {
-        let c = if flip { cost[j - 1][i - 1] } else { cost[i - 1][j - 1] };
+    let solver_cost = |i: usize, j: usize| {
+        let c = if transposed { cost[j - 1][i - 1] } else { cost[i - 1][j - 1] };
         if c <= gate { c } else { gate * 100.0 }
     };
+    // e-maxx Hungarian: u, v row/column potentials; p[j] the row matched to column j; way[j] the previous column on
+    // the augmenting path; minv[j] column j's smallest slack
     let (mut u, mut v) = (vec![0f32; rows + 1], vec![0f32; cols + 1]);
     let (mut p, mut way) = (vec![0usize; cols + 1], vec![0usize; cols + 1]);
     for i in 1..=rows {
@@ -29,7 +32,7 @@ pub fn assign(cost: &[Vec<f32>], gate: f32) -> Vec<Option<usize>> {
             let (i0, mut j1, mut delta) = (p[j0], 0, f32::INFINITY);
             for j in 1..=cols {
                 if !used[j] {
-                    let cur = a(i0, j) - u[i0] - v[j];
+                    let cur = solver_cost(i0, j) - u[i0] - v[j];
                     if cur < minv[j] {
                         minv[j] = cur;
                         way[j] = j0;
@@ -66,7 +69,8 @@ pub fn assign(cost: &[Vec<f32>], gate: f32) -> Vec<Option<usize>> {
         if pj == 0 {
             continue;
         }
-        let (row, col) = if flip { (j - 1, pj - 1) } else { (pj - 1, j - 1) };
+        // back to the caller's row and column
+        let (row, col) = if transposed { (j - 1, pj - 1) } else { (pj - 1, j - 1) };
         if cost[row][col] <= gate {
             matched[row] = Some(col);
         }
