@@ -146,7 +146,10 @@ Idling between runs costs ~6 ms over back-to-back runs; the low queue priority c
   them, but reopening XRService's dmabufs via `/proc/<pid>/fd/N` is ENXIO and the memfds behind its udmabufs are
   already closed, so only `pidfd_getfd` works, which Yama allows only to an ancestor (vrserver) or `CAP_SYS_PTRACE`.
 - YOLO attention as per-head ncnn `Gemm` (both inputs dynamic): ~21 ms per 64×648×648 product on Turnip. SDPA is ~5 ms.
-- ncnn Vulkan options: fp16 arithmetic, winograd, shader local memory, subgroup ops all best at their defaults.
+- ncnn Vulkan options: fp16 arithmetic, winograd, subgroup ops all best at their defaults. Shader local memory:
+  ncnn turns `use_shader_local_memory` off on everything but discrete GPUs and Apple (`prefer_shader_local_memory`),
+  whatever the option says; forced on, YOLO11n @480 is 2.3 ms slower at 4 Hz (3.8 ms for the int8 mix below). Turnip's
+  `computeFullSubgroups` (ncnn turns it off on Turnip) is only used by a reduction shader YOLO doesn't have.
   No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 (`ncnn2table`/`ncnn2int8`, all layers still on the GPU):
   50 ms @576 vs 32 ms fp16; every int8 conv is ~1.7x slower (no cooperative matrix on Turnip).
   Why: ncnn's int8 shaders use the hardware 4x8 dot product (`dotPacked4x8EXT`) only when the driver reports
@@ -155,8 +158,12 @@ Idling between runs costs ~6 ms over back-to-back runs; the low queue priority c
   reports it for a7xx gen3 (the 750) since 2026-10-18 (f0bc8697b5, MR 45342). Forcing ncnn's dot path on the Frame
   (output bit-identical): all-int8 YOLO11n @480 37.9 -> 27.9 ms vs 25.2 ms fp16; per layer, int8 is faster on 42 of
   88 convs (the stride-2 3x3s ~2x: conv_9 857 -> 443 us; some 1x1s), slower on the rest and the depthwise convs,
-  ~1.9 ms of shader time if each conv picks the faster one (before quantize/dequantize at the boundaries; int8
-  accuracy not measured).
+  ~1.9 ms of shader time if each conv picks the faster one. That mix (int8 on 28 convs: the 39 faster ones minus the detect head's 11),
+  calibrated with ncnn2table on 400 COCO val2017 images with people, cats or dogs (gray, letterboxed, paired like the
+  app's input), scored on 600 others (pycocotools): 32.1 -> 28.9 ms at 4 Hz; mAP50-95 all 31.0 -> 30.6, person
+  46.8 -> 46.4, cat 63.7 -> 61.9, dog 57.2 -> 54.8 (~60 images each, noisy) with `method=percentile`; `aciq` about
+  the same, `kl` far worse (25.7 all, 42.4 person, 45.8 dog), `eq` segfaults. Not shipped: needs the dot path forced
+  (the driver doesn't report it) and the calibration in the build.
 - YOLO on the Hexagon NPU (QNN HTP): no FastRPC on the Frame. Valve's `dsp-sm8650` driver owns `/dev/cdsp`
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks
