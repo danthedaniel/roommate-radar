@@ -20,7 +20,7 @@ static SECTIONS: [&[Control]; 3] = [
         Control { title: "Enabled", detail: "", dimmed: |_| false, kind: Kind::Switch(|s| &mut s.enabled) },
         // greyed out when never started by Steam: no game id to launch it by
         Control {
-            title: "Start with SteamVR",
+            title: "Autorun on startup",
             detail: "",
             dimmed: |s| s.gameid.is_none(),
             kind: Kind::Switch(|s| &mut s.autostart),
