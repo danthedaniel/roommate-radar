@@ -108,21 +108,26 @@ dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard t
   Overlay" launch option, Steam provides it (`register.rs` then only finds it).
 
 ncnn is the submodule `third_party/ncnn`: https://github.com/danthedaniel/ncnn, a history-less snapshot of upstream
-c15904b plus our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see above; C API calls for the GPU instance and winograd63).
+c15904b plus our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see above; C API calls for the GPU instance and winograd63;
+activation type 7 = Swish, so convs can take their Swish; `NCNN_BENCHMARK` phase/layer timing and benchncnn options).
 `SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.
 Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 1-channel input;
 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt).
 `yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
 to `models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 packages/roommate-radar/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
 → `yolo11n-grayscale_<S>_rr.ncnn.*`, which roommate-radar loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
-1/255 folded into the first conv). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
+1/255 folded into the first conv; each Swish fused into its conv, 77 fewer dispatches). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
 All 80 classes are kept: a box is ours only when its best class is person, cat or dog (`detector.rs` `decode`).
 The export bakes in the input size, so each S needs its own (build.sh exports the tab's 320, 480 and 640).
 Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
 Vulkan on the Frame, pycocotools: mAP50-95 **35.8 vs 32.3** (mAP50 49.3 vs 45.4, AP small/medium/large 15.4/40.6/56.6 vs
 13.6/37.9/53.0); speed identical (~26 ms median each, nothing else on the GPU).
 YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running: 23 ms @480, 31.4 ms @576, 38.5 ms @640
-(37 ms @576 before prep_model.py and the conv options).
+back to back (37 ms @576 before prep_model.py and the conv options), before the Swish fusion. Paced like the app
+(benchncnn `interval=250`), with the fusion: 20.6 ms @320, 31.1 ms @480 (33.5 without), 52.1 ms @640. Where a 4 Hz run
+@480 goes (`NCNN_BENCHMARK` build of benchncnn): ~2 ms recording the commands on the CPU, ~17-19 ms of shaders, and
+~8-9 ms of compositor frames landing inside the run (about 3 a run, 2.5-3 ms each; real GPU work, only interleaved).
+Idling between runs costs ~6 ms over back-to-back runs; the low queue priority costs nothing measurable at 4 Hz.
 
 ## Dead ends (so we don't retry them)
 
@@ -144,6 +149,8 @@ YOLO11n on the Adreno 750 (Turnip) for the stacked S x 2S input, SteamVR running
 - ncnn Vulkan options: fp16 arithmetic, winograd, shader local memory, subgroup ops all best at their defaults.
   No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 (`ncnn2table`/`ncnn2int8`, all layers still on the GPU):
   50 ms @576 vs 32 ms fp16; every int8 conv is ~1.7x slower (no cooperative matrix on Turnip).
+  Per layer too (`NCNN_BENCHMARK` timestamps, @480): all 88 convs slower in int8, 1.8-2.2x for most, so there's none
+  to mix in.
 - YOLO on the Hexagon NPU (QNN HTP): no FastRPC on the Frame. Valve's `dsp-sm8650` driver owns `/dev/cdsp`
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks

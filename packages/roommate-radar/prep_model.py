@@ -5,6 +5,7 @@ Writes <prefix>_rr.ncnn.{param,bin}:
   CPU with GPU<->CPU round trips in the middle of the net.
 - GRAY2RGB and the 1/255 scale are folded into the first conv: the input is the 1-channel 0..255 image.
   (Just the scale for yolo11n-grayscale, which already takes 1 channel.)
+- Each Swish is fused into the conv before it (activation 7, added in third_party/ncnn).
 """
 
 import struct
@@ -46,6 +47,32 @@ w = struct.unpack_from(f"<{co * cin * kk}f", b, 4)
 folded = [sum(w[(o * cin + c) * kk + j] for c in range(cin)) / 255 for o in range(co) for j in range(kk)]
 
 b = b[:4] + struct.pack(f"<{co * kk}f", *folded) + b[4 + co * cin * kk * 4 :]
+
+# Each Swish into the conv before it, as activation 9=7 (Swish in third_party/ncnn): 77 fewer dispatches and passes
+# over the feature maps.
+readers: dict[str, int] = {}
+producer: dict[str, int] = {}
+for n, l in enumerate(lines[2:], 2):
+    f = l.split()
+    ni, no = int(f[2]), int(f[3])
+    for blob in f[4 : 4 + ni]:
+        readers[blob] = readers.get(blob, 0) + 1
+    for blob in f[4 + ni : 4 + ni + no]:
+        producer[blob] = n
+fused = set()
+for n, l in enumerate(lines[2:], 2):
+    f = l.split()
+    if f[0] != "Swish":
+        continue
+    c = lines[producer[f[4]]].split()
+    assert c[0] in ("Convolution", "ConvolutionDepthWise") and readers[f[4]] == 1, f"{f[1]} doesn't follow a conv"
+    assert not any(t.startswith("9=") for t in c[6:]), f"{c[1]} already has an activation"
+    c[5] = f[5]
+    lines[producer[f[4]]] = " ".join(c + ["9=7"])
+    fused.add(n)
+lines = [l for n, l in enumerate(lines) if n not in fused]
+nl, nb = map(int, lines[1].split())
+lines[1] = f"{nl - len(fused)} {nb - len(fused)}"
 
 with open(dst + ".param", "w") as f:
     f.write("\n".join(lines) + "\n")
