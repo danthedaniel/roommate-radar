@@ -164,6 +164,9 @@ Idling between runs costs ~6 ms over back-to-back runs; the low queue priority c
   46.8 -> 46.4, cat 63.7 -> 61.9, dog 57.2 -> 54.8 (~60 images each, noisy) with `method=percentile`; `aciq` about
   the same, `kl` far worse (25.7 all, 42.4 person, 45.8 dog), `eq` segfaults. Not shipped: needs the dot path forced
   (the driver doesn't report it) and the calibration in the build.
+  Forced, the shaders compile to native `dp4acc.mixed.high` (signed x signed; `IR3_SHADER_DEBUG=disasm`). It's the only
+  such gate that pays: the other is `integerDotProduct16BitSignedAccelerated` (int8 winograd), and forcing it changes
+  nothing. Upstream Turnip/ir3 since 2026-04 enables nothing else for compute (no cooperative matrix).
 - YOLO on the Hexagon NPU (QNN HTP): no FastRPC on the Frame. Valve's `dsp-sm8650` driver owns `/dev/cdsp`
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks
