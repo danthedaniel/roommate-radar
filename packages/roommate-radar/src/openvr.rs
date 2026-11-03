@@ -28,7 +28,8 @@ pub struct Vr {
     apps: &'static VR_IVRApplications_FnTable,
     overlay: Option<&'static VR_IVROverlay_FnTable>, // not for utility apps (--register)
     compositor: Option<&'static VR_IVRCompositor_FnTable>,
-    chaperone: Option<&'static VR_IVRChaperoneSetup_FnTable>,
+    chaperone: Option<&'static VR_IVRChaperone_FnTable>,
+    chaperone_setup: Option<&'static VR_IVRChaperoneSetup_FnTable>,
 }
 
 static VR: OnceLock<Vr> = OnceLock::new();
@@ -55,7 +56,8 @@ pub fn init(ty: EVRApplicationType) -> Result<(), String> {
         apps: table("IVRApplications_008").ok_or("no IVRApplications_008")?,
         overlay: table("IVROverlay_028"),
         compositor: table("IVRCompositor_029"),
-        chaperone: table("IVRChaperoneSetup_006"),
+        chaperone: table("IVRChaperone_004"),
+        chaperone_setup: table("IVRChaperoneSetup_006"),
     };
     let _ = VR.set(vr);
     Ok(())
@@ -128,16 +130,19 @@ impl Vr {
         dev
     }
 
-    // IVRChaperoneSetup
+    // IVRChaperone, IVRChaperoneSetup
 
     /// SteamVR's boundary (the live collision bounds, standing universe; not the play area's rectangle) as its walls'
     /// ends on the floor, [x, z]; empty if there's none.
     /// Reread from disk: this process's copy is loaded when it connects and SteamVR doesn't update it when the
-    /// boundary is redrawn (it sends ChaperoneDataHasChanged/UniverseHasChanged instead).
+    /// boundary is redrawn (it sends ChaperoneDataHasChanged/UniverseHasChanged instead). Both copies: IVRChaperone's
+    /// holds the standing origin the poses use (left stale, a process started before the boundary was drawn put the
+    /// head 8 m from where a new one did), IVRChaperoneSetup's the walls.
     pub fn play_area_walls(&self) -> Vec<[[f32; 2]; 2]> {
-        let Some(t) = self.chaperone else {
+        let (Some(live), Some(t)) = (self.chaperone, self.chaperone_setup) else {
             return vec![];
         };
+        call!(live, ReloadInfo);
         call!(t, ReloadFromDisk, EChaperoneConfigFile_Live);
         let mut n = 0;
         call!(t, GetLiveCollisionBoundsInfo, std::ptr::null_mut(), &mut n); // just the count
@@ -148,7 +153,8 @@ impl Vr {
         quads.truncate(n as usize);
         // a wall is an upright quad: opposite corners 0 and 2 are its two ends, whichever way it's wound
         let xz = |p: &HmdVector3_t| [p.v[0], p.v[2]];
-        quads.iter().map(|q| [xz(&q.vCorners[0]), xz(&q.vCorners[2])]).collect()
+        let walls: Vec<_> = quads.iter().map(|q| [xz(&q.vCorners[0]), xz(&q.vCorners[2])]).collect();
+        if is_placeholder(&walls) { vec![] } else { walls }
     }
 
     // IVRApplications
@@ -283,5 +289,30 @@ impl Vr {
         }
         let s = CStr::from_bytes_until_nul(&buf).map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         s.split(' ').filter(|e| !e.is_empty()).map(c).collect()
+    }
+}
+
+/// The Frame's "no boundary": when tracking starts in a room it doesn't recognize (after standby, say), SteamVR makes a
+/// universe "without bounds" that still reports a 1 x 1 m square around the origin as its walls (calibration state OK),
+/// wherever you are. Drawn boundaries are traced, not squares.
+fn is_placeholder(walls: &[[[f32; 2]; 2]]) -> bool {
+    walls.len() == 4 && walls.iter().flatten().flatten().all(|v| (v.abs() - 0.5).abs() < 1e-3)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn placeholder() {
+        // as in chaperone_info.vrchap
+        let sq = [
+            [[-0.5, -0.5], [-0.5, 0.5]],
+            [[-0.5, 0.5], [0.5, 0.5]],
+            [[0.5, 0.5], [0.5, -0.5]],
+            [[0.5, -0.5], [-0.5, -0.5]],
+        ];
+        assert!(super::is_placeholder(&sq));
+        let mut drawn = sq;
+        drawn[1][1][0] = 0.6;
+        assert!(!super::is_placeholder(&drawn) && !super::is_placeholder(&sq[..3]));
     }
 }

@@ -2,7 +2,7 @@
 
 // openvr_capi.h (OpenVR SDK v2.15.6) through bindgen 0.73, for openvr.rs: the FnTables of the interfaces roommate-radar
 // uses and the types they take. Regenerate with:
-//   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications|ChaperoneSetup)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
+//   bindgen openvr_capi.h -o src/openvr_sys.rs --allowlist-type 'VR_IVR(System|Overlay|Compositor|Applications|Chaperone|ChaperoneSetup)_FnTable|VRVulkanTextureData_t|EVREventType|EVRInitError|EVRApplicationType' \
 //     --default-enum-style consts --no-layout-tests --no-doc-comments (and these --raw-lines) \
 //     -- -x c -target aarch64-unknown-linux-gnu -ffreestanding
 #![allow(non_camel_case_types, non_snake_case, non_upper_case_globals, dead_code)]
@@ -1830,6 +1830,27 @@ pub struct VR_IVRApplications_FnTable {
     >,
     pub RegisterSubprocess: ::std::option::Option<unsafe extern "C" fn(nPid: u32) -> EVRApplicationError>,
     pub GetCurrentSceneProcessId: ::std::option::Option<unsafe extern "C" fn() -> u32>,
+}
+pub type ChaperoneCalibrationState = ::std::os::raw::c_uint;
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct VR_IVRChaperone_FnTable {
+    pub GetCalibrationState: ::std::option::Option<unsafe extern "C" fn() -> ChaperoneCalibrationState>,
+    pub GetPlayAreaSize: ::std::option::Option<unsafe extern "C" fn(pSizeX: *mut f32, pSizeZ: *mut f32) -> bool>,
+    pub GetPlayAreaRect: ::std::option::Option<unsafe extern "C" fn(rect: *mut HmdQuad_t) -> bool>,
+    pub ReloadInfo: ::std::option::Option<unsafe extern "C" fn()>,
+    pub SetSceneColor: ::std::option::Option<unsafe extern "C" fn(color: HmdColor_t)>,
+    pub GetBoundsColor: ::std::option::Option<
+        unsafe extern "C" fn(
+            pOutputColorArray: *mut HmdColor_t,
+            nNumOutputColors: ::std::os::raw::c_int,
+            flCollisionBoundsFadeDistance: f32,
+            pOutputCameraColor: *mut HmdColor_t,
+        ),
+    >,
+    pub AreBoundsVisible: ::std::option::Option<unsafe extern "C" fn() -> bool>,
+    pub ForceBoundsVisible: ::std::option::Option<unsafe extern "C" fn(bForce: bool)>,
+    pub ResetZeroPose: ::std::option::Option<unsafe extern "C" fn(eTrackingUniverseOrigin: ETrackingUniverseOrigin)>,
 }
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
