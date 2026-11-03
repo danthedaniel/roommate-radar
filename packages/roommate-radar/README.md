@@ -149,8 +149,14 @@ Idling between runs costs ~6 ms over back-to-back runs; the low queue priority c
 - ncnn Vulkan options: fp16 arithmetic, winograd, shader local memory, subgroup ops all best at their defaults.
   No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 (`ncnn2table`/`ncnn2int8`, all layers still on the GPU):
   50 ms @576 vs 32 ms fp16; every int8 conv is ~1.7x slower (no cooperative matrix on Turnip).
-  Per layer too (`NCNN_BENCHMARK` timestamps, @480): all 88 convs slower in int8, 1.8-2.2x for most, so there's none
-  to mix in.
+  Why: ncnn's int8 shaders use the hardware 4x8 dot product (`dotPacked4x8EXT`) only when the driver reports
+  `integerDotProduct4x8BitPackedSignedAccelerated`, which the Frame's Mesa (26.3.0-devel) doesn't (only unsigned and
+  mixed); otherwise each byte is unpacked and multiplied in int32, while fp16 runs at double rate. Upstream Mesa
+  reports it for a7xx gen3 (the 750) since 2026-10-18 (f0bc8697b5, MR 45342). Forcing ncnn's dot path on the Frame
+  (output bit-identical): all-int8 YOLO11n @480 37.9 -> 27.9 ms vs 25.2 ms fp16; per layer, int8 is faster on 42 of
+  88 convs (the stride-2 3x3s ~2x: conv_9 857 -> 443 us; some 1x1s), slower on the rest and the depthwise convs,
+  ~1.9 ms of shader time if each conv picks the faster one (before quantize/dequantize at the boundaries; int8
+  accuracy not measured).
 - YOLO on the Hexagon NPU (QNN HTP): no FastRPC on the Frame. Valve's `dsp-sm8650` driver owns `/dev/cdsp`
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks
