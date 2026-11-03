@@ -56,10 +56,12 @@ normal-exposure SLAM frames                                       head-aligned p
 
 Sources (`src/`, one cargo package): `main.rs` (main loop), `detector.rs` (the detector thread; `calib.rs`
 rectification, `stereo.rs` matching and depth), `measure.rs` (detections to tracker measurements, your own arms
-dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
-`textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `trace.rs` (developer builds), `v3.rs`; `openvr.rs` and
-`ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs`, and
-`shm.rs` between it and roommate-radar. `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)
+dropped), `tracker.rs`, `assign.rs` (Hungarian matching, for the tracker and stereo), `selfcal.rs` (the views'
+alignment), `boxes.rs` (tracks as overlays), `panel.rs` (dashboard tab), `draw.rs` (CPU drawing, fontdue),
+`textures.rs` (Vulkan overlay textures, ash), `settings.rs`, `register.rs` (`--register`), `trace.rs` (developer builds),
+`calibrate.rs` (`--calibrate`: recordings for fitting the noise model), `v3.rs` (vectors, poses); `openvr.rs` and
+`ncnn.rs` wrap the two C APIs. The driver (the package's `cdylib`): `driver/lib.rs` + `driver/camserver.rs` +
+`driver/autostart.rs`, with `shm.rs` between it and roommate-radar and `settings.rs` (autostart reads the app's). `assets/icon.svg` is the tab icon; the app embeds its rasters, `icon-128.rgba` (and `icon-176.rgba` for the first-run warning)
 (the command is in `panel.rs`). Tests: `cargo test` (build.sh runs them in the SDK); on the Mac,
 `cargo clippy --target aarch64-unknown-linux-gnu --all-targets` checks everything but the link.
 

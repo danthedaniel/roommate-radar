@@ -5,11 +5,11 @@
 use std::collections::VecDeque;
 
 use crate::draw;
-use crate::measure::{name, position};
+use crate::measure::name;
 use crate::openvr::{HmdMatrix34_t, VROverlayHandle_t, vr};
 use crate::textures::Textures;
 use crate::tracker::{MIN_HITS, SHOW_S, Sample, Track, Tracker};
-use crate::v3::V3;
+use crate::v3::{V3, position};
 
 const MAX: usize = 8; // overlays of each kind
 const LABEL_H: f32 = 0.07; // label height (m), just above the box

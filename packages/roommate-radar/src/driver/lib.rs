@@ -20,6 +20,9 @@ macro_rules! log {
 
 mod autostart;
 mod camserver;
+#[allow(dead_code)] // the rest is roommate-radar's
+#[path = "../settings.rs"]
+mod settings;
 #[allow(dead_code)] // the reader's half is roommate-radar's
 #[path = "../shm.rs"]
 mod shm;

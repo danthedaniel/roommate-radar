@@ -10,7 +10,6 @@ use crate::calib::{self, Rectifier, Valid};
 use crate::ncnn;
 use crate::shm::{self, now_ns};
 use crate::stereo::{self, Det, Obj};
-use crate::tracker::CLASSES;
 use crate::v3::{V3, v3};
 
 pub static QUIT: AtomicBool = AtomicBool::new(false);
@@ -69,6 +68,7 @@ pub struct View {
 }
 
 pub const HFOV_DEG: f32 = 100.0; // the rectified views' field of view
+pub const CLASSES: [usize; 3] = [0, 15, 16]; // person, cat, dog: COCO's ids for what we track
 const CONF: f32 = 0.1; // ByteTrack wants the weak detections too
 const COCO: usize = 80; // the model's classes
 const IOU: f32 = 0.5; // overlapping detections above this IoU keep only the most confident
@@ -101,7 +101,7 @@ fn nms(d: &mut Vec<Det>) {
 }
 
 /// YOLO's output [4 + 80, N] (cx, cy, w, h in input pixels, then sigmoid scores for COCO's classes) as boxes in each
-/// S x S view: those whose best class is one of tracker::CLASSES. A chair that scores 0.3 as a person and 0.8 as a
+/// S x S view: those whose best class is one of CLASSES. A chair that scores 0.3 as a person and 0.8 as a
 /// chair is a chair.
 fn decode(out: &ncnn::Mat, s: usize) -> [Vec<Det>; 2] {
     let mut views = [Vec::new(), Vec::new()];

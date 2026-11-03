@@ -18,7 +18,7 @@ use serde_json::{Map, Value, json};
 
 use crate::detector::{self, QUIT};
 use crate::draw::{self, Image, WHITE};
-use crate::measure::{self, position};
+use crate::measure;
 use crate::openvr::{self, TrackedDevicePose_t, VROverlayHandle_t, vr};
 use crate::panel::{BG, BTN, GREY, LIGHT, TRACK_OFF, fill_circle, fill_rrect, icon};
 use crate::settings::{SIZES, Settings};
@@ -26,7 +26,7 @@ use crate::shm::now_ns;
 use crate::textures::Textures;
 use crate::trace::{Trace, xyz};
 use crate::tracker::Tracker;
-use crate::v3::V3;
+use crate::v3::{V3, position};
 
 pub const PATH: &str = "/tmp/roommate-radar-calibration.jsonl";
 pub const LOG: &str = "/tmp/roommate-radar-calibration.log";
@@ -303,8 +303,7 @@ pub fn run() -> i32 {
     // The app's defaults, without what would drop the person or their controller: nothing saved.
     let set = Settings { hands: false, max_dist: 10.0, ..Settings::default() };
     // Starting from the app's saved rectification correction (read only: nothing here is saved), kept up like the app's
-    let home = std::env::var("HOME").unwrap_or_default();
-    let saved = Settings::load(format!("{home}/{}", crate::shm::CONF).into());
+    let saved = Settings::saved();
     let mut selfcal = crate::selfcal::SelfCal::new(saved.align);
     let size = SIZES.iter().position(|&s| s == set.size).unwrap_or(0);
     detector::SIZE.store(set.size, Ordering::Relaxed);

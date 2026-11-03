@@ -14,8 +14,8 @@
 //! a good share of them (the object, in front of what's behind it) is taken; fused with the box edges' disparity (the
 //! silhouette's, noisier but never the background's) when the two agree. Each depth comes with its std dev for the
 //! tracker: stereo error grows like z^2 / (f B).
+use crate::assign::assign;
 use crate::calib::Valid;
-use crate::tracker::assign;
 use crate::v3::{V3, v3};
 
 /// A box in one view (px).

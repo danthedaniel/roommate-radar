@@ -7,7 +7,7 @@ use crate::openvr::HmdMatrix34_t;
 use crate::settings::Settings;
 use crate::stereo::Obj;
 use crate::tracker::Meas;
-use crate::v3::{V3, v3};
+use crate::v3::{V3, apply, position, v3};
 
 /// person, cat, dog
 fn wanted(cls: usize, set: &Settings) -> bool {
@@ -21,15 +21,6 @@ pub fn name(cls: usize) -> &'static str {
         15 => "cat",
         _ => "dog",
     }
-}
-
-pub fn apply(m: &HmdMatrix34_t, p: V3) -> V3 {
-    let r = |i: usize| m.m[i][0] * p.x + m.m[i][1] * p.y + m.m[i][2] * p.z + m.m[i][3];
-    v3(r(0), r(1), r(2))
-}
-
-pub fn position(m: &HmdMatrix34_t) -> V3 {
-    v3(m.m[0][3], m.m[1][3], m.m[2][3])
 }
 
 /// Your own arms and hands (YOLO often calls them "person"; it doesn't know the controller, so an arm box can stop at

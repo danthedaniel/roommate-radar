@@ -7,6 +7,7 @@
 //! Steam runs bin/roommate-radar (roommate_radar-argv.json) in the Steam Linux Runtime container; it works from the
 //! install directory (models/, NotoSans-Medium.ttf, roommate-radar.vrmanifest), logs to /tmp/roommate-radar.log, and
 //! first does the setup an installer would (register.rs).
+mod assign;
 mod boxes;
 mod calib;
 mod calibrate;
@@ -57,7 +58,7 @@ fn controllers(seconds_from_now: f32) -> Vec<V3> {
             poses[i].bPoseIsValid
                 && vr().device_class(i as u32) == openvr::ETrackedDeviceClass_TrackedDeviceClass_Controller
         })
-        .map(|i| measure::position(&poses[i].mDeviceToAbsoluteTracking))
+        .map(|i| v3::position(&poses[i].mDeviceToAbsoluteTracking))
         .collect()
 }
 
@@ -123,8 +124,7 @@ fn run() -> i32 {
     register::setup();
     let mut tracker = tracker::Tracker::default();
     let mut trace = trace::Trace::new();
-    let home = std::env::var("HOME").unwrap_or_default();
-    let mut set = settings::Settings::load(format!("{home}/{}", shm::CONF).into());
+    let mut set = settings::Settings::saved();
     // How the driver starts the app with SteamVR (driver/autostart.rs)
     if let Some(gameid) = std::env::var("SteamGameId").ok().and_then(|g| g.parse().ok())
         && set.gameid != Some(gameid)
@@ -182,7 +182,7 @@ fn run() -> i32 {
         }
         let (head_now, head_valid) = head_pose(0.0);
         if head_valid {
-            let p = measure::position(&head_now);
+            let p = v3::position(&head_now);
             if last_head.is_some_and(|q| (p - q).len() > POSE_JUMP_M) {
                 tracker.tracks.clear();
             }

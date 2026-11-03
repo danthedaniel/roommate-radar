@@ -21,9 +21,8 @@
 use std::collections::VecDeque;
 
 use crate::detector::{self, DetectionSet};
-use crate::measure::apply;
 use crate::openvr::HmdMatrix34_t;
-use crate::v3::{V3, v3};
+use crate::v3::{V3, apply, v3};
 
 const GAIN: f32 = 0.3;
 const PUBLISH_RAD: f32 = 0.02 * std::f32::consts::PI / 180.0; // the rectification is rebuilt for a change of this much

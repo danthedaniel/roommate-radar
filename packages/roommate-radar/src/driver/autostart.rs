@@ -13,19 +13,17 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use crate::shm;
+use crate::settings::Settings;
 
 static STOP: AtomicBool = AtomicBool::new(false);
 const MARGIN: Duration = Duration::from_secs(10); // after the login; Steam's UI is ready ~0.1 s after it
 
 /// The app's launch URL, if it should start with SteamVR and has recorded its game id.
-fn launch_url(home: &str) -> Option<String> {
-    let conf = fs::read_to_string(format!("{home}/{}", shm::CONF)).ok()?;
-    let get = |k: &str| conf.lines().find_map(|l| l.strip_prefix(k)?.strip_prefix('=')).map(str::trim);
-    if get("autostart") == Some("0") {
+fn launch_url(s: &Settings) -> Option<String> {
+    if !s.autostart {
         return None;
     }
-    Some(format!("steam://rungameid/{}", get("gameid")?))
+    Some(format!("steam://rungameid/{}", s.gameid?))
 }
 
 /// When process `pid` started; None if there's no such process.
@@ -52,10 +50,10 @@ pub fn stop() {
 
 /// Waits for Steam (until stop()), then launches the app unless it's running already.
 pub fn run() {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let Some(url) = launch_url(&home) else {
+    let Some(url) = launch_url(&Settings::saved()) else {
         return;
     };
+    let home = std::env::var("HOME").unwrap_or_default();
     let logged_in = || -> Option<bool> {
         let steam = started(fs::read_to_string(format!("{home}/.steam/steam.pid")).ok()?.trim().parse().ok()?)?;
         Some(fs::metadata(format!("{home}/.steam/root/config/loginusers.vdf")).ok()?.modified().ok()? > steam)
@@ -102,16 +100,11 @@ mod tests {
 
     #[test]
     fn launch_url_from_the_apps_settings() {
-        let home = std::env::temp_dir().join(format!("roommate-radar-autostart-{}", std::process::id()));
-        std::fs::create_dir_all(home.join(".config")).unwrap();
-        let url = |conf: &str| {
-            std::fs::write(home.join(crate::shm::CONF), conf).unwrap();
-            super::launch_url(home.to_str().unwrap())
-        };
-        let on = url("enabled=1\ngameid=16375998297183092736\n");
-        let off = url("autostart=0\ngameid=16375998297183092736\n");
-        let never_started_by_steam = url("autostart=1\n");
-        std::fs::remove_dir_all(&home).unwrap();
+        use crate::settings::Settings;
+        let url = |autostart, gameid| super::launch_url(&Settings { autostart, gameid, ..Settings::default() });
+        let on = super::launch_url(&Settings { gameid: Some(16375998297183092736), ..Settings::default() });
+        let off = url(false, Some(16375998297183092736));
+        let never_started_by_steam = url(true, None);
         assert_eq!(on.as_deref(), Some("steam://rungameid/16375998297183092736"), "on by default");
         assert!(off.is_none() && never_started_by_steam.is_none());
     }

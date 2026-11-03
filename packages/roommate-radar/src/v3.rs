@@ -1,6 +1,8 @@
 //! 3D points and vectors (m): the head frame (x right, y up, looking along -z) and the standing universe.
 use std::ops::{Add, Mul, Sub};
 
+use crate::openvr::HmdMatrix34_t;
+
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct V3 {
     pub x: f32,
@@ -41,4 +43,15 @@ impl Mul<f32> for V3 {
     fn mul(self, s: f32) -> V3 {
         v3(self.x * s, self.y * s, self.z * s)
     }
+}
+
+/// The point p moved by the pose m.
+pub fn apply(m: &HmdMatrix34_t, p: V3) -> V3 {
+    let r = |i: usize| m.m[i][0] * p.x + m.m[i][1] * p.y + m.m[i][2] * p.z + m.m[i][3];
+    v3(r(0), r(1), r(2))
+}
+
+/// The pose m's origin.
+pub fn position(m: &HmdMatrix34_t) -> V3 {
+    v3(m.m[0][3], m.m[1][3], m.m[2][3])
 }

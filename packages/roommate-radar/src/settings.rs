@@ -1,6 +1,7 @@
 //! roommate-radar's settings: set from the dashboard tab (panel.rs), saved to ~/.config/roommate-radar.conf.
 use std::path::PathBuf;
 
+const CONF: &str = ".config/roommate-radar.conf"; // under $HOME; the driver's autostart reads it too
 pub const SIZES: [i32; 3] = [320, 480, 640];
 pub const RATES: [f32; 4] = [2.0, 4.0, 8.0, 16.0];
 pub const MIN_DIST: f32 = 1.5; // max_dist's range (m)
@@ -46,6 +47,11 @@ impl Default for Settings {
 }
 
 impl Settings {
+    /// What's saved in ~/.config/roommate-radar.conf.
+    pub fn saved() -> Settings {
+        Settings::load(format!("{}/{CONF}", std::env::var("HOME").unwrap_or_default()).into())
+    }
+
     /// The defaults, overridden by what's saved at `path`.
     pub fn load(path: PathBuf) -> Settings {
         let text = std::fs::read_to_string(&path).unwrap_or_default();
