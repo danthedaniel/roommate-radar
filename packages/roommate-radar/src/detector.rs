@@ -225,7 +225,7 @@ fn load_cal(name: &str, w: usize, h: usize) -> Result<calib::CamCal, String> {
 fn run(s: usize) -> Result<(), String> {
     LOADING.store(s as i32, Ordering::Relaxed);
     let t_load = now_ns();
-    let model = format!("models/yolo11n-grayscale_{s}_rr.ncnn");
+    let model = format!("models/yolo11n-grayscale_{s}_mixed.ncnn");
     let net = ncnn::Net::load(&model)?;
 
     let Some(hdr) = open_frames()? else {

@@ -15,8 +15,8 @@ jobs:
     steps:
       - uses: actions/checkout@v7
       - uses: astral-sh/setup-uv@v10.3.2 # publishes no major-version tag
-      # Its config is in pyproject.toml
-      - run: uvx basedpyright@1.40.2
+      # Its config is in pyproject.toml; Pillow for calib_prep.py, found through --pythonpath
+      - run: uv run --no-project --python 3.12 --with pillow --with basedpyright==1.40.2 sh -c 'basedpyright --pythonpath "$(command -v python)"'
 
   rust:
     name: Roommate Radar build and tests (Steam Runtime 4 SDK)

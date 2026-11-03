@@ -15,7 +15,7 @@ you're playing.
   the range, whether to detect within the play area, the detection resolution and rate, and whether to run only while a game is running.
 - Starts with SteamVR. No root and no system changes: it installs like a Steam app (in the Steam Linux Runtime 4
   container), plus a SteamVR driver that reads the camera frames.
-- Light on the GPU: YOLO11n at 480 px and 4 Hz (default, adjustable from 320 px up to 640 px and 16 Hz), on a
+- Light on the GPU: YOLO11n (mixed int8/fp16) at 480 px and 4 Hz (default, adjustable from 320 px up to 640 px and 16 Hz), on a
   low-priority queue the game preempts.
 
 ## Requirements
@@ -73,4 +73,5 @@ the measurements behind the defaults and what didn't work are in
 ## License
 
 [AGPL-3.0](LICENSE). It uses ncnn (BSD-3-Clause), the OpenVR SDK (BSD-3-Clause), Noto Sans (SIL OFL 1.1) and
-Ultralytics' YOLO11n weights (AGPL-3.0), which the build downloads.
+Ultralytics' YOLO11n weights (AGPL-3.0), which the build downloads, as it does 400 COCO val2017 images for the int8
+calibration (used at build time only, not shipped).

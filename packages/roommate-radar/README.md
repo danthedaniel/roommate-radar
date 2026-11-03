@@ -109,14 +109,36 @@ dropped), `tracker.rs`, `boxes.rs` (tracks as overlays), `panel.rs` (dashboard t
 
 ncnn is the submodule `third_party/ncnn`: https://github.com/danthedaniel/ncnn, a history-less snapshot of upstream
 c15904b plus our commits (`NCNN_QUEUE_GLOBAL_PRIORITY`, see above; C API calls for the GPU instance and winograd63;
-activation type 7 = Swish, so convs can take their Swish; `NCNN_BENCHMARK` phase/layer timing and benchncnn options).
+activation type 7 = Swish, so convs can take their Swish; `NCNN_BENCHMARK` phase/layer timing and benchncnn options;
+signed 4x8 integer dot reported as accelerated on the Adreno 750, see below).
 `SIMPLEVK=OFF` because its stub Vulkan types clash with `vulkan.h`.
 Models: Ultralytics' `yolo11n-grayscale.pt` (YOLO11n trained on grayscale COCO, 1-channel input;
 https://github.com/ultralytics/assets/releases/download/v8.4.0/yolo11n-grayscale.pt).
 `yolo export model=yolo11n-grayscale.pt format=ncnn imgsz=<2S>,<S>` (ultralytics) → rename `yolo11n-grayscale_ncnn_model/model.ncnn.*`
 to `models/yolo11n-grayscale_<S>.ncnn.{param,bin}`, then `python3 packages/roommate-radar/prep_model.py models/yolo11n-grayscale_<S>.ncnn`
-→ `yolo11n-grayscale_<S>_rr.ncnn.*`, which roommate-radar loads (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
+→ `yolo11n-grayscale_<S>_rr.ncnn.*` (attention MatMuls → Vulkan SDPA, since ncnn's MatMul is CPU-only;
 1/255 folded into the first conv; each Swish fused into its conv, 77 fewer dispatches). prep_model.py also takes the RGB `yolo11n.pt` export (GRAY2RGB folded in too).
+Then mixed precision, `yolo11n-grayscale_<S>_mixed.ncnn.*`, which roommate-radar loads: int8 on the convs listed for S
+in `int8_convs.txt`, fp16 elsewhere. int8 is fast here only through the hardware 4x8 dot product (`dp4acc`): ncnn's
+int8 shaders use it (`dotPacked4x8EXT`) only when the driver reports `integerDotProduct4x8BitPackedSignedAccelerated`,
+which the Frame's Mesa (26.3.0-devel) doesn't, though ir3 emits native `dp4acc.mixed.high` for it (signed x signed;
+`IR3_SHADER_DEBUG=disasm`); upstream Mesa reports it for a7xx gen3 since 2026-10-18 (f0bc8697b5, MR 45342), and our
+ncnn does on the 750 (`gpu.cpp`). Without it each byte is unpacked and multiplied in int32 (fp16 runs at double
+rate): all-int8 YOLO11n @480 37.9 ms, with it 27.9, bit-identical, vs 25.2 fp16. int8 wins per conv only for some:
+`int8_convs.txt` is the convs at least 5% faster in int8 at that size (`NCNN_BENCHMARK` benchncnn, per-layer medians of
+fp16 vs all-int8 with dummy scales), the stride-2 3x3s (~2x: conv_9 857 -> 443 us @480) and some 1x1s, never the
+detect head (conv_70 on; ~0.1 ms) or the depthwise convs. Remeasure it when the model or ncnn changes. The scales:
+`ncnn2table method=percentile` on `calib_images.txt`'s 400 COCO val2017 images with people, cats or dogs
+(`calib_prep.py`: gray, letterboxed, paired like the app's input; downloaded by build.sh, not shipped), then `ncnn2int8`.
+Scored on 600 other such images (pycocotools, ncnn Vulkan on the Frame), fp16 -> mixed, mAP50-95:
+
+  | S | all | person | cat | dog | 4 Hz run |
+  |-|-|-|-|-|-|
+  | 320 | 23.8 -> 23.6 | 38.2 -> 37.7 | 52.8 -> 53.6 | 34.9 -> 31.3 | 22.7 -> 19.4 ms |
+  | 480 | 31.0 -> 30.5 | 46.8 -> 46.3 | 63.7 -> 61.6 | 57.2 -> 54.2 | 34.3 -> 30.4 ms |
+  | 640 | 33.4 -> 33.0 | 50.9 -> 50.3 | 62.2 -> 63.5 | 65.2 -> 62.8 | 55.5 -> 47.1 ms |
+
+  (cats and dogs are in ~60 of the images each, so noisy). In the app @480: 34.4 -> 31.0 ms.
 All 80 classes are kept: a box is ours only when its best class is person, cat or dog (`detector.rs` `decode`).
 The export bakes in the input size, so each S needs its own (build.sh exports the tab's 320, 480 and 640).
 Grayscale vs RGB weights on 500 random COCO val2017 images (seed 0), gray, letterboxed and stacked two per 576x1152 input, ncnn
@@ -148,25 +170,13 @@ Idling between runs costs ~6 ms over back-to-back runs; the low queue priority c
 - YOLO attention as per-head ncnn `Gemm` (both inputs dynamic): ~21 ms per 64×648×648 product on Turnip. SDPA is ~5 ms.
 - ncnn Vulkan options: fp16 arithmetic, winograd, subgroup ops all best at their defaults. Shader local memory:
   ncnn turns `use_shader_local_memory` off on everything but discrete GPUs and Apple (`prefer_shader_local_memory`),
-  whatever the option says; forced on, YOLO11n @480 is 2.3 ms slower at 4 Hz (3.8 ms for the int8 mix below). Turnip's
+  whatever the option says; forced on, YOLO11n @480 is 2.3 ms slower at 4 Hz (3.8 ms for the int8 mix). Turnip's
   `computeFullSubgroups` (ncnn turns it off on Turnip) is only used by a reduction shader YOLO doesn't have.
-  No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 (`ncnn2table`/`ncnn2int8`, all layers still on the GPU):
-  50 ms @576 vs 32 ms fp16; every int8 conv is ~1.7x slower (no cooperative matrix on Turnip).
-  Why: ncnn's int8 shaders use the hardware 4x8 dot product (`dotPacked4x8EXT`) only when the driver reports
-  `integerDotProduct4x8BitPackedSignedAccelerated`, which the Frame's Mesa (26.3.0-devel) doesn't (only unsigned and
-  mixed); otherwise each byte is unpacked and multiplied in int32, while fp16 runs at double rate. Upstream Mesa
-  reports it for a7xx gen3 (the 750) since 2026-10-18 (f0bc8697b5, MR 45342). Forcing ncnn's dot path on the Frame
-  (output bit-identical): all-int8 YOLO11n @480 37.9 -> 27.9 ms vs 25.2 ms fp16; per layer, int8 is faster on 42 of
-  88 convs (the stride-2 3x3s ~2x: conv_9 857 -> 443 us; some 1x1s), slower on the rest and the depthwise convs,
-  ~1.9 ms of shader time if each conv picks the faster one. That mix (int8 on 28 convs: the 39 faster ones minus the detect head's 11),
-  calibrated with ncnn2table on 400 COCO val2017 images with people, cats or dogs (gray, letterboxed, paired like the
-  app's input), scored on 600 others (pycocotools): 32.1 -> 28.9 ms at 4 Hz; mAP50-95 all 31.0 -> 30.6, person
-  46.8 -> 46.4, cat 63.7 -> 61.9, dog 57.2 -> 54.8 (~60 images each, noisy) with `method=percentile`; `aciq` about
-  the same, `kl` far worse (25.7 all, 42.4 person, 45.8 dog), `eq` segfaults. Not shipped: needs the dot path forced
-  (the driver doesn't report it) and the calibration in the build.
-  Forced, the shaders compile to native `dp4acc.mixed.high` (signed x signed; `IR3_SHADER_DEBUG=disasm`). It's the only
-  such gate that pays: the other is `integerDotProduct16BitSignedAccelerated` (int8 winograd), and forcing it changes
-  nothing. Upstream Turnip/ir3 since 2026-04 enables nothing else for compute (no cooperative matrix).
+  No fp8 on the Adreno 750 (ncnn reports `fp8-cm=0`). int8 without the dot path (above): every conv ~1.7-2.2x slower.
+  int8 calibration: `kl` (ncnn2table's default) loses far more (mAP50-95 @480 all 25.7, person 42.4, dog 45.8 vs
+  30.5/46.3/54.2), `aciq` about like `percentile`, `eq` segfaults. The detect head in int8 gains nothing either way.
+  The only other driver-property gate in ncnn's shaders, `integerDotProduct16BitSignedAccelerated` (int8 winograd),
+  forced: no change. Upstream Turnip/ir3 since 2026-04 enables nothing else for compute (no cooperative matrix).
 - YOLO on the Hexagon NPU (QNN HTP): no FastRPC on the Frame. Valve's `dsp-sm8650` driver owns `/dev/cdsp`
   and `/dev/adsp` (DT `qcom,sm8650-hexagon`, no glink/fastrpc nodes, no remoteproc), and SteamVR's `dsp_service`
   boots its own stripped cDSP image (`drivers/cv/bin/linuxarm64/cdsp_sm8650.mbn`) that eyetracking (`-b CDSP`) talks

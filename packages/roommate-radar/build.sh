@@ -2,9 +2,10 @@
 # roommate-radar's build, the way a Store depot is built: in the Steam Runtime 4 arm64 SDK. Run by make build, or
 # directly; deploy.yml installs the result.
 # All on the Mac (arm64, so the SDK image runs natively in Docker Desktop's VM): the inputs (ncnn submodule, models,
-# OpenVR SDK pieces, font, rustup), then ncnn (into third_party/ncnn-install, where roommate-radar's build.rs finds it) and
-# roommate-radar (cargo, the toolchain in rust-toolchain.toml) built and tested with docker in the SDK image
-# (build-sdk/, incremental), and laid out in dist/roommate-radar as Steam installs it:
+# int8 calibration images, OpenVR SDK pieces, font, rustup), then ncnn (into third_party/ncnn-install, where
+# roommate-radar's build.rs finds it), the mixed-precision models (ncnn's quantize tools) and roommate-radar (cargo, the
+# toolchain in rust-toolchain.toml) built and tested with docker in the SDK image (build-sdk/, incremental), and laid
+# out in dist/roommate-radar as Steam installs it:
 #   NotoSans-Medium.ttf models/  bin/{roommate-radar,libopenvr_api.so}
 #   driver/{driver.vrdrivermanifest,bin/linuxarm64/driver_roommate_radar.so}
 # build.sh --check (CI): build and test only, without the models and dist/.
@@ -53,6 +54,15 @@ case $ncnn in *-dirty) ncnn= ;; esac
 	)
 done
 
+# int8 calibration input (calib_prep.py): calib_images.txt's COCO val2017 images (people, cats, dogs) as the app's input
+if [ ! "$check" ]; then
+	while read -r f h; do get "http://images.cocodataset.org/val2017/$f" "models/coco/$f" "$h"; done \
+		<packages/roommate-radar/calib_images.txt
+	[ models/calib/list.txt -nt packages/roommate-radar/calib_prep.py ] &&
+		[ models/calib/list.txt -nt packages/roommate-radar/calib_images.txt ] ||
+		uvx --with pillow python packages/roommate-radar/calib_prep.py models/coco models/calib
+fi
+
 # The OpenVR SDK's client library, which roommate-radar links and ships next to the binary (its C API: src/openvr_sys.rs)
 get https://raw.githubusercontent.com/ValveSoftware/openvr/v2.15.6/bin/linuxarm64/libopenvr_api.so \
 	third_party/openvr/bin/linuxarm64/libopenvr_api.so \
@@ -76,12 +86,31 @@ built=third_party/ncnn-install/commit
 if [ -z "$ncnn" ] || [ "$(cat $built 2>/dev/null)" != "$ncnn" ]; then
 	rm -f $built
 	cmake -S third_party/ncnn -B build-sdk/ncnn -G Ninja -DNCNN_VULKAN=ON -DNCNN_SIMPLEVK=OFF -DNCNN_SYSTEM_GLSLANG=ON \
-		-DGLSLANG_TARGET_DIR=/usr/lib/aarch64-linux-gnu/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=OFF \
-		-DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/src/third_party/ncnn-install >/dev/null
+		-DGLSLANG_TARGET_DIR=/usr/lib/aarch64-linux-gnu/cmake/glslang -DNCNN_SHARED_LIB=OFF -DNCNN_BUILD_TOOLS=ON \
+		-DNCNN_SIMPLEOCV=ON -DNCNN_BUILD_EXAMPLES=OFF -DCMAKE_INSTALL_PREFIX=/src/third_party/ncnn-install >/dev/null
 	cmake --build build-sdk/ncnn
 	cmake --install build-sdk/ncnn >/dev/null
 	[ -z "$ncnn" ] || echo "$ncnn" > $built
 fi
+# The mixed-precision models: int8 on int8_convs.txt'"'"'s convs for each size (faster in int8 on the Frame), scales
+# calibrated by ncnn2table (percentile; kl loses far more accuracy) on models/calib, the rest fp16
+q=/src/build-sdk/ncnn/tools/quantize
+[ -n "$check" ] || for s in 320 480 640; do
+	m=/src/models/yolo11n-grayscale_$s
+	for dep in ${m}_rr.ncnn.param models/calib/list.txt packages/roommate-radar/int8_convs.txt $q/ncnn2int8; do
+		[ ${m}_mixed.ncnn.param -nt $dep ] || { rm -f ${m}_mixed.ncnn.param; break; }
+	done
+	[ -f ${m}_mixed.ncnn.param ] && continue
+	(cd models/calib && $q/ncnn2table ${m}_rr.ncnn.param ${m}_rr.ncnn.bin list.txt $m.table "mean=[0]" "norm=[1]" \
+		"shape=[$s,$((2 * s)),1]" pixel=GRAY method=percentile thread=8 >/dev/null 2>&1) ||
+		{ echo "ncnn2table $s failed" >&2; exit 1; }
+	for c in $(sed -n "s/^$s //p" packages/roommate-radar/int8_convs.txt); do
+		grep -E "^${c}(_param_0)? " $m.table
+	done >$m.int8.table
+	$q/ncnn2int8 ${m}_rr.ncnn.param ${m}_rr.ncnn.bin ${m}_mixed.ncnn.param ${m}_mixed.ncnn.bin $m.int8.table \
+		>/dev/null 2>&1 || { echo "ncnn2int8 $s failed" >&2; exit 1; }
+	echo "quantized $s: $(grep -c " 8=" ${m}_mixed.ncnn.param) convs int8"
+done
 [ -x "$CARGO_HOME/bin/cargo" ] || { chmod +x build-sdk/rust/rustup-init
 	build-sdk/rust/rustup-init -y -q --no-modify-path --profile minimal --default-toolchain none; }
 export PATH="$CARGO_HOME/bin:$PATH"
@@ -94,7 +123,7 @@ d=/src/dist/roommate-radar
 rm -rf $d
 mkdir -p $d/bin $d/driver/bin/linuxarm64 $d/models
 cp /src/third_party/fonts/NotoSans-Medium.ttf $d/
-cp /src/models/*_rr.ncnn.* $d/models/
+cp /src/models/*_mixed.ncnn.* $d/models/
 cp $CARGO_TARGET_DIR/release/roommate-radar /src/third_party/openvr/bin/linuxarm64/libopenvr_api.so $d/bin/
 cp driver.vrdrivermanifest $d/driver/
 cp $CARGO_TARGET_DIR/release/libdriver_roommate_radar.so $d/driver/bin/linuxarm64/driver_roommate_radar.so'
