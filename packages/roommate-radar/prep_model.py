@@ -59,7 +59,7 @@ for n, l in enumerate(lines[2:], 2):
         readers[blob] = readers.get(blob, 0) + 1
     for blob in f[4 + ni : 4 + ni + no]:
         producer[blob] = n
-fused = set()
+fused: set[int] = set()
 for n, l in enumerate(lines[2:], 2):
     f = l.split()
     if f[0] != "Swish":
